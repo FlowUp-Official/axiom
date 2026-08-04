@@ -1,17 +1,13 @@
-mod cache;
-mod catalog;
-mod codegen;
-mod config;
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+use axiom::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
+use axiom::catalog::{parse_sql_catalog, TableCatalog};
+use axiom::codegen::{generate_rust, generate_typescript};
+use axiom::config::{AxiomConfig, OutputConfig};
+use axiom::db;
 use clap::{Parser, Subcommand};
-
-use cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
-use catalog::{parse_sql_catalog, TableCatalog};
-use codegen::{generate_rust, generate_typescript};
-use config::{AxiomConfig, OutputConfig};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -79,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Generate(args) => run_generate(args, &config, &config_path).await,
-        Commands::Push(args) => run_push(args).await,
+        Commands::Push(args) => run_push(args, &config, &config_path).await,
     }
 }
 
@@ -88,6 +84,27 @@ fn load_env(env_file: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>
         dotenvy::from_path(path)?;
     }
     Ok(())
+}
+
+/// Resolve the configured schema glob patterns into ordered file paths,
+/// relative to the directory containing the config file.
+fn resolve_schema_paths(
+    config: &AxiomConfig,
+    base: &Path,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+    for pattern in &config.inputs.schema {
+        let pattern_path = Path::new(pattern);
+        let joined = if pattern_path.is_absolute() {
+            pattern.to_string()
+        } else {
+            base.join(pattern).to_string_lossy().into_owned()
+        };
+        for path in glob::glob(&joined)? {
+            paths.push(path?);
+        }
+    }
+    Ok(paths)
 }
 
 async fn run_generate(
@@ -103,18 +120,9 @@ async fn run_generate(
         .unwrap_or_else(|| Path::new("."));
 
     let mut sources: Vec<(PathBuf, String)> = Vec::new();
-    for pattern in &config.inputs.schema {
-        let pattern_path = Path::new(pattern);
-        let joined = if pattern_path.is_absolute() {
-            pattern.to_string()
-        } else {
-            base.join(pattern).to_string_lossy().into_owned()
-        };
-        for path in glob::glob(&joined)? {
-            let path = path?;
-            let sql = std::fs::read_to_string(&path)?;
-            sources.push((path, sql));
-        }
+    for path in resolve_schema_paths(config, base)? {
+        let sql = std::fs::read_to_string(&path)?;
+        sources.push((path, sql));
     }
 
     // BLAKE3 hashes of the config file and every resolved input file.
@@ -182,12 +190,34 @@ async fn run_generate(
     Ok(())
 }
 
-async fn run_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
-    load_env(args.env_file.as_ref())?;
+async fn run_push(
+    args: PushArgs,
+    config: &AxiomConfig,
+    config_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
 
-    match args.db_url {
-        Some(_) => println!("push: database push is not implemented yet"),
-        None => println!("push: not implemented yet"),
+    let db_url = db::resolve_db_url(args.db_url, args.env_file.as_deref())?;
+    let schema_files = resolve_schema_paths(config, base)?;
+    if schema_files.is_empty() {
+        println!(
+            "[axiom] no schema files matched `{}`; nothing to push",
+            config.inputs.schema.join(", ")
+        );
+        return Ok(());
     }
+
+    let client = db::connect(&db_url).await?;
+    let started = Instant::now();
+    let count = db::push_schema(&client, &schema_files).await?;
+    println!(
+        "[axiom] Database schema push complete! ({} file{} in {}ms)",
+        count,
+        if count == 1 { "" } else { "s" },
+        started.elapsed().as_millis(),
+    );
     Ok(())
 }
