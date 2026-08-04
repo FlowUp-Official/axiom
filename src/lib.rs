@@ -5,3 +5,4 @@ pub mod catalog;
 pub mod codegen;
 pub mod config;
 pub mod db;
+pub mod query;

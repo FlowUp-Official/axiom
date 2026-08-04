@@ -5,7 +5,13 @@ use crate::catalog::{ColumnSchema, RuleKind, TableSchema};
 /// Convert a table name such as `public.users` into a PascalCase type name,
 /// e.g. `Users`.
 pub fn type_name(table: &TableSchema) -> String {
-    let last = table.name.rsplit('.').next().unwrap_or(&table.name);
+    pascal_case(&table.name)
+}
+
+/// Convert a dotted name such as `public.users` (or any snake/kebab/dotted
+/// string) into a PascalCase identifier, e.g. `Users`.
+pub fn pascal_case(name: &str) -> String {
+    let last = name.rsplit('.').next().unwrap_or(name);
     let mut out = String::new();
     let mut cap = true;
     for c in last.chars() {
@@ -126,6 +132,24 @@ pub fn escape_ts(s: &str) -> String {
 /// Escape a string for embedding in a double-quoted Rust string literal.
 pub fn escape_rust(s: &str) -> String {
     escape_ts(s)
+}
+
+/// Escape a string for embedding in a JavaScript/TypeScript template literal
+/// body. Backticks, backslashes, and literal `${` sequences are escaped so that
+/// only the placeholders the generator injects interpolate. Positional `$1`
+/// style markers are left untouched for placeholder substitution.
+pub fn escape_ts_template(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '`' => out.push_str("\\`"),
+            '\\' => out.push_str("\\\\"),
+            '$' if it.peek() == Some(&'{') => out.push_str("\\$"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Build a JavaScript regex literal from a pattern string, escaping `/`.

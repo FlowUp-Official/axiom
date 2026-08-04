@@ -102,8 +102,13 @@ impl<'a> TableCatalog<'a> {
 /// A trailing `msg="..."` segment acts as the column-level fallback message:
 /// rules without their own inline `[msg="..."]` inherit it.
 pub fn parse_annotation_line<'a>(line: &'a str) -> Vec<ValidationRule<'a>> {
-    let content = strip_annotation_prefix(line);
+    parse_rules_content(strip_annotation_prefix(line))
+}
 
+/// Parse a bare rule list (no `--`/`@validate` prefix) such as
+/// `email[msg="Bad"], min_len=5` into validation rules. Shared by column
+/// annotations and `-- @validate <param>(<rules>)` query lines.
+pub(crate) fn parse_rules_content<'a>(content: &'a str) -> Vec<ValidationRule<'a>> {
     let mut fallback: Option<Cow<'a, str>> = None;
     let mut parsed_segments = Vec::new();
 
@@ -166,7 +171,7 @@ struct ParsedSegment<'a> {
 }
 
 /// Split a string on `delimiter`, ignoring delimiters inside double quotes.
-fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
+pub(crate) fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut in_quotes = false;

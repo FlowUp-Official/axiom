@@ -7,6 +7,7 @@ use axiom::catalog::{parse_sql_catalog, TableCatalog};
 use axiom::codegen::{generate_rust, generate_typescript};
 use axiom::config::{AxiomConfig, OutputConfig};
 use axiom::db;
+use axiom::query::{parse_query_file, QueryCatalog};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -86,14 +87,14 @@ fn load_env(env_file: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Resolve the configured schema glob patterns into ordered file paths,
-/// relative to the directory containing the config file.
-fn resolve_schema_paths(
-    config: &AxiomConfig,
+/// Resolve the configured glob patterns into ordered file paths, relative to
+/// the directory containing the config file.
+fn resolve_glob_paths(
+    patterns: &[String],
     base: &Path,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut paths = Vec::new();
-    for pattern in &config.inputs.schema {
+    for pattern in patterns {
         let pattern_path = Path::new(pattern);
         let joined = if pattern_path.is_absolute() {
             pattern.to_string()
@@ -120,15 +121,22 @@ async fn run_generate(
         .unwrap_or_else(|| Path::new("."));
 
     let mut sources: Vec<(PathBuf, String)> = Vec::new();
-    for path in resolve_schema_paths(config, base)? {
+    for path in resolve_glob_paths(&config.inputs.schema, base)? {
         let sql = std::fs::read_to_string(&path)?;
         sources.push((path, sql));
     }
 
-    // BLAKE3 hashes of the config file and every resolved input file.
+    let mut query_sources: Vec<(PathBuf, String)> = Vec::new();
+    for path in resolve_glob_paths(&config.inputs.queries, base)? {
+        let sql = std::fs::read_to_string(&path)?;
+        query_sources.push((path, sql));
+    }
+
+    // BLAKE3 hashes of the config file and every resolved input file (schema
+    // and query sources alike, so edits to queries invalidate the cache).
     let config_hash = compute_file_hash(config_path)?;
     let mut file_hashes = BTreeMap::new();
-    for (path, _) in &sources {
+    for (path, _) in sources.iter().chain(&query_sources) {
         file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
     }
 
@@ -148,12 +156,19 @@ async fn run_generate(
         catalog.tables.extend(parse_sql_catalog(sql)?.tables);
     }
 
+    let mut query_catalog = QueryCatalog::default();
+    for (_, sql) in &query_sources {
+        query_catalog.queries.extend(parse_query_file(sql).queries);
+    }
+
     let generated: Vec<(String, String)> = config
         .outputs
         .iter()
         .map(|(name, output)| match output {
-            OutputConfig::TypeScript(_) => (name.clone(), generate_typescript(&catalog)),
-            OutputConfig::Rust(_) => (name.clone(), generate_rust(&catalog)),
+            OutputConfig::TypeScript(_) => {
+                (name.clone(), generate_typescript(&catalog, &query_catalog))
+            }
+            OutputConfig::Rust(_) => (name.clone(), generate_rust(&catalog, &query_catalog)),
         })
         .collect();
 
@@ -175,10 +190,18 @@ async fn run_generate(
 
     write_cache_atomically(&cache_path, config_hash, file_hashes)?;
 
+    let query_count = query_catalog.queries.len();
+    let query_part = if query_count == 0 {
+        String::new()
+    } else {
+        let word = if query_count == 1 { "query" } else { "queries" };
+        format!(" and {query_count} {word}")
+    };
     println!(
-        "generated {} target(s) from {} table(s): {}",
+        "generated {} target(s) from {} table(s){}: {}",
         generated.len(),
         catalog.tables.len(),
+        query_part,
         catalog
             .tables
             .iter()
@@ -201,7 +224,7 @@ async fn run_push(
         .unwrap_or_else(|| Path::new("."));
 
     let db_url = db::resolve_db_url(args.db_url, args.env_file.as_deref())?;
-    let schema_files = resolve_schema_paths(config, base)?;
+    let schema_files = resolve_glob_paths(&config.inputs.schema, base)?;
     if schema_files.is_empty() {
         println!(
             "[axiom] no schema files matched `{}`; nothing to push",

@@ -18,6 +18,18 @@ CREATE TABLE users (
 );
 "#;
 
+const QUERIES_SQL: &str = r#"
+-- @fn get_user(email: String) : Users
+SELECT id, email FROM users WHERE email = $1
+
+-- @validate email(email, trim, lower)
+-- @fn get_users(limit: Int) : Users[]
+SELECT id, email FROM users ORDER BY id LIMIT $1
+
+-- @fn delete_user(id: BigInt) : Exec
+DELETE FROM users WHERE id = $1
+"#;
+
 fn fixture_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -29,12 +41,13 @@ fn fixture_dir(name: &str) -> PathBuf {
 }
 
 fn write_fixture(dir: &Path, schema: &str) {
+    std::fs::create_dir_all(dir.join("queries")).unwrap();
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
-  "inputs": { "schema": ["schema.sql"], "queries": [] },
+  "inputs": { "schema": ["schema.sql"], "queries": ["queries/accounts.sql"] },
   "validation": { "on_error": "fail" },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },
@@ -45,6 +58,7 @@ fn write_fixture(dir: &Path, schema: &str) {
     )
     .unwrap();
     std::fs::write(dir.join("schema.sql"), schema).unwrap();
+    std::fs::write(dir.join("queries/accounts.sql"), QUERIES_SQL).unwrap();
 }
 
 fn run_generate(dir: &Path) -> Output {
@@ -82,6 +96,22 @@ fn generates_typescript_and_rust_outputs() {
     assert!(ts.contains("UUID_RE.test(input.externalId)"));
     assert!(!ts.contains("const IPV6_RE ="), "unused preset should not be emitted");
 
+    assert!(ts.contains("import type { Sql } from 'postgres';"));
+    assert!(ts.contains("export interface GetUserParams {"));
+    assert!(ts.contains("  email: string;"));
+    assert!(ts.contains("  limit: number;"));
+    assert!(ts.contains("export async function getUser("));
+    assert!(ts.contains("  sql: Sql,"));
+    assert!(ts.contains("  params: GetUserParams"));
+    assert!(ts.contains("): Promise<Users | null> {"));
+    assert!(ts.contains("SELECT id, email FROM users WHERE email = ${params.email}"));
+    assert!(ts.contains("const email = params.email.trim().toLowerCase();"));
+    assert!(ts.contains("errors.push({ path: \"email\", message: \"must be a valid email address\" });"));
+    assert!(ts.contains("export async function getUsers("));
+    assert!(ts.contains("): Promise<Users[]> {"));
+    assert!(ts.contains("export async function deleteUser("));
+    assert!(ts.contains("): Promise<void> {"));
+
     let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
     assert!(rs.contains("pub struct Users {"));
     assert!(rs.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
@@ -89,6 +119,23 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("message: \"Bad Email\".to_string()"));
     assert!(rs.contains("if let Some(value) = &self.external_id {"));
     assert!(rs.contains("fn is_uuid(value: &str) -> bool {"));
+
+    assert!(rs.contains("pub struct GetUserParams {"));
+    assert!(rs.contains("pub email: String,"));
+    assert!(rs.contains("pub async fn get_user("));
+    assert!(rs.contains("pool: &sqlx::PgPool,"));
+    assert!(rs.contains(") -> Result<Option<Users>, Box<dyn std::error::Error>> {"));
+    assert!(rs.contains("params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"));
+    assert!(rs.contains("sqlx::query_as!("));
+    assert!(rs.contains(".fetch_optional(pool)"));
+    assert!(rs.contains("pub async fn get_users("));
+    assert!(rs.contains(") -> Result<Vec<Users>, Box<dyn std::error::Error>> {"));
+    assert!(rs.contains(".fetch_all(pool)"));
+    assert!(rs.contains("pub async fn delete_user("));
+    assert!(rs.contains("sqlx::query("));
+    assert!(rs.contains(".bind(params.id)"));
+    assert!(rs.contains(".execute(pool)"));
+    assert!(rs.contains("fn is_email(value: &str) -> bool {"));
 }
 
 #[test]
@@ -154,5 +201,38 @@ fn malformed_schema_errors_cleanly() {
         !output.status.success(),
         "expected failure for malformed SQL, got success: {}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn query_change_invalidates_cache_and_regenerates() {
+    let dir = fixture_dir("run_query_invalidation");
+    write_fixture(&dir, SCHEMA_SQL);
+
+    let first = run_generate(&dir);
+    assert!(first.status.success(), "{}", stdout(&first));
+    assert!(stdout(&first).contains("generated 2 target(s)"));
+    assert!(stdout(&first).contains("3 queries"), "summary should count queries");
+
+    let second = run_generate(&dir);
+    assert!(stdout(&second).contains("Everything up to date (<0.5ms)"));
+
+    // Edit a query file: the BLAKE3 cache must miss and codegen reruns.
+    let queries = dir.join("queries/accounts.sql");
+    let contents = std::fs::read_to_string(&queries).unwrap();
+    std::fs::write(&queries, contents.replace("LIMIT $1", "LIMIT $1::int")).unwrap();
+
+    let third = run_generate(&dir);
+    assert!(third.status.success(), "{}", stdout(&third));
+    assert!(
+        stdout(&third).contains("generated 2 target(s)"),
+        "expected regeneration after query change, got: {}",
+        stdout(&third)
+    );
+
+    let ts = std::fs::read_to_string(dir.join("gen/api.ts")).unwrap();
+    assert!(
+        ts.contains("LIMIT ${params.limit}::int"),
+        "query body should be regenerated"
     );
 }
