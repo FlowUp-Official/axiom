@@ -72,6 +72,15 @@ fn run_generate(dir: &Path) -> Output {
         .expect("failed to run axiom binary")
 }
 
+fn run_init(dir: &Path, force: bool) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_axiom"));
+    cmd.current_dir(dir).arg("init");
+    if force {
+        cmd.arg("--force");
+    }
+    cmd.output().expect("failed to run axiom binary")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -235,5 +244,58 @@ fn query_change_invalidates_cache_and_regenerates() {
     assert!(
         ts.contains("LIMIT ${params.limit}::int"),
         "query body should be regenerated"
+    );
+}
+
+#[test]
+fn init_creates_valid_config_file() {
+    let dir = fixture_dir("run_init_create");
+    std::fs::write(dir.join("placeholder.txt"), "").unwrap();
+
+    let output = run_init(&dir, false);
+    assert!(
+        output.status.success(),
+        "init failed: {}",
+        stdout(&output)
+    );
+
+    let path = dir.join("axiom.json");
+    assert!(path.exists(), "axiom.json should be created");
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+    assert_eq!(
+        value["$schema"].as_str(),
+        Some(concat!(
+            "https://raw.githubusercontent.com/FlowUp-Official/axiom/v",
+            env!("CARGO_PKG_VERSION"),
+            "/schemas/axiom.schema.json"
+        ))
+    );
+    assert!(stdout(&output).contains("Initialized new axiom.json configuration file"));
+}
+
+#[test]
+fn init_refuses_overwrite_then_force_overwrites() {
+    let dir = fixture_dir("run_init_force");
+    std::fs::write(dir.join("placeholder.txt"), "").unwrap();
+
+    let first = run_init(&dir, false);
+    assert!(first.status.success(), "{}", stdout(&first));
+
+    let second = run_init(&dir, false);
+    assert!(
+        !second.status.success(),
+        "second init without --force should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("already exists"),
+        "stderr should mention the existing file"
+    );
+
+    let third = run_init(&dir, true);
+    assert!(
+        third.status.success(),
+        "init with --force should succeed: {}",
+        stdout(&third)
     );
 }

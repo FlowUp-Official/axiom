@@ -8,6 +8,15 @@ use crate::errors::AxiomError;
 
 pub const DEFAULT_CONFIG_FILE: &str = "axiom.json";
 
+/// Canonical location of the JSON schema for the running CLI version. The tag
+/// follows the `v<version>` convention used by the release workflow, so every
+/// published release gets a dedicated, immutable schema URL.
+pub const SCHEMA_VERSION_URL: &str = concat!(
+    "https://raw.githubusercontent.com/FlowUp-Official/axiom/v",
+    env!("CARGO_PKG_VERSION"),
+    "/schemas/axiom.schema.json"
+);
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectConfig {
     pub name: String,
@@ -125,6 +134,66 @@ impl AxiomConfig {
         let schema = schemars::schema_for!(AxiomConfig);
         serde_json::to_string_pretty(&schema).expect("AxiomConfig schema is always serializable")
     }
+
+    /// Build a fully-populated configuration with sensible defaults, suitable
+    /// for bootstrapping a new project with `axiom init`.
+    pub fn default_template() -> Self {
+        let project_name = std::env::current_dir()
+            .ok()
+            .and_then(|dir| dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "my-axiom-project".to_string());
+
+        Self {
+            schema: Some(SCHEMA_VERSION_URL.to_string()),
+            project: ProjectConfig {
+                name: project_name,
+                dialect: "postgres".to_string(),
+            },
+            cache: CacheConfig::default(),
+            inputs: InputsConfig {
+                schema: vec!["./schema.sql".to_string()],
+                queries: vec!["./queries/**/*.sql".to_string()],
+            },
+            validation: ValidationConfig {
+                on_error: "fail".to_string(),
+            },
+            outputs: BTreeMap::from([
+                (
+                    "api".to_string(),
+                    OutputConfig::TypeScript(TypeScriptOutput {
+                        path: PathBuf::from("./gen/api.ts"),
+                    }),
+                ),
+                (
+                    "core".to_string(),
+                    OutputConfig::Rust(RustOutput {
+                        path: PathBuf::from("./gen/api.rs"),
+                    }),
+                ),
+            ]),
+        }
+    }
+
+    /// Bootstrap a new `axiom.json` file at `path`, refusing to overwrite an
+    /// existing file unless `force` is set.
+    pub fn init_config(path: &Path, force: bool) -> Result<(), AxiomError> {
+        if path.exists() && !force {
+            return Err(AxiomError::ConfigAlreadyExists {
+                path: path.display().to_string(),
+            });
+        }
+
+        let contents = serde_json::to_string_pretty(&Self::default_template())
+            .expect("AxiomConfig template is always serializable");
+
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, contents)?;
+
+        Ok(())
+    }
 }
 
 /// Validate a raw `axiom.json` document against the generated JSON schema.
@@ -214,5 +283,71 @@ mod tests {
             err.contains("inputs"),
             "expected the error to mention the missing key, got: {err}"
         );
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test_fixtures")
+            .join(format!("init_{name}"));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn default_template_is_valid_axiom_config() {
+        let value = serde_json::to_value(AxiomConfig::default_template())
+            .expect("template serializes to JSON");
+        assert_eq!(validate_config_json(&value), Ok(()));
+
+        let schema = value.get("$schema").and_then(|s| s.as_str());
+        assert_eq!(schema, Some(SCHEMA_VERSION_URL));
+        assert!(
+            !schema.unwrap().contains("/main/"),
+            "schema URL must pin the CLI version, not main: {}",
+            schema.unwrap()
+        );
+    }
+
+    #[test]
+    fn init_config_creates_valid_file() {
+        let path = fixture_path("create");
+        AxiomConfig::init_config(&path, false).expect("init should succeed");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(validate_config_json(&value), Ok(()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn init_config_refuses_overwrite_without_force() {
+        let path = fixture_path("exists");
+        AxiomConfig::init_config(&path, false).expect("first init should succeed");
+
+        let err = AxiomConfig::init_config(&path, false)
+            .expect_err("second init without --force should fail");
+        assert!(
+            matches!(err, AxiomError::ConfigAlreadyExists { .. }),
+            "expected ConfigAlreadyExists, got: {err}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn init_config_overwrites_with_force() {
+        let path = fixture_path("force");
+        AxiomConfig::init_config(&path, false).expect("first init should succeed");
+
+        std::fs::write(&path, r#"{ "project": { "name": "old", "dialect": "mysql" } }"#).unwrap();
+        AxiomConfig::init_config(&path, true).expect("forced init should succeed");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert!(value["outputs"]["core"]["type"].is_string(), "template was written");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

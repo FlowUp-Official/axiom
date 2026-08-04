@@ -32,6 +32,16 @@ struct Cli {
 enum Commands {
     /// Print the JSON schema for `axiom.json` files to stdout.
     Schema,
+    /// Initialize a new axiom.json configuration file in the current directory.
+    Init {
+        /// Path to write the configuration file to (defaults to ./axiom.json).
+        #[arg(short, long, default_value = "axiom.json")]
+        output: PathBuf,
+
+        /// Overwrite the existing configuration file if it already exists.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Generate typed output from the configured inputs.
     Generate(GenerateArgs),
     /// Push generated output to a target database.
@@ -74,9 +84,26 @@ async fn main() -> miette::Result<()> {
 async fn run() -> Result<(), AxiomError> {
     let cli = Cli::parse();
 
-    if matches!(cli.command, Commands::Schema) {
-        println!("{}", AxiomConfig::generate_json_schema());
-        return Ok(());
+    match &cli.command {
+        Commands::Schema => {
+            println!("{}", AxiomConfig::generate_json_schema());
+            return Ok(());
+        }
+        Commands::Init { output, force } => {
+            AxiomConfig::init_config(output, *force)?;
+            println!(
+                "{}",
+                "✔ Initialized new axiom.json configuration file"
+                    .if_supports_color(Stream::Stdout, |s| s.green().bold().to_string()),
+            );
+            println!(
+                "{}",
+                "Run 'axiom generate' to compile your SQL schemas."
+                    .if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
+            );
+            return Ok(());
+        }
+        _ => {}
     }
 
     let (config, config_path) = AxiomConfig::find_and_load(cli.config.as_deref())?;
@@ -102,7 +129,9 @@ async fn run() -> Result<(), AxiomError> {
     match cli.command {
         Commands::Generate(args) => run_generate(args, &config, &config_path).await,
         Commands::Push(args) => run_push(args, &config, &config_path).await,
-        Commands::Schema => unreachable!("handled before config loading"),
+        Commands::Schema | Commands::Init { .. } => {
+            unreachable!("handled before config loading")
+        }
     }
 }
 

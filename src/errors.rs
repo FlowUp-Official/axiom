@@ -42,6 +42,14 @@ pub enum AxiomError {
     )]
     ConfigValidationFailed { path: PathBuf, errors: String },
 
+    /// `axiom init` was run against an existing configuration file.
+    #[error("Configuration file `{path}` already exists.")]
+    #[diagnostic(
+        code(axiom::config::already_exists),
+        help("Use `--force` to overwrite the existing configuration file, or specify a different path with `--output <PATH>`.")
+    )]
+    ConfigAlreadyExists { path: String },
+
     /// A `-- @fn` annotation line does not follow the expected signature.
     #[error("Invalid annotation syntax: {message}")]
     #[diagnostic(
