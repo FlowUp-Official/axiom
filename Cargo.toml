@@ -1,0 +1,15 @@
+[package]
+name = "axiom"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.8.5"
+clap = { version = "4.6.5", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+glob = "0.3.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sqlparser = "0.62.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-postgres = "0.7.18"
