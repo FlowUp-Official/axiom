@@ -132,10 +132,10 @@ async fn run_generate(
         query_sources.push((path, sql));
     }
 
-    // BLAKE3 hashes of the config file and every resolved input file (schema
+    // BLAKE3 digests of the config file and every resolved input file (schema
     // and query sources alike, so edits to queries invalidate the cache).
     let config_hash = compute_file_hash(config_path)?;
-    let mut file_hashes = BTreeMap::new();
+    let mut file_hashes: BTreeMap<String, [u8; 32]> = BTreeMap::new();
     for (path, _) in sources.iter().chain(&query_sources) {
         file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
     }
