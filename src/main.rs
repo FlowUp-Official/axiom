@@ -7,8 +7,10 @@ use axiom::catalog::{parse_sql_catalog, TableCatalog};
 use axiom::codegen::{generate_rust, generate_typescript};
 use axiom::config::{AxiomConfig, OutputConfig};
 use axiom::db;
+use axiom::errors::AxiomError;
 use axiom::query::{parse_query_file, QueryCatalog};
 use clap::{Parser, Subcommand};
+use owo_colors::{OwoColorize, Stream};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,7 +59,17 @@ struct PushArgs {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> miette::Result<()> {
+    miette::set_panic_hook();
+
+    if let Err(err) = run().await {
+        eprintln!("{:?}", miette::Report::new(err));
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn run() -> Result<(), AxiomError> {
     let cli = Cli::parse();
 
     let (config, config_path) = AxiomConfig::find_and_load(cli.config.as_deref())?;
@@ -65,8 +77,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let targets = config.target_types();
     println!(
         "loaded configuration `{}` for project `{}` (targets: {})",
-        config_path.display(),
-        config.project.name,
+        config_path
+            .display()
+            .to_string()
+            .if_supports_color(Stream::Stdout, |s| s.cyan().to_string()),
+        config
+            .project
+            .name
+            .if_supports_color(Stream::Stdout, |s| s.bold().to_string()),
         if targets.is_empty() {
             "none".to_string()
         } else {
@@ -80,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn load_env(env_file: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn load_env(env_file: Option<&PathBuf>) -> Result<(), AxiomError> {
     if let Some(path) = env_file {
         dotenvy::from_path(path)?;
     }
@@ -92,7 +110,7 @@ fn load_env(env_file: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>
 fn resolve_glob_paths(
     patterns: &[String],
     base: &Path,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+) -> Result<Vec<PathBuf>, AxiomError> {
     let mut paths = Vec::new();
     for pattern in patterns {
         let pattern_path = Path::new(pattern);
@@ -112,7 +130,7 @@ async fn run_generate(
     args: GenerateArgs,
     config: &AxiomConfig,
     config_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), AxiomError> {
     load_env(args.env_file.as_ref())?;
 
     let base = config_path
@@ -147,7 +165,13 @@ async fn run_generate(
     };
 
     if config.cache.enabled && is_cache_valid(&cache_path, &config_hash, &file_hashes) {
-        println!("Everything up to date (<0.5ms)");
+        println!(
+            "{} {}",
+            "Everything up to date".if_supports_color(Stream::Stdout, |s| {
+                s.green().bold().to_string()
+            }),
+            "(<0.5ms)".if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
+        );
         return Ok(());
     }
 
@@ -158,7 +182,7 @@ async fn run_generate(
 
     let mut query_catalog = QueryCatalog::default();
     for (_, sql) in &query_sources {
-        query_catalog.queries.extend(parse_query_file(sql).queries);
+        query_catalog.queries.extend(parse_query_file(sql)?.queries);
     }
 
     let generated: Vec<(String, String)> = config
@@ -197,17 +221,22 @@ async fn run_generate(
         let word = if query_count == 1 { "query" } else { "queries" };
         format!(" and {query_count} {word}")
     };
-    println!(
-        "generated {} target(s) from {} table(s){}: {}",
+    let summary = format!(
+        "generated {} target(s) from {} table(s){}:",
         generated.len(),
         catalog.tables.len(),
         query_part,
-        catalog
-            .tables
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+    );
+    let tables = catalog
+        .tables
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "{} {}",
+        summary.if_supports_color(Stream::Stdout, |s| s.green().bold().to_string()),
+        tables.if_supports_color(Stream::Stdout, |s| s.cyan().to_string()),
     );
 
     Ok(())
@@ -217,7 +246,7 @@ async fn run_push(
     args: PushArgs,
     config: &AxiomConfig,
     config_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), AxiomError> {
     let base = config_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -226,9 +255,13 @@ async fn run_push(
     let db_url = db::resolve_db_url(args.db_url, args.env_file.as_deref())?;
     let schema_files = resolve_glob_paths(&config.inputs.schema, base)?;
     if schema_files.is_empty() {
-        println!(
+        let notice = format!(
             "[axiom] no schema files matched `{}`; nothing to push",
             config.inputs.schema.join(", ")
+        );
+        println!(
+            "{}",
+            notice.if_supports_color(Stream::Stdout, |s| s.yellow().to_string())
         );
         return Ok(());
     }
@@ -236,11 +269,19 @@ async fn run_push(
     let client = db::connect(&db_url).await?;
     let started = Instant::now();
     let count = db::push_schema(&client, &schema_files).await?;
-    println!(
-        "[axiom] Database schema push complete! ({} file{} in {}ms)",
+    let timing = format!(
+        "({} file{} in {}ms)",
         count,
         if count == 1 { "" } else { "s" },
         started.elapsed().as_millis(),
+    );
+    println!(
+        "{} {}",
+        "[axiom] Database schema push complete!".if_supports_color(
+            Stream::Stdout,
+            |s| s.green().bold().to_string()
+        ),
+        timing.if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
     );
     Ok(())
 }

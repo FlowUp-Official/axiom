@@ -13,6 +13,8 @@ use std::path::Path;
 use memmap2::{Mmap, MmapOptions};
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::errors::AxiomError;
+
 /// Persisted cache manifest, archived in zero-copy form.
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
 pub struct CacheManifest {
@@ -36,7 +38,7 @@ impl CacheManifest {
 
     /// Serialize to raw rkyv bytes and write atomically via a `.tmp` sibling,
     /// renaming into place so a crash never leaves a partial cache file.
-    pub fn save(&self, cache_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self, cache_path: &Path) -> Result<(), AxiomError> {
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(self)?;
 
         if let Some(parent) = cache_path.parent()
@@ -122,7 +124,7 @@ pub fn write_cache_atomically(
     cache_path: &Path,
     config_hash: [u8; 32],
     file_hashes: BTreeMap<String, [u8; 32]>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), AxiomError> {
     let manifest = CacheManifest {
         config_hash,
         file_hashes,

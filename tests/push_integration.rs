@@ -27,7 +27,7 @@ fn env_url_is_fallback_when_cli_url_missing() {
 
 #[test]
 fn missing_url_is_an_error_mentioning_both_sources() {
-    let err = db::resolve_db_url_from(None, None).unwrap_err();
+    let err = db::resolve_db_url_from(None, None).unwrap_err().to_string();
     assert!(err.contains("--db-url"));
     assert!(err.contains("DATABASE_URL"));
 }

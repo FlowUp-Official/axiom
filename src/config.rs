@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::AxiomError;
+
 pub const DEFAULT_CONFIG_FILE: &str = "axiom.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,31 +78,20 @@ pub struct AxiomConfig {
 impl AxiomConfig {
     pub fn find_and_load(
         explicit_path: Option<&Path>,
-    ) -> Result<(Self, PathBuf), Box<dyn std::error::Error>> {
+    ) -> Result<(Self, PathBuf), AxiomError> {
         let path = match explicit_path {
             Some(p) => p.to_path_buf(),
             None => {
                 let default_path = PathBuf::from(DEFAULT_CONFIG_FILE);
                 if !default_path.exists() {
-                    return Err(format!(
-                        "could not find configuration file `{DEFAULT_CONFIG_FILE}` in the current \
-                         directory.\n\
-                         Please create an `{DEFAULT_CONFIG_FILE}` file, or pass an explicit path \
-                         with `--config <PATH>`."
-                    )
-                    .into());
+                    return Err(AxiomError::MissingConfig);
                 }
                 default_path
             }
         };
 
         if !path.exists() {
-            return Err(format!(
-                "the configuration file `{}` does not exist.\n\
-                 Please check the path passed to `--config`.",
-                path.display()
-            )
-            .into());
+            return Err(AxiomError::ConfigNotFound(path));
         }
 
         let contents = std::fs::read_to_string(&path)?;

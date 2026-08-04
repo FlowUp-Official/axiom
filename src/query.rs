@@ -13,7 +13,10 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use miette::SourceSpan;
+
 use crate::catalog::{parse_rules_content, split_top_level, ValidationRule};
+use crate::errors::AxiomError;
 
 /// A single bound parameter of a query function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,18 +87,23 @@ impl<'a> QueryBuilder<'a> {
 ///
 /// Sections are delimited by `-- @fn` lines. Within a section, `-- @validate`
 /// lines contribute rules for the named parameter and all other non-annotation
-/// lines form the raw SQL body.
-pub fn parse_query_file<'a>(src: &'a str) -> QueryCatalog<'a> {
+/// lines form the raw SQL body. A `-- @fn` line that does not follow the
+/// expected signature is reported as a [`AxiomError::QueryAnnotationError`]
+/// with a source span pointing at the offending line.
+pub fn parse_query_file<'a>(src: &'a str) -> Result<QueryCatalog<'a>, AxiomError> {
     let mut catalog = QueryCatalog::default();
     let mut current: Option<QueryBuilder<'a>> = None;
+    let mut line_start = 0usize;
 
-    for line in src.lines() {
-        let trimmed = line.trim_start();
+    for line in src.split('\n') {
+        let line_content = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line_content.trim_start();
         let Some(rest) = trimmed.strip_prefix("--") else {
             if let Some(builder) = current.as_mut() {
-                builder.sql.push_str(line);
+                builder.sql.push_str(line_content);
                 builder.sql.push('\n');
             }
+            line_start += line.len() + 1;
             continue;
         };
         let rest = rest.trim_start();
@@ -104,21 +112,34 @@ pub fn parse_query_file<'a>(src: &'a str) -> QueryCatalog<'a> {
             if let Some(builder) = current.take() {
                 catalog.queries.push(builder.finish());
             }
-            if let Some((name, params, return_type)) = parse_fn_signature(line) {
-                current = Some(QueryBuilder {
-                    name,
-                    params,
-                    return_type,
-                    validations: BTreeMap::new(),
-                    sql: String::new(),
-                });
+            match parse_fn_signature(line_content) {
+                Some((name, params, return_type)) => {
+                    current = Some(QueryBuilder {
+                        name,
+                        params,
+                        return_type,
+                        validations: BTreeMap::new(),
+                        sql: String::new(),
+                    });
+                }
+                None => {
+                    return Err(AxiomError::QueryAnnotationError {
+                        message: format!(
+                            "malformed `-- @fn` annotation: `{}`",
+                            line_content.trim()
+                        ),
+                        src: src.to_string(),
+                        span: SourceSpan::new(line_start.into(), line_content.len()),
+                    });
+                }
             }
+            line_start += line.len() + 1;
             continue;
         }
 
         if rest.get(..9).is_some_and(|p| p.eq_ignore_ascii_case("@validate")) {
             if let Some(builder) = current.as_mut()
-                && let Some((param, rules)) = parse_param_validation(line)
+                && let Some((param, rules)) = parse_param_validation(line_content)
                 && !rules.is_empty()
             {
                 builder
@@ -127,20 +148,22 @@ pub fn parse_query_file<'a>(src: &'a str) -> QueryCatalog<'a> {
                     .or_default()
                     .extend(rules);
             }
+            line_start += line.len() + 1;
             continue;
         }
 
         if let Some(builder) = current.as_mut() {
-            builder.sql.push_str(line);
+            builder.sql.push_str(line_content);
             builder.sql.push('\n');
         }
+        line_start += line.len() + 1;
     }
 
     if let Some(builder) = current.take() {
         catalog.queries.push(builder.finish());
     }
 
-    catalog
+    Ok(catalog)
 }
 
 /// Parse `-- @fn <name>(<param>:<type>, ...) : <return_type>`.
@@ -237,7 +260,7 @@ mod tests {
     #[test]
     fn parses_fn_signature_with_many_return() {
         let src = "-- @fn get_users(email: String, limit: Int) : Users[]";
-        let catalog = parse_query_file(src);
+        let catalog = parse_query_file(src).expect("parse query");
         let q = &catalog.queries[0];
         assert_eq!(q.name.as_ref(), "get_users");
         assert_eq!(q.params.len(), 2);
@@ -250,19 +273,20 @@ mod tests {
 
     #[test]
     fn parses_fn_signature_single_and_exec() {
-        let single = parse_query_file("-- @fn get_user(email: String) : User");
+        let single = parse_query_file("-- @fn get_user(email: String) : User").expect("parse");
         assert_eq!(
             single.queries[0].return_type,
             QueryReturnType::Single(Cow::Borrowed("User"))
         );
 
-        let exec = parse_query_file("-- @fn delete_user(id: Uuid) : Exec");
+        let exec = parse_query_file("-- @fn delete_user(id: Uuid) : Exec").expect("parse");
         assert_eq!(exec.queries[0].return_type, QueryReturnType::Exec);
     }
 
     #[test]
     fn parses_fn_signature_without_spaces() {
-        let catalog = parse_query_file("-- @fn get_user(email:String):Users[]");
+        let catalog =
+            parse_query_file("-- @fn get_user(email:String):Users[]").expect("parse");
         let q = &catalog.queries[0];
         assert_eq!(q.name.as_ref(), "get_user");
         assert_eq!(q.params[0].name.as_ref(), "email");
@@ -273,7 +297,7 @@ mod tests {
     #[test]
     fn extracts_param_validation_rules() {
         let src = "-- @fn get_user(email: String) : User\n-- @validate email(email, trim, lower)\nSELECT * FROM users WHERE email = $1";
-        let catalog = parse_query_file(src);
+        let catalog = parse_query_file(src).expect("parse");
         let q = &catalog.queries[0];
         assert_eq!(q.sql, "SELECT * FROM users WHERE email = $1");
         let rules = q.validations.get("email").expect("email rules");
@@ -292,7 +316,7 @@ SELECT * FROM users WHERE email = $1
 -- @fn delete_user(id: Uuid) : Exec
 DELETE FROM users WHERE id = $1
 "#;
-        let catalog = parse_query_file(src);
+        let catalog = parse_query_file(src).expect("parse");
         assert_eq!(catalog.queries.len(), 2);
         assert_eq!(catalog.query_by_name("get_user").expect("q1").sql, "SELECT * FROM users WHERE email = $1");
         assert_eq!(
@@ -304,7 +328,7 @@ DELETE FROM users WHERE id = $1
     #[test]
     fn validation_before_fn_applies_to_previous_section() {
         let src = "-- @fn get_user(email: String) : User\nSELECT 1\n-- @validate email(email)\n-- @fn delete_user(id: Uuid) : Exec\nDELETE FROM users WHERE id = $1";
-        let catalog = parse_query_file(src);
+        let catalog = parse_query_file(src).expect("parse");
         let get_user = catalog.query_by_name("get_user").expect("get_user");
         assert!(get_user.validations.contains_key("email"));
         let delete_user = catalog.query_by_name("delete_user").expect("delete_user");
@@ -314,10 +338,41 @@ DELETE FROM users WHERE id = $1
     #[test]
     fn comments_inside_sql_body_are_preserved() {
         let src = "-- @fn get_user(email: String) : User\n-- where clause\nSELECT * FROM users WHERE email = $1 -- trailing\n";
-        let catalog = parse_query_file(src);
+        let catalog = parse_query_file(src).expect("parse");
         assert_eq!(
             catalog.queries[0].sql,
             "-- where clause\nSELECT * FROM users WHERE email = $1 -- trailing"
+        );
+    }
+
+    #[test]
+    fn malformed_fn_annotation_reports_source_span() {
+        let src = "-- @fn get_user(email String) : User\nSELECT 1";
+        let err = parse_query_file(src).expect_err("malformed annotation must error");
+        let line = src.split('\n').next().expect("first line");
+
+        match &err {
+            AxiomError::QueryAnnotationError {
+                message,
+                src: diagnostic_src,
+                span,
+            } => {
+                assert!(message.contains("get_user"), "message: {message}");
+                assert_eq!(*diagnostic_src, src, "source should carry the full file");
+                assert_eq!(span.offset(), 0, "span should start at the annotation line");
+                assert_eq!(span.len(), line.len(), "span should cover the whole line");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        let report = format!("{:?}", miette::Report::new(err));
+        assert!(
+            report.contains("Invalid annotation syntax"),
+            "report should use the diagnostic display, got: {report}"
+        );
+        assert!(
+            report.contains("Syntax error near this line"),
+            "report should include the source label, got: {report}"
         );
     }
 }

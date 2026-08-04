@@ -13,6 +13,8 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan, Tokenizer};
 
+use crate::errors::AxiomError;
+
 /// A single validation rule attached to a column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationRule<'a> {
@@ -343,7 +345,7 @@ fn parse_rule_kind<'a>(name: &str, value: Option<&'a str>) -> Option<RuleKind<'a
 /// Every `CREATE TABLE` statement is parsed; each column's definition is
 /// paired with the rules from the `-- @validate` / `-- @override` comment that
 /// immediately precedes it.
-pub fn parse_sql_catalog<'a>(sql: &'a str) -> Result<TableCatalog<'a>, Box<dyn std::error::Error>> {
+pub fn parse_sql_catalog<'a>(sql: &'a str) -> Result<TableCatalog<'a>, AxiomError> {
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, sql)?;
     let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;

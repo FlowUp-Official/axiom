@@ -3,12 +3,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use owo_colors::{OwoColorize, Stream};
+
+use crate::errors::AxiomError;
+
 /// Pure URL-resolution precedence: an explicit CLI URL wins, otherwise the
 /// `DATABASE_URL` found in the environment (populated from `.env`) is used.
 pub fn resolve_db_url_from(
     cli_url: Option<String>,
     env_url: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, AxiomError> {
     if let Some(url) = cli_url {
         return Ok(url);
     }
@@ -17,11 +21,11 @@ pub fn resolve_db_url_from(
     {
         return Ok(url);
     }
-    Err(
-        "no database URL found: pass `--db-url <URL>` or set DATABASE_URL in your \
-         environment or .env file"
+    Err(AxiomError::DatabaseError {
+        details: "no database URL found: pass `--db-url <URL>` or set \
+                  DATABASE_URL in your environment or .env file"
             .to_string(),
-    )
+    })
 }
 
 /// Resolve the database URL for a push: explicit `--db-url`, then a custom
@@ -29,7 +33,7 @@ pub fn resolve_db_url_from(
 pub fn resolve_db_url(
     cli_url: Option<String>,
     env_file: Option<&Path>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, AxiomError> {
     if let Some(url) = cli_url {
         return Ok(url);
     }
@@ -37,9 +41,7 @@ pub fn resolve_db_url(
     match env_file {
         Some(path) => {
             if !path.exists() {
-                return Err(
-                    format!("env file `{}` does not exist", path.display()).into(),
-                );
+                return Err(AxiomError::EnvFileMissing(path.to_path_buf()));
             }
             dotenvy::from_path(path)?;
         }
@@ -49,13 +51,13 @@ pub fn resolve_db_url(
         None => {}
     }
 
-    resolve_db_url_from(None, std::env::var("DATABASE_URL").ok()).map_err(Into::into)
+    resolve_db_url_from(None, std::env::var("DATABASE_URL").ok())
 }
 
 /// Establish an asynchronous connection and spawn the connection upkeep task.
 pub async fn connect(
     db_url: &str,
-) -> Result<tokio_postgres::Client, Box<dyn std::error::Error>> {
+) -> Result<tokio_postgres::Client, AxiomError> {
     let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -71,7 +73,7 @@ pub async fn connect(
 pub async fn push_schema(
     client: &tokio_postgres::Client,
     schema_files: &[PathBuf],
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<usize, AxiomError> {
     let mut executed = 0;
     for path in schema_files {
         let sql = std::fs::read_to_string(path)?;
@@ -79,7 +81,9 @@ pub async fn push_schema(
         client.batch_execute(&sql).await?;
         println!(
             "[axiom] synced `{}` ({} statements, {:?})",
-            path.display(),
+            path.display()
+                .to_string()
+                .if_supports_color(Stream::Stdout, |s| s.cyan().to_string()),
             sql.split(';').filter(|s| !s.trim().is_empty()).count(),
             started.elapsed(),
         );
@@ -119,7 +123,7 @@ mod tests {
 
     #[test]
     fn missing_both_sources_is_an_actionable_error() {
-        let err = resolve_db_url_from(None, None).unwrap_err();
+        let err = resolve_db_url_from(None, None).unwrap_err().to_string();
         assert!(err.contains("--db-url"), "error should hint at --db-url: {err}");
         assert!(err.contains("DATABASE_URL"), "error should mention DATABASE_URL: {err}");
     }
