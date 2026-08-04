@@ -29,44 +29,53 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Generate JSON schema (Linux)
+      # --- Linux Packaging ---
+      - name: Package Linux archive, schema, and checksum
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p schemas
+          mkdir -p dist schemas
+
+          # 1. Generate JSON Schema (Linux runner handles schema asset)
           "target/${{ matrix.target }}/release/axiom" schema > schemas/axiom.schema.json
 
-      - name: Generate JSON schema (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path schemas | Out-Null
-          & "target/${{ matrix.target }}/release/axiom.exe" schema | Out-File -Encoding ascii schemas/axiom.schema.json
-
-      - name: Package Linux archive and checksum
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          mkdir -p dist
+          # 2. Package binary archive
           cp "target/${{ matrix.target }}/release/axiom" dist/axiom
-          tar -C dist -czf "axiom-v${{ github.ref_name }}-${{ matrix.target }}.tar.gz" axiom
-          sha256sum "axiom-v${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "axiom-v${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
+          tar -C dist -czf "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" axiom
+          sha256sum "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
 
+      # --- Windows Packaging ---
       - name: Package Windows archive and checksum
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $archive = "axiom-v${{ github.ref_name }}-${{ matrix.target }}.zip"
+          $archive = "axiom-${{ github.ref_name }}-${{ matrix.target }}.zip"
           Compress-Archive -Force -Path "target/${{ matrix.target }}/release/axiom.exe" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash
           "$hash  $archive" | Out-File -Encoding ascii "$archive.sha256"
 
-      - name: Publish GitHub Release
+      # --- Upload Assets to Release ---
+      - name: Publish Linux Release Assets
+        if: runner.os == 'Linux'
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            axiom-v${{ github.ref_name }}-${{ matrix.target }}.*
+            axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
             schemas/axiom.schema.json
+
+      - name: Publish Windows Release Assets
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            axiom-${{ github.ref_name }}-${{ matrix.target }}.zip
+            axiom-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256

@@ -1,4 +1,4 @@
-axiom = "0.5.0"
+axiom = "1.0.0"
 
 [plugins.tools]
 axiom = "source:./axiom-plugin.toml"
