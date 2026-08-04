@@ -1,12 +1,17 @@
+mod cache;
 mod catalog;
+mod codegen;
 mod config;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+use cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
 use catalog::{parse_sql_catalog, TableCatalog};
-use config::AxiomConfig;
+use codegen::{generate_rust, generate_typescript};
+use config::{AxiomConfig, OutputConfig};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -112,26 +117,67 @@ async fn run_generate(
         }
     }
 
-    let mut catalog = TableCatalog::default();
-    for (_, sql) in &sources {
-        let parsed = parse_sql_catalog(sql)?;
-        catalog.tables.extend(parsed.tables);
+    // BLAKE3 hashes of the config file and every resolved input file.
+    let config_hash = compute_file_hash(config_path)?;
+    let mut file_hashes = BTreeMap::new();
+    for (path, _) in &sources {
+        file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
     }
 
-    println!("parsed {} table(s) from schema inputs:", catalog.tables.len());
-    for table in &catalog.tables {
-        println!("  {} ({} columns)", table.name, table.columns.len());
-        for column in &table.columns {
-            println!(
-                "    {} {} [{}{}] -> {} rule(s)",
-                column.name,
-                column.data_type,
-                if column.primary_key { "PK " } else { "" },
-                if column.nullable { "nullable" } else { "not null" },
-                column.rules.len()
-            );
-        }
+    let cache_path = if config.cache.path.is_absolute() {
+        config.cache.path.clone()
+    } else {
+        base.join(&config.cache.path)
+    };
+
+    if config.cache.enabled && is_cache_valid(&cache_path, &config_hash, &file_hashes) {
+        println!("Everything up to date (<0.5ms)");
+        return Ok(());
     }
+
+    let mut catalog = TableCatalog::default();
+    for (_, sql) in &sources {
+        catalog.tables.extend(parse_sql_catalog(sql)?.tables);
+    }
+
+    let generated: Vec<(String, String)> = config
+        .outputs
+        .iter()
+        .map(|(name, output)| match output {
+            OutputConfig::TypeScript(_) => (name.clone(), generate_typescript(&catalog)),
+            OutputConfig::Rust(_) => (name.clone(), generate_rust(&catalog)),
+        })
+        .collect();
+
+    for (name, contents) in &generated {
+        let path = match &config.outputs[name] {
+            OutputConfig::TypeScript(ts) => &ts.path,
+            OutputConfig::Rust(rust) => &rust.path,
+        };
+        let output_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            base.join(path)
+        };
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&output_path, contents)?;
+    }
+
+    write_cache_atomically(&cache_path, config_hash, file_hashes)?;
+
+    println!(
+        "generated {} target(s) from {} table(s): {}",
+        generated.len(),
+        catalog.tables.len(),
+        catalog
+            .tables
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     Ok(())
 }

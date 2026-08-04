@@ -392,9 +392,9 @@ pub fn parse_sql_catalog<'a>(sql: &'a str) -> Result<TableCatalog<'a>, Box<dyn s
 }
 
 fn column_nullable(col: &ColumnDef) -> bool {
-    col.options
-        .iter()
-        .all(|o| !matches!(o.option, ColumnOption::NotNull))
+    col.options.iter().all(|o| {
+        !matches!(o.option, ColumnOption::NotNull | ColumnOption::PrimaryKey(_))
+    })
 }
 
 /// Format an object name (e.g. `"public"."users"`) as `public.users`,
@@ -672,7 +672,7 @@ CREATE TABLE sessions (
         let id = &users.columns[0];
         assert_eq!(id.name.as_ref(), "id");
         assert!(id.primary_key);
-        assert!(id.nullable);
+        assert!(!id.nullable);
         assert!(id.rules.is_empty());
 
         let email = &users.columns[1];
