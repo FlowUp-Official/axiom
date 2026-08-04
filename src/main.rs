@@ -30,6 +30,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Print the JSON schema for `axiom.json` files to stdout.
+    Schema,
     /// Generate typed output from the configured inputs.
     Generate(GenerateArgs),
     /// Push generated output to a target database.
@@ -72,6 +74,11 @@ async fn main() -> miette::Result<()> {
 async fn run() -> Result<(), AxiomError> {
     let cli = Cli::parse();
 
+    if matches!(cli.command, Commands::Schema) {
+        println!("{}", AxiomConfig::generate_json_schema());
+        return Ok(());
+    }
+
     let (config, config_path) = AxiomConfig::find_and_load(cli.config.as_deref())?;
 
     let targets = config.target_types();
@@ -95,6 +102,7 @@ async fn run() -> Result<(), AxiomError> {
     match cli.command {
         Commands::Generate(args) => run_generate(args, &config, &config_path).await,
         Commands::Push(args) => run_push(args, &config, &config_path).await,
+        Commands::Schema => unreachable!("handled before config loading"),
     }
 }
 

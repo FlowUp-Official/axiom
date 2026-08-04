@@ -34,6 +34,14 @@ pub enum AxiomError {
     #[diagnostic(code(axiom::config::invalid_json))]
     ConfigJson(#[from] serde_json::Error),
 
+    /// The config file does not match the generated JSON schema.
+    #[error("Configuration file `{path}` does not match the Axiom JSON schema:\n{errors}")]
+    #[diagnostic(
+        code(axiom::config::validation_failed),
+        help("Fix the flagged keys in `axiom.json`, or consult the canonical schema at https://raw.githubusercontent.com/FlowUp-Official/axiom/main/schemas/axiom.schema.json")
+    )]
+    ConfigValidationFailed { path: PathBuf, errors: String },
+
     /// A `-- @fn` annotation line does not follow the expected signature.
     #[error("Invalid annotation syntax: {message}")]
     #[diagnostic(

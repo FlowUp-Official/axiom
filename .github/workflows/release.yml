@@ -32,6 +32,20 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Generate JSON schema (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p schemas
+          "target/${{ matrix.target }}/release/axiom" schema > schemas/axiom.schema.json
+
+      - name: Generate JSON schema (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path schemas | Out-Null
+          & "target/${{ matrix.target }}/release/axiom.exe" schema | Out-File -Encoding ascii schemas/axiom.schema.json
+
       - name: Package Linux archive and checksum
         if: runner.os == 'Linux'
         shell: bash
@@ -55,3 +69,4 @@ jobs:
         with:
           files: |
             axiom-v${{ github.ref_name }}-${{ matrix.target }}.*
+            schemas/axiom.schema.json
