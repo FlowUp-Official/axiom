@@ -34,7 +34,7 @@ convention `cargo fmt --check` uses, so it drops straight into CI.
 - Transformations are listed before validations.
 - Trailing whitespace is removed.
 
-```axm
+```text
 # before
 export model Address { street: string .nonempty() .trim() city: string .nonempty() .trim() state: string }
 
