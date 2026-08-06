@@ -84,7 +84,7 @@ pub struct RustOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AxiomConfig {
     /// URL pointing to the Axiom JSON schema version, e.g.
-    /// `https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.5.0/schemas/axiom.schema.json`.
+    /// `https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json`.
     #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub project: ProjectConfig,
@@ -250,7 +250,7 @@ mod tests {
 
     fn valid_config() -> serde_json::Value {
         serde_json::json!({
-            "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.5.0/schemas/axiom.schema.json",
+            "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": true, "path": ".axiom.cache" },
             "inputs": { "schema": ["schema.sql"], "queries": ["queries/accounts.sql"] },

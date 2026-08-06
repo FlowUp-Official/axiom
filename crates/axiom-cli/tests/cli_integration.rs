@@ -45,7 +45,7 @@ fn write_fixture(dir: &Path, schema: &str) {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.5.0/schemas/axiom.schema.json",
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "inputs": { "schema": ["schema.sql"], "queries": ["queries/accounts.sql"] },

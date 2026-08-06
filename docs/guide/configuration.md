@@ -12,7 +12,7 @@ schema for the running Axiom version:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.5.0/schemas/axiom.schema.json",
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "api", "dialect": "postgres" }
 }
 ```
@@ -35,7 +35,7 @@ An `axiom init` template looks like this:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.5.0/schemas/axiom.schema.json",
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "my-project", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "inputs": {

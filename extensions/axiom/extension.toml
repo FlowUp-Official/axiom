@@ -1,7 +1,7 @@
 id = "axiom"
 name = "Axiom"
 description = "Axiom language support: SQL schema/query diagnostics, completion, hover, go-to-definition, rename and formatting via the axiom-lsp language server."
-version = "0.5.0"
+version = "0.6.0"
 schema_version = 1
 authors = ["Axiom contributors"]
 repository = "https://github.com/FlowUp-Official/axiom"
