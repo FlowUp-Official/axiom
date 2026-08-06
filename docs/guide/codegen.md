@@ -14,9 +14,9 @@ A TypeScript module that pairs with the `postgres` driver:
   the compiled column rules (email, UUID, regex, normalization, ...) and
   collects `{ path, message }` errors.
 - **Query functions** — one `export async function` per `-- @fn` annotation,
-  taking the `Sql` client and a typed params object. Positional placeholders are
-  rewritten to postgres.js parameter syntax, and parameter rules run before the
-  query executes.
+  taking the `Sql` client and a typed params object. Positional (`$1`) and named
+  (`$email`) placeholders are rewritten to postgres.js parameter syntax, and
+  parameter rules run before the query executes.
 
 ```ts
 import type { Sql } from 'postgres';

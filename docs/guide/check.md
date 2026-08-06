@@ -15,7 +15,7 @@ axiom check --fix        # rewrite out-of-sync generated files, then verify
 | ----- | ---------------- | ---------------- |
 | Schema parse | Every SQL schema input parses with the configured dialect | `check.sql-parse` |
 | Query syntax | Every `-- @fn` annotation and query body parses | `check.query-annotation`, `check.query-sql` |
-| Query ↔ schema | Referenced tables and columns exist; declared return types resolve to a table or model | `check.missing-table`, `check.missing-column`, `check.query-return-type` |
+| Query ↔ schema | Referenced tables and columns exist; placeholders resolve to declared parameters; return types resolve to a table or model | `check.missing-table`, `check.missing-column`, `check.query-placeholder`, `check.query-return-type` |
 | Models | Imports resolve, no duplicate models, no import cycles, models parse | `check.model-*` |
 | Generated output | The output that `axiom generate` would write matches what is on disk | `check.output-outdated` |
 

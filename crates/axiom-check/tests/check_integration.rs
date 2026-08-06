@@ -58,7 +58,7 @@ fn query_return_type_must_exist() {
     let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
     let query = vec![file(
         "queries/q.sql",
-        "-- @fn list_users() : Users[]\nSELECT id FROM users",
+        "-- @fn list_users() : Nope[]\nSELECT id FROM users",
     )];
     let (catalog, _) = check_schemas(&schema);
     let declared = collect_declared_models(&[]);
@@ -66,6 +66,71 @@ fn query_return_type_must_exist() {
     let (_, diags) = check_queries(None, &hash, &catalog, &declared, &query);
     assert!(
         codes(&diags).contains(&"check.query-return-type"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn return_type_matches_table_case_insensitively() {
+    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let query = vec![file(
+        "queries/q.sql",
+        "-- @fn list_users() : Users[]\nSELECT id FROM users",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let declared = collect_declared_models(&[]);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &declared, &query);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn named_placeholders_check_cleanly() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT NOT NULL);",
+    )];
+    let query = vec![file(
+        "queries/q.sql",
+        "-- @fn get_user($email: String) : users\nSELECT id, email FROM users WHERE email = $email\n\n-- @fn get_users($limit: Int, $email: String) : users[]\n-- @validate email(email, trim, lower)\n-- @validate limit(min=1, max=100)\nSELECT id, email FROM users\nWHERE email = $email AND id < $limit\nORDER BY id",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let declared = collect_declared_models(&[]);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &declared, &query);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn unknown_named_placeholder_is_reported() {
+    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let query = vec![file(
+        "queries/q.sql",
+        "-- @fn get_user(email: String) : users\nSELECT id FROM users WHERE email = $nope",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let declared = collect_declared_models(&[]);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &declared, &query);
+    assert!(
+        codes(&diags).contains(&"check.query-placeholder"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn positional_placeholder_beyond_declared_is_reported() {
+    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let query = vec![file(
+        "queries/q.sql",
+        "-- @fn get_user(email: String) : users\nSELECT id FROM users WHERE id = $1 AND email = $2",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let declared = collect_declared_models(&[]);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &declared, &query);
+    assert!(
+        codes(&diags).contains(&"check.query-placeholder"),
         "{diags:?}"
     );
 }
@@ -109,7 +174,7 @@ fn query_results_are_cached_by_content() {
     let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
     let query = file(
         "queries/q.sql",
-        "-- @fn list_users() : Users[]\nSELECT id FROM users",
+        "-- @fn list_users() : Users[]\nSELECT id FROM missing_table",
     );
     let (catalog, _) = check_schemas(&schema);
     let declared = collect_declared_models(&[]);

@@ -296,7 +296,7 @@ pub fn generate_rust(catalog: &TableCatalog, queries: &QueryCatalog) -> String {
     }
 
     for query in &queries.queries {
-        emit_query(&mut out, query);
+        emit_query(&mut out, catalog, query);
     }
 
     emit_preset_helpers(&mut out, catalog, queries);
@@ -527,7 +527,7 @@ fn regex_used(catalog: &TableCatalog, queries: &QueryCatalog) -> bool {
 }
 
 /// Emit a sqlx-backed query function and its params struct.
-fn emit_query(out: &mut String, query: &QueryDefinition) {
+fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition) {
     let pascal = util::pascal_case(&query.name);
     let params_type = format!("{pascal}Params");
     let fn_name = util::rust_field_name(&query.name);
@@ -564,8 +564,14 @@ fn emit_query(out: &mut String, query: &QueryDefinition) {
     out.push_str("}\n\n");
 
     let (ret_ty, fetch) = match &query.return_type {
-        QueryReturnType::Many(row) => (format!("Vec<{row}>"), Some("fetch_all(pool)")),
-        QueryReturnType::Single(row) => (format!("Option<{row}>"), Some("fetch_optional(pool)")),
+        QueryReturnType::Many(row) => (
+            format!("Vec<{}>", util::row_type(catalog, row)),
+            Some("fetch_all(pool)"),
+        ),
+        QueryReturnType::Single(row) => (
+            format!("Option<{}>", util::row_type(catalog, row)),
+            Some("fetch_optional(pool)"),
+        ),
         QueryReturnType::Exec => ("()".to_string(), None),
     };
 
@@ -579,9 +585,10 @@ fn emit_query(out: &mut String, query: &QueryDefinition) {
 
     match &query.return_type {
         QueryReturnType::Many(row) | QueryReturnType::Single(row) => {
-            let sql_lit = rust_raw_string(&query.sql);
+            let sql_lit = rust_raw_string(&query.to_driver_sql());
             let _ = writeln!(out, "    let rows = sqlx::query_as!(");
-            let _ = writeln!(out, "        {row},");
+            let _ = writeln!(out, "        {},",
+                util::row_type(catalog, row));
             let _ = writeln!(out, "        {sql_lit},");
             for field in bound_fields(query) {
                 let _ = writeln!(out, "        params.{field},");
@@ -592,7 +599,7 @@ fn emit_query(out: &mut String, query: &QueryDefinition) {
             out.push_str("    Ok(rows)\n");
         }
         QueryReturnType::Exec => {
-            let sql_lit = rust_raw_string(&query.sql);
+            let sql_lit = rust_raw_string(&query.to_driver_sql());
             let _ = writeln!(out, "    sqlx::query(");
             let _ = writeln!(out, "        {sql_lit},");
             out.push_str("    )\n");
@@ -651,26 +658,13 @@ fn emit_param_validation(out: &mut String, param: &str, rules: &[ValidationRule]
 }
 
 /// Field names to bind, in `$1..$n` order, for the placeholders present in the
-/// query SQL. At most the declared parameter count are bound.
+/// query SQL. At most the declared parameter count are bound. Named
+/// placeholders count as their parameter's declared position.
 fn bound_fields(query: &QueryDefinition) -> Vec<String> {
-    let max = max_placeholder(&query.sql).min(query.params.len());
+    let max = query.max_placeholder_index().min(query.params.len());
     (0..max)
         .map(|i| util::rust_field_name(&query.params[i].name))
         .collect()
-}
-
-fn max_placeholder(sql: &str) -> usize {
-    let mut max = 0usize;
-    let mut rest = sql;
-    while let Some(pos) = rest.find('$') {
-        let after = &rest[pos + 1..];
-        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<usize>() {
-            max = max.max(n);
-        }
-        rest = if digits.is_empty() { after } else { &after[digits.len()..] };
-    }
-    max
 }
 
 /// Wrap SQL in a raw string literal, bumping the number of `#` delimiters if
@@ -1035,6 +1029,56 @@ mod tests {
         let out = generate_rust(&TableCatalog::default(), &query_catalog());
         assert!(out.contains("fn is_email(value: &str) -> bool {"));
         assert!(!out.contains("fn is_ipv6"));
+    }
+
+    #[test]
+    fn named_placeholders_rewrite_to_positional_sql() {
+        let q = QueryDefinition {
+            name: Cow::Borrowed("delete_user"),
+            sql: "DELETE FROM users WHERE id = $user_id".to_string(),
+            params: vec![crate::query::QueryParam {
+                name: Cow::Borrowed("user_id"),
+                param_type: Cow::Borrowed("BigInt"),
+            }],
+            return_type: QueryReturnType::Exec,
+            validations: Default::default(),
+        };
+        let out = generate_rust(
+            &TableCatalog::default(),
+            &QueryCatalog { queries: vec![q] },
+        );
+        assert!(
+            out.contains("DELETE FROM users WHERE id = $1"),
+            "named placeholder must be rewritten to a positional marker:\n{out}"
+        );
+        assert!(out.contains(".bind(params.user_id)"));
+    }
+
+    #[test]
+    fn lowercase_return_type_resolves_to_table_type() {
+        let t = table("users", vec![col("id", "BIGSERIAL", false, vec![])]);
+        let q = QueryDefinition {
+            name: Cow::Borrowed("get_user"),
+            sql: "SELECT id FROM users WHERE id = $1".to_string(),
+            params: vec![crate::query::QueryParam {
+                name: Cow::Borrowed("id"),
+                param_type: Cow::Borrowed("BigInt"),
+            }],
+            return_type: QueryReturnType::Single(Cow::Borrowed("users")),
+            validations: Default::default(),
+        };
+        let out = generate_rust(
+            &TableCatalog { tables: vec![t] },
+            &QueryCatalog { queries: vec![q] },
+        );
+        assert!(
+            out.contains("-> Result<Option<Users>, Box<dyn std::error::Error>>"),
+            "return type must normalize to the table's PascalCase type:\n{out}"
+        );
+        assert!(
+            out.contains("query_as!(\n        Users,"),
+            "query_as! row type must be canonical:\n{out}"
+        );
     }
 
     #[test]

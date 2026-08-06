@@ -2,12 +2,23 @@
 //!
 //! Query files are plain SQL files where each statement is preceded by a
 //! function signature comment and zero or more per-parameter validation
-//! comments:
+//! comments. The body may reference parameters by name (`$email`) or
+//! positionally (`$1`), and omitting a return type marks the query as an
+//! execution (no rows):
 //!
 //! ```sql
-//! -- @fn get_user(email: String) : Users[]
+//! -- @fn get_user($email: String) : users
+//! SELECT id, email FROM users WHERE email = $email
+//!
+//! -- @fn delete_user(id: BigInt)
+//! DELETE FROM users WHERE id = $id
+//!
+//! -- @fn get_users($limit: Int, $email: String) : users[]
 //! -- @validate email(email, trim, lower)
-//! SELECT id, email FROM users WHERE email = $1
+//! -- @validate limit(min=1, max=100)
+//! SELECT id, email FROM users
+//! WHERE email = $email AND id < $limit
+//! ORDER BY id
 //! ```
 
 use std::borrow::Cow;
@@ -57,6 +68,91 @@ impl<'a> QueryCatalog<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn query_by_name(&self, name: &str) -> Option<&QueryDefinition<'a>> {
         self.queries.iter().find(|q| q.name == name)
+    }
+}
+
+/// The form of a `$` placeholder found in query SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placeholder<'a> {
+    /// A positional marker `$1`, `$2`, ... (1-based).
+    Positional(usize),
+    /// A named marker `$email`, bound to the declared parameter of that name.
+    Named(&'a str),
+}
+
+/// Scan a query body for `$` placeholders. Returns the byte offset, length,
+/// and kind of each marker so callers can rewrite the original text.
+pub fn scan_placeholders(sql: &str) -> Vec<(usize, usize, Placeholder<'_>)> {
+    let mut out = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(pos) = sql[search_from..].find('$') {
+        let start = search_from + pos;
+        let after = &sql[start + 1..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let token = &after[..end];
+        if !token.is_empty() {
+            let kind = if token.bytes().all(|b| b.is_ascii_digit()) {
+                Placeholder::Positional(token.parse().unwrap_or(0))
+            } else {
+                Placeholder::Named(token)
+            };
+            out.push((start, 1 + end, kind));
+        }
+        search_from = start + 1 + end;
+    }
+    out
+}
+
+impl<'a> QueryDefinition<'a> {
+    /// The 1-based declared index of the parameter with the given name.
+    pub fn param_index(&self, name: &str) -> Option<usize> {
+        self.params
+            .iter()
+            .position(|p| p.name == name)
+            .map(|i| i + 1)
+    }
+
+    /// The SQL body with every named placeholder rewritten to a positional
+    /// `$N` marker, where `N` is the parameter's declared index, so the body
+    /// is valid for drivers that only understand positional placeholders.
+    /// Positional markers are kept as-is and unknown names are left untouched.
+    pub fn to_driver_sql(&self) -> String {
+        let mut out = String::with_capacity(self.sql.len());
+        let mut last = 0usize;
+        for (start, len, kind) in scan_placeholders(&self.sql) {
+            out.push_str(&self.sql[last..start]);
+            match kind {
+                Placeholder::Named(name) => {
+                    if let Some(idx) = self.param_index(name) {
+                        out.push('$');
+                        out.push_str(&idx.to_string());
+                    } else {
+                        out.push_str(&self.sql[start..start + len]);
+                    }
+                }
+                Placeholder::Positional(_) => {
+                    out.push_str(&self.sql[start..start + len]);
+                }
+            }
+            last = start + len;
+        }
+        out.push_str(&self.sql[last..]);
+        out
+    }
+
+    /// The highest placeholder index in the body. Named placeholders count as
+    /// their parameter's declared position; unknown names are ignored.
+    pub fn max_placeholder_index(&self) -> usize {
+        scan_placeholders(&self.sql)
+            .into_iter()
+            .map(|(_, _, kind)| match kind {
+                Placeholder::Positional(n) => n,
+                Placeholder::Named(name) => self.param_index(name).unwrap_or(0),
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -201,6 +297,9 @@ fn parse_fn_signature<'a>(
         if pname.is_empty() || ptype.is_empty() {
             return None;
         }
+        // A leading `$` marks the parameter as a named placeholder in the SQL
+        // body (`$email`); it is not part of the parameter's identifier.
+        let pname = pname.strip_prefix('$').unwrap_or(pname);
         params.push(QueryParam {
             name: Cow::Borrowed(pname),
             param_type: Cow::Borrowed(ptype),
@@ -373,6 +472,52 @@ DELETE FROM users WHERE id = $1
         assert!(
             report.contains("Syntax error near this line"),
             "report should include the source label, got: {report}"
+        );
+    }
+
+    #[test]
+    fn dollar_prefixed_params_and_named_placeholders() {
+        let src = "-- @fn get_user($email: String) : users\nSELECT id, email FROM users WHERE email = $email";
+        let catalog = parse_query_file(src).expect("parse");
+        assert_eq!(catalog.queries.len(), 1);
+        let q = &catalog.queries[0];
+        assert_eq!(q.name.as_ref(), "get_user");
+        assert_eq!(q.params[0].name.as_ref(), "email", "`$` prefix must be stripped");
+        assert_eq!(q.sql, "SELECT id, email FROM users WHERE email = $email");
+        assert_eq!(q.param_index("email"), Some(1));
+        assert_eq!(
+            q.to_driver_sql(),
+            "SELECT id, email FROM users WHERE email = $1",
+            "named placeholders rewrite to positional markers"
+        );
+    }
+
+    #[test]
+    fn missing_return_type_is_an_execution() {
+        let catalog = parse_query_file("-- @fn delete_user(id: BigInt)\nDELETE FROM users WHERE id = $id")
+            .expect("parse");
+        assert_eq!(catalog.queries[0].return_type, QueryReturnType::Exec);
+    }
+
+    #[test]
+    fn scan_placeholders_mixes_positional_and_named() {
+        let sql = "SELECT * FROM users WHERE email = $email AND id < $limit AND rank = $2";
+        let hits = scan_placeholders(sql);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].2, Placeholder::Named("email"));
+        assert_eq!(hits[1].2, Placeholder::Named("limit"));
+        assert_eq!(hits[2].2, Placeholder::Positional(2));
+    }
+
+    #[test]
+    fn to_driver_sql_keeps_positional_and_unknown_names() {
+        let src = "-- @fn get_users($limit: Int, $email: String) : Users[]\nSELECT id, email FROM users\nWHERE email = $email AND id < $limit AND id > $unknown";
+        let catalog = parse_query_file(src).expect("parse");
+        let q = &catalog.queries[0];
+        assert_eq!(q.max_placeholder_index(), 2);
+        assert_eq!(
+            q.to_driver_sql(),
+            "SELECT id, email FROM users\nWHERE email = $2 AND id < $1 AND id > $unknown"
         );
     }
 }

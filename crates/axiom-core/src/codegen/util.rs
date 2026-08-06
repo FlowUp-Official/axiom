@@ -1,11 +1,28 @@
 //! Shared helpers for the code generators.
 
-use crate::catalog::{ColumnSchema, RuleKind, TableSchema};
+use std::borrow::Cow;
+
+use crate::catalog::{ColumnSchema, RuleKind, TableCatalog, TableSchema};
 
 /// Convert a table name such as `public.users` into a PascalCase type name,
 /// e.g. `Users`.
 pub fn type_name(table: &TableSchema) -> String {
     pascal_case(&table.name)
+}
+
+/// Resolve a query return type to the canonical generated type name: the
+/// matching catalog table's PascalCase name (matched case-insensitively on the
+/// unqualified suffix), or the name unchanged when it does not match a table.
+/// This lets `: users` and `: Users` both refer to a table declared as
+/// `CREATE TABLE users`, while model return types pass through untouched.
+pub fn row_type<'a>(catalog: &TableCatalog, name: &'a str) -> Cow<'a, str> {
+    for table in &catalog.tables {
+        let last = table.name.rsplit('.').next().unwrap_or(&table.name);
+        if last.eq_ignore_ascii_case(name) {
+            return Cow::Owned(type_name(table));
+        }
+    }
+    Cow::Borrowed(name)
 }
 
 /// Convert a dotted name such as `public.users` (or any snake/kebab/dotted

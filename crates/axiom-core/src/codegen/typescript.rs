@@ -87,7 +87,7 @@ pub fn generate_typescript(catalog: &TableCatalog, queries: &QueryCatalog) -> St
     }
 
     for query in &queries.queries {
-        emit_query(&mut out, query);
+        emit_query(&mut out, catalog, query);
     }
 
     out
@@ -218,7 +218,7 @@ fn preset_kind(kind: &RuleKind) -> Option<&'static str> {
     }
 }
 
-fn emit_query(out: &mut String, query: &QueryDefinition) {
+fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition) {
     let pascal = util::pascal_case(&query.name);
     let params_type = format!("{pascal}Params");
     let fn_name = util::ts_field_name(&query.name);
@@ -244,16 +244,22 @@ fn emit_query(out: &mut String, query: &QueryDefinition) {
 
     let bound_sql = bind_sql(query);
     let (return_ty, body) = match &query.return_type {
-        QueryReturnType::Many(row) => (
-            format!("Promise<{row}[]>"),
-            format!("return await sql<{row}[]>`\n{bound_sql}\n`;"),
-        ),
-        QueryReturnType::Single(row) => (
-            format!("Promise<{row} | null>"),
-            format!(
-                "const rows = await sql<{row}[]>`\n{bound_sql}\n`;\n  return rows[0] ?? null;"
-            ),
-        ),
+        QueryReturnType::Many(row) => {
+            let ty = util::row_type(catalog, row);
+            (
+                format!("Promise<{ty}[]>"),
+                format!("return await sql<{ty}[]>`\n{bound_sql}\n`;"),
+            )
+        }
+        QueryReturnType::Single(row) => {
+            let ty = util::row_type(catalog, row);
+            (
+                format!("Promise<{ty} | null>"),
+                format!(
+                    "const rows = await sql<{ty}[]>`\n{bound_sql}\n`;\n  return rows[0] ?? null;"
+                ),
+            )
+        }
         QueryReturnType::Exec => (
             "Promise<void>".to_string(),
             format!("await sql`\n{bound_sql}\n`;"),
@@ -312,30 +318,48 @@ fn emit_param_validation(out: &mut String, param: &str, rules: &[ValidationRule]
     }
 }
 
-/// Rewrite positional `$1`, `$2`, ... placeholders into postgres.js tagged
-/// template interpolations such as `${params.email}`.
+/// Rewrite positional `$1`, `$2`, ... and named `$name` placeholders into
+/// postgres.js tagged template interpolations such as `${params.email}`.
 fn bind_sql(query: &QueryDefinition) -> String {
     let escaped = util::escape_ts_template(&query.sql);
     let mut out = String::new();
     let mut rest = escaped.as_str();
     while let Some(pos) = rest.find('$') {
         let after = &rest[pos + 1..];
-        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if digits.is_empty() {
+        let token: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if token.is_empty() {
             out.push_str(&rest[..=pos]);
             rest = after;
             continue;
         }
         out.push_str(&rest[..pos]);
-        let n: usize = digits.parse().unwrap_or(0);
-        if n >= 1 && n <= query.params.len() {
-            let field = util::ts_field_name(&query.params[n - 1].name);
-            let _ = write!(out, "${{params.{field}}}");
+        let field = if token.bytes().all(|b| b.is_ascii_digit()) {
+            let n: usize = token.parse().unwrap_or(0);
+            if n >= 1 && n <= query.params.len() {
+                Some(util::ts_field_name(&query.params[n - 1].name))
+            } else {
+                None
+            }
         } else {
-            out.push('$');
-            out.push_str(&digits);
+            query
+                .params
+                .iter()
+                .find(|p| p.name == token)
+                .map(|p| util::ts_field_name(&p.name))
+        };
+        match field {
+            Some(field) => {
+                let _ = write!(out, "${{params.{field}}}");
+            }
+            None => {
+                out.push('$');
+                out.push_str(&token);
+            }
         }
-        rest = &after[digits.len()..];
+        rest = &after[token.len()..];
     }
     out.push_str(rest);
     out
@@ -543,6 +567,57 @@ mod tests {
         );
         assert!(out.contains("WHERE email = ${params.email} AND id < ${params.maxId}"));
         assert!(out.contains("): Promise<void> {"));
+    }
+
+    #[test]
+    fn named_placeholders_interpolate_by_name() {
+        let q = QueryDefinition {
+            name: Cow::Borrowed("get_users"),
+            sql: "SELECT id, email FROM users WHERE email = $email AND id < $limit".to_string(),
+            params: vec![
+                crate::query::QueryParam {
+                    name: Cow::Borrowed("limit"),
+                    param_type: Cow::Borrowed("Int"),
+                },
+                crate::query::QueryParam {
+                    name: Cow::Borrowed("email"),
+                    param_type: Cow::Borrowed("String"),
+                },
+            ],
+            return_type: QueryReturnType::Exec,
+            validations: Default::default(),
+        };
+        let out = generate_typescript(
+            &TableCatalog::default(),
+            &QueryCatalog { queries: vec![q] },
+        );
+        assert!(
+            out.contains("WHERE email = ${params.email} AND id < ${params.limit}"),
+            "named placeholders must interpolate their declared param:\n{out}"
+        );
+    }
+
+    #[test]
+    fn lowercase_return_type_resolves_to_table_type() {
+        let t = table("users", vec![col("id", "BIGSERIAL", false, vec![])]);
+        let q = QueryDefinition {
+            name: Cow::Borrowed("get_user"),
+            sql: "SELECT id FROM users WHERE id = $1".to_string(),
+            params: vec![crate::query::QueryParam {
+                name: Cow::Borrowed("id"),
+                param_type: Cow::Borrowed("BigInt"),
+            }],
+            return_type: QueryReturnType::Single(Cow::Borrowed("users")),
+            validations: Default::default(),
+        };
+        let out = generate_typescript(
+            &TableCatalog { tables: vec![t] },
+            &QueryCatalog { queries: vec![q] },
+        );
+        assert!(
+            out.contains("): Promise<Users | null> {"),
+            "return type must normalize to the table's PascalCase type:\n{out}"
+        );
     }
 
     #[test]

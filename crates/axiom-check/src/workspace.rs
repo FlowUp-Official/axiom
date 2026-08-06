@@ -14,7 +14,9 @@ use axiom_core::cache::{compute_content_hash, ToolCache};
 use axiom_core::catalog::{parse_sql_catalog, TableCatalog};
 use axiom_core::config::{resolve_glob_paths, AxiomConfig};
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{parse_query_file, QueryCatalog, QueryReturnType};
+use axiom_core::query::{
+    parse_query_file, scan_placeholders, Placeholder, QueryCatalog, QueryReturnType,
+};
 use axiom_diagnostics::Diagnostic;
 
 use crate::diagnostics::{line_of_offset, parse_error};
@@ -128,11 +130,57 @@ fn check_query_file(
     for query in &parsed.queries {
         diags.extend(check_query_body(path, query.sql.trim(), catalog));
 
+        // Placeholder references must resolve to a declared parameter. The
+        // body starts at `body_start` within `src` so spans line up.
+        let body_start = src.find(&query.sql).unwrap_or(0);
+        for (start, _, kind) in scan_placeholders(&query.sql) {
+            let span = line_of_offset(src, body_start + start);
+            match kind {
+                Placeholder::Positional(n) if n > query.params.len() => {
+                    diags.push(
+                        Diagnostic::error(
+                            path,
+                            "check.query-placeholder",
+                            format!(
+                                "query `{}` uses placeholder `${n}`, but only {} parameter{} are declared",
+                                query.name,
+                                query.params.len(),
+                                if query.params.len() == 1 { "is" } else { "s" },
+                            ),
+                        )
+                        .with_span(span),
+                    );
+                }
+                Placeholder::Named(name) if query.param_index(name).is_none() => {
+                    diags.push(
+                        Diagnostic::error(
+                            path,
+                            "check.query-placeholder",
+                            format!(
+                                "query `{}` uses placeholder `${name}`, which is not declared in the `@fn` signature",
+                                query.name
+                            ),
+                        )
+                        .with_help("add the parameter to the `-- @fn` signature, or fix the placeholder")
+                        .with_span(span),
+                    );
+                }
+                _ => {}
+            }
+        }
+
         match &query.return_type {
             QueryReturnType::Single(name) | QueryReturnType::Many(name) => {
                 let name_str = name.trim();
-                let known_table = catalog.table_by_name(name_str).is_some();
-                let known_model = declared_models.contains(name_str);
+                let known_table = catalog.tables.iter().any(|t| {
+                    t.name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(&t.name)
+                        .eq_ignore_ascii_case(name_str)
+                });
+                let known_model =
+                    declared_models.iter().any(|m| m.eq_ignore_ascii_case(name_str));
                 if !known_table && !known_model {
                     diags.push(
                         Diagnostic::error(
