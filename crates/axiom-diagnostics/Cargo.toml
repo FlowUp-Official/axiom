@@ -1,0 +1,9 @@
+[package]
+name = "axiom-diagnostics"
+version.workspace = true
+edition.workspace = true
+description = "Shared diagnostic model and TTY/plain rendering for Axiom tooling."
+
+[dependencies]
+owo-colors.workspace = true
+serde.workspace = true

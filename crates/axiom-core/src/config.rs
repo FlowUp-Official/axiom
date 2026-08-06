@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::AxiomError;
+use crate::paths::resolve_path;
 
 pub const DEFAULT_CONFIG_FILE: &str = "axiom.json";
 
@@ -199,6 +200,28 @@ impl AxiomConfig {
 
         Ok(())
     }
+}
+
+/// Resolve the configured glob patterns into ordered file paths, relative to
+/// `base` (the directory containing the config file). Absolute patterns are
+/// used as-is. Shared by `generate`, `check`, `format`, and `lint`.
+pub fn resolve_glob_paths(
+    patterns: &[String],
+    base: &Path,
+) -> Result<Vec<PathBuf>, AxiomError> {
+    let mut paths = Vec::new();
+    for pattern in patterns {
+        let pattern_path = Path::new(pattern);
+        let joined = if pattern_path.is_absolute() {
+            pattern.to_string()
+        } else {
+            resolve_path(base, pattern_path).to_string_lossy().into_owned()
+        };
+        for path in glob::glob(&joined)? {
+            paths.push(path?);
+        }
+    }
+    Ok(paths)
 }
 
 /// Validate a raw `axiom.json` document against the generated JSON schema.

@@ -1,4 +1,5 @@
 /target
+/crates/axiom-cli/target
 /docs/node_modules
 /docs/.vitepress/dist
 /schemas

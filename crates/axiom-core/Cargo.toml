@@ -1,0 +1,23 @@
+[package]
+name = "axiom-core"
+version.workspace = true
+edition.workspace = true
+description = "Core compiler: schema/query/.axm parsing, resolution, codegen, and BLAKE3 caching."
+
+[dependencies]
+blake3.workspace = true
+dotenvy.workspace = true
+glob.workspace = true
+jsonschema.workspace = true
+memmap2.workspace = true
+miette.workspace = true
+owo-colors.workspace = true
+rkyv.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlparser.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+winnow.workspace = true

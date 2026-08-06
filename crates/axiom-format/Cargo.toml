@@ -1,0 +1,9 @@
+[package]
+name = "axiom-format"
+version.workspace = true
+edition.workspace = true
+description = "AST-based deterministic formatter for `.axm` models and SQL files."
+
+[dependencies]
+axiom-core = { path = "../axiom-core" }
+sqlparser.workspace = true

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use axiom::db;
+use axiom_core::db;
 
 #[test]
 fn cli_url_wins_over_env_url() {

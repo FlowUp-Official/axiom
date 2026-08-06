@@ -135,11 +135,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "axiom"
+name = "axiom-check"
+version = "0.5.0"
+dependencies = [
+ "axiom-core",
+ "axiom-diagnostics",
+ "blake3",
+ "regex",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
+name = "axiom-cli"
+version = "0.5.0"
+dependencies = [
+ "axiom-check",
+ "axiom-core",
+ "axiom-diagnostics",
+ "axiom-format",
+ "axiom-lint",
+ "clap",
+ "dotenvy",
+ "miette",
+ "owo-colors",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "axiom-core"
 version = "0.5.0"
 dependencies = [
  "blake3",
- "clap",
  "dotenvy",
  "glob",
  "jsonschema",
@@ -155,6 +183,32 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "winnow",
+]
+
+[[package]]
+name = "axiom-diagnostics"
+version = "0.5.0"
+dependencies = [
+ "owo-colors",
+ "serde",
+]
+
+[[package]]
+name = "axiom-format"
+version = "0.5.0"
+dependencies = [
+ "axiom-core",
+ "sqlparser",
+]
+
+[[package]]
+name = "axiom-lint"
+version = "0.5.0"
+dependencies = [
+ "axiom-core",
+ "axiom-diagnostics",
+ "serde_json",
+ "sqlparser",
 ]
 
 [[package]]
@@ -1445,6 +1499,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1731,6 +1797,18 @@ checksum = "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
 dependencies = [
  "log",
  "recursive",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6dd45d8fc1c79299bfbb7190e42ccbbdf6a5f52e4a6ad98d92357ea965bd289"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

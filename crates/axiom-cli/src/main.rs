@@ -2,16 +2,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use axiom::axm::{generate_rust_models, generate_typescript_models, resolve_models};
-use axiom::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
-use axiom::catalog::{parse_sql_catalog, TableCatalog};
-use axiom::codegen::{generate_rust, generate_typescript};
-use axiom::config::{AxiomConfig, OutputConfig};
-use axiom::db;
-use axiom::errors::AxiomError;
-use axiom::query::{parse_query_file, QueryCatalog};
+use axiom_core::axm::{generate_rust_models, generate_typescript_models, resolve_models};
+use axiom_core::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
+use axiom_core::catalog::{parse_sql_catalog, TableCatalog};
+use axiom_core::codegen::{generate_rust, generate_typescript};
+use axiom_core::config::{resolve_glob_paths, AxiomConfig, OutputConfig};
+use axiom_core::db;
+use axiom_core::errors::AxiomError;
+use axiom_core::query::{parse_query_file, QueryCatalog};
 use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
+
+mod commands;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -47,6 +49,38 @@ enum Commands {
     Generate(GenerateArgs),
     /// Push generated output to a target database.
     Push(PushArgs),
+    /// Verify workspace correctness and generated-output synchronization.
+    Check(CheckArgs),
+    /// Format `.axm` models and SQL inputs using canonical, deterministic rules.
+    Format(FormatArgs),
+    /// Run static analysis rules over `.axm` models and SQL inputs.
+    Lint(LintArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CheckArgs {
+    /// Rewrite out-of-sync generated files on disk.
+    #[arg(long)]
+    fix: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct FormatArgs {
+    /// Check formatting only; do not modify files. Exits non-zero when any
+    /// file would be reformatted.
+    #[arg(long)]
+    check: bool,
+    /// Format only the given files (paths or glob patterns), instead of the
+    /// configured inputs.
+    #[arg(value_name = "FILE")]
+    files: Vec<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct LintArgs {
+    /// Only run the given rules, by name.
+    #[arg(long, value_name = "RULE")]
+    rules: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -75,20 +109,26 @@ struct PushArgs {
 async fn main() -> miette::Result<()> {
     miette::set_panic_hook();
 
-    if let Err(err) = run().await {
-        eprintln!("{:?}", miette::Report::new(err));
-        std::process::exit(1);
+    let exit_code = match run().await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{:?}", miette::Report::new(err));
+            1
+        }
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }
 
-async fn run() -> Result<(), AxiomError> {
+async fn run() -> Result<i32, AxiomError> {
     let cli = Cli::parse();
 
     match &cli.command {
         Commands::Schema => {
             println!("{}", AxiomConfig::generate_json_schema());
-            return Ok(());
+            return Ok(0);
         }
         Commands::Init { output, force } => {
             AxiomConfig::init_config(output, *force)?;
@@ -102,7 +142,7 @@ async fn run() -> Result<(), AxiomError> {
                 "Run 'axiom generate' to compile your SQL schemas."
                     .if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
             );
-            return Ok(());
+            return Ok(0);
         }
         _ => {}
     }
@@ -128,8 +168,17 @@ async fn run() -> Result<(), AxiomError> {
     );
 
     match cli.command {
-        Commands::Generate(args) => run_generate(args, &config, &config_path).await,
-        Commands::Push(args) => run_push(args, &config, &config_path).await,
+        Commands::Generate(args) => {
+            run_generate(args, &config, &config_path).await?;
+            Ok(0)
+        }
+        Commands::Push(args) => {
+            run_push(args, &config, &config_path).await?;
+            Ok(0)
+        }
+        Commands::Check(args) => commands::check::run(args, &config, &config_path),
+        Commands::Format(args) => commands::format::run(args, &config, &config_path),
+        Commands::Lint(args) => commands::lint::run(args, &config, &config_path),
         Commands::Schema | Commands::Init { .. } => {
             unreachable!("handled before config loading")
         }
@@ -141,27 +190,6 @@ fn load_env(env_file: Option<&PathBuf>) -> Result<(), AxiomError> {
         dotenvy::from_path(path)?;
     }
     Ok(())
-}
-
-/// Resolve the configured glob patterns into ordered file paths, relative to
-/// the directory containing the config file.
-fn resolve_glob_paths(
-    patterns: &[String],
-    base: &Path,
-) -> Result<Vec<PathBuf>, AxiomError> {
-    let mut paths = Vec::new();
-    for pattern in patterns {
-        let pattern_path = Path::new(pattern);
-        let joined = if pattern_path.is_absolute() {
-            pattern.to_string()
-        } else {
-            base.join(pattern).to_string_lossy().into_owned()
-        };
-        for path in glob::glob(&joined)? {
-            paths.push(path?);
-        }
-    }
-    Ok(paths)
 }
 
 async fn run_generate(

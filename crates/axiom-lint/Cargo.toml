@@ -1,0 +1,11 @@
+[package]
+name = "axiom-lint"
+version.workspace = true
+edition.workspace = true
+description = "Static analysis engine with rule-based linting for `.axm` models and SQL."
+
+[dependencies]
+axiom-core = { path = "../axiom-core" }
+axiom-diagnostics = { path = "../axiom-diagnostics" }
+serde_json.workspace = true
+sqlparser.workspace = true

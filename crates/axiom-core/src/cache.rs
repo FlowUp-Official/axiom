@@ -73,6 +73,90 @@ pub fn compute_file_hash(path: &Path) -> Result<[u8; 32], io::Error> {
     Ok(hasher.finalize().into())
 }
 
+/// Compute the BLAKE3 digest of in-memory bytes.
+///
+/// The single hashing primitive for the tooling subcommands (`check`,
+/// `format`, `lint`): every cache key is derived from content via this
+/// function, never a separate hash implementation.
+pub fn compute_content_hash(bytes: &[u8]) -> [u8; 32] {
+    blake3::hash(bytes).into()
+}
+
+/// Content-addressed cache shared by `check`, `format`, and `lint`.
+///
+/// Entries are raw byte payloads keyed by deterministic strings built from
+/// content hashes (e.g. `format:sql:<hex hash>`), so a payload is reused only
+/// while the exact input content that produced it is unchanged. The store is
+/// persisted with the same rkyv + mmap + atomic-rename machinery as the
+/// generate manifest, and cache failures degrade to `None` (recomputation)
+/// rather than errors.
+#[derive(Debug, Default)]
+pub struct ToolCache {
+    entries: BTreeMap<String, Vec<u8>>,
+}
+
+impl ToolCache {
+    /// Load the cache from disk. Missing, corrupt, or unreadable files yield
+    /// an empty cache rather than an error.
+    pub fn open(cache_path: &Path) -> ToolCache {
+        let Some(mmap) = mmap_cache_file(cache_path) else {
+            return ToolCache::default();
+        };
+        let Ok(archived) =
+            rkyv::access::<ArchivedToolCacheFile, rkyv::rancor::Error>(&mmap)
+        else {
+            return ToolCache::default();
+        };
+        let Ok(entries) = rkyv::deserialize::<BTreeMap<String, Vec<u8>>, rkyv::rancor::Error>(
+            &archived.entries,
+        ) else {
+            return ToolCache::default();
+        };
+        ToolCache { entries }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&[u8]> {
+        self.entries.get(key).map(|v| v.as_slice())
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: Vec<u8>) {
+        self.entries.insert(key.into(), value);
+    }
+
+    /// True when `key` holds a payload whose BLAKE3 digest matches `hash`,
+    /// i.e. the cached payload is the canonical output for that content.
+    pub fn matches_hash(&self, key: &str, hash: &[u8; 32]) -> bool {
+        self.get(key)
+            .is_some_and(|payload| blake3::hash(payload).as_bytes() == hash)
+    }
+
+    /// Persist atomically via a `.tmp` sibling, like the generate manifest.
+    pub fn save(&self, cache_path: &Path) -> Result<(), AxiomError> {
+        let file = ToolCacheFile {
+            entries: self.entries.clone(),
+        };
+        let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&file)?;
+
+        if let Some(parent) = cache_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let tmp_name = format!("{}.tmp", cache_path.display());
+        let tmp_path = Path::new(&tmp_name);
+        std::fs::write(tmp_path, serialized.as_ref())?;
+        std::fs::rename(tmp_path, cache_path)?;
+        Ok(())
+    }
+}
+
+/// On-disk rkyv view of [`ToolCache`].
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+struct ToolCacheFile {
+    entries: BTreeMap<String, Vec<u8>>,
+}
+
 /// Memory-map a cache file, returning `None` if it cannot be opened.
 fn mmap_cache_file(cache_path: &Path) -> Option<Mmap> {
     let file = std::fs::File::open(cache_path).ok()?;
@@ -217,5 +301,54 @@ mod tests {
         std::fs::write(&cache, b"this is not an rkyv archive").unwrap();
         assert!(!is_cache_valid(&cache, &hash(b"cfg"), &BTreeMap::new()));
         let _ = std::fs::remove_file(&cache);
+    }
+
+    #[test]
+    fn tool_cache_round_trips_payloads() {
+        let dir = std::env::temp_dir();
+        let cache = dir.join(format!("axiom-tool-cache-{}", std::process::id()));
+
+        let mut tool = ToolCache::default();
+        tool.insert("format:sql:abc".to_string(), b"formatted".to_vec());
+        tool.insert("check:axm:def".to_string(), b"ok".to_vec());
+        tool.save(&cache).expect("save");
+
+        let loaded = ToolCache::open(&cache);
+        assert_eq!(loaded.get("format:sql:abc"), Some(&b"formatted"[..]));
+        assert_eq!(loaded.get("check:axm:def"), Some(&b"ok"[..]));
+        assert_eq!(loaded.get("nope"), None);
+
+        let _ = std::fs::remove_file(&cache);
+    }
+
+    #[test]
+    fn tool_cache_missing_or_corrupt_yields_empty() {
+        assert_eq!(
+            ToolCache::open(&PathBuf::from("/nonexistent/tool.cache")).get("x"),
+            None
+        );
+
+        let dir = std::env::temp_dir();
+        let cache = dir.join(format!("axiom-tool-cache-bad-{}", std::process::id()));
+        std::fs::write(&cache, b"garbage").unwrap();
+        assert_eq!(ToolCache::open(&cache).get("x"), None);
+        let _ = std::fs::remove_file(&cache);
+    }
+
+    #[test]
+    fn tool_cache_matches_hash_uses_blake3() {
+        let mut tool = ToolCache::default();
+        tool.insert("k".to_string(), b"payload".to_vec());
+        let digest = blake3::hash(b"payload").into();
+        assert!(tool.matches_hash("k", &digest));
+        assert!(!tool.matches_hash("k", &hash(b"other")));
+        assert!(!tool.matches_hash("missing", &digest));
+    }
+
+    #[test]
+    fn content_hash_is_deterministic_blake3() {
+        assert_eq!(compute_content_hash(b"hello"), hash(b"hello"));
+        assert_eq!(compute_content_hash(b"hello"), compute_content_hash(b"hello"));
+        assert_ne!(compute_content_hash(b"hello"), compute_content_hash(b"hellp"));
     }
 }

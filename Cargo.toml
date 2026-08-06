@@ -1,9 +1,19 @@
-[package]
-name = "axiom"
+[workspace]
+resolver = "3"
+members = [
+    "crates/axiom-cli",
+    "crates/axiom-core",
+    "crates/axiom-diagnostics",
+    "crates/axiom-check",
+    "crates/axiom-format",
+    "crates/axiom-lint",
+]
+
+[workspace.package]
 version = "0.5.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 blake3 = "1.8.5"
 clap = { version = "4.6.5", features = ["derive", "env"] }
 dotenvy = "0.15.7"
@@ -21,3 +31,4 @@ thiserror = "2"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-postgres = "0.7.18"
 winnow = "0.7"
+regex = "1"

@@ -1,0 +1,13 @@
+[package]
+name = "axiom-check"
+version.workspace = true
+edition.workspace = true
+description = "Workspace correctness verification: parsing, reference resolution, and generated-output synchronization."
+
+[dependencies]
+axiom-core = { path = "../axiom-core" }
+axiom-diagnostics = { path = "../axiom-diagnostics" }
+blake3.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+sqlparser = { workspace = true, features = ["visitor"] }
