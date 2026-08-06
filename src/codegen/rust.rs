@@ -6,7 +6,7 @@ use crate::catalog::{ColumnSchema, RuleKind, TableCatalog, TableSchema, Validati
 use crate::codegen::util;
 use crate::query::{QueryCatalog, QueryDefinition, QueryReturnType};
 
-const REGEX_MATCHER: &str = r#"fn regex_is_match(pattern: &str, text: &str) -> bool {
+pub(crate) const REGEX_MATCHER: &str = r#"fn regex_is_match(pattern: &str, text: &str) -> bool {
     enum Atom {
         Char(char),
         Any,
@@ -331,15 +331,24 @@ fn emit_table(out: &mut String, table: &TableSchema) {
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
-    for column in &table.columns {
-        emit_column_validation(out, column);
+    let has_validations = table.columns.iter().any(|column| {
+        !column.rules.is_empty()
+            || util::rust_transform_chain(column).is_some()
+    });
+    if has_validations {
+        out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
+        for column in &table.columns {
+            emit_column_validation(out, column);
+        }
+        out.push_str("        if errors.is_empty() {\n");
+        out.push_str("            Ok(())\n");
+        out.push_str("        } else {\n");
+        out.push_str("            Err(errors)\n");
+        out.push_str("        }\n");
+    } else {
+        out.push_str("        let _ = self;\n");
+        out.push_str("        Ok(())\n");
     }
-    out.push_str("        if errors.is_empty() {\n");
-    out.push_str("            Ok(())\n");
-    out.push_str("        } else {\n");
-    out.push_str("            Err(errors)\n");
-    out.push_str("        }\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
 }
@@ -537,15 +546,20 @@ fn emit_query(out: &mut String, query: &QueryDefinition) {
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
-    for (param, rules) in &query.validations {
-        emit_param_validation(out, param, rules);
+    if query.validations.is_empty() {
+        out.push_str("        let _ = self;\n");
+        out.push_str("        Ok(())\n");
+    } else {
+        out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
+        for (param, rules) in &query.validations {
+            emit_param_validation(out, param, rules);
+        }
+        out.push_str("        if errors.is_empty() {\n");
+        out.push_str("            Ok(())\n");
+        out.push_str("        } else {\n");
+        out.push_str("            Err(errors)\n");
+        out.push_str("        }\n");
     }
-    out.push_str("        if errors.is_empty() {\n");
-    out.push_str("            Ok(())\n");
-    out.push_str("        } else {\n");
-    out.push_str("            Err(errors)\n");
-    out.push_str("        }\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use axiom::axm::{generate_rust_models, generate_typescript_models, resolve_models};
 use axiom::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
 use axiom::catalog::{parse_sql_catalog, TableCatalog};
 use axiom::codegen::{generate_rust, generate_typescript};
@@ -187,11 +188,21 @@ async fn run_generate(
         query_sources.push((path, sql));
     }
 
-    // BLAKE3 digests of the config file and every resolved input file (schema
-    // and query sources alike, so edits to queries invalidate the cache).
+    let mut model_sources: Vec<(PathBuf, String)> = Vec::new();
+    for path in resolve_glob_paths(&config.inputs.models, base)? {
+        let src = std::fs::read_to_string(&path)?;
+        model_sources.push((path, src));
+    }
+
+    // BLAKE3 digests of the config file and every resolved input file (schema,
+    // query, and model sources alike, so edits invalidate the cache).
     let config_hash = compute_file_hash(config_path)?;
     let mut file_hashes: BTreeMap<String, [u8; 32]> = BTreeMap::new();
-    for (path, _) in sources.iter().chain(&query_sources) {
+    for (path, _) in sources
+        .iter()
+        .chain(&query_sources)
+        .chain(&model_sources)
+    {
         file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
     }
 
@@ -222,14 +233,30 @@ async fn run_generate(
         query_catalog.queries.extend(parse_query_file(sql)?.queries);
     }
 
+    let model_registry = if model_sources.is_empty() {
+        None
+    } else {
+        Some(resolve_models(&model_sources)?)
+    };
+
     let generated: Vec<(String, String)> = config
         .outputs
         .iter()
         .map(|(name, output)| match output {
             OutputConfig::TypeScript(_) => {
-                (name.clone(), generate_typescript(&catalog, &query_catalog))
+                let mut code = generate_typescript(&catalog, &query_catalog);
+                if let Some(registry) = &model_registry {
+                    code.push_str(&generate_typescript_models(registry));
+                }
+                (name.clone(), code)
             }
-            OutputConfig::Rust(_) => (name.clone(), generate_rust(&catalog, &query_catalog)),
+            OutputConfig::Rust(_) => {
+                let mut code = generate_rust(&catalog, &query_catalog);
+                if let Some(registry) = &model_registry {
+                    code.push_str(&generate_rust_models(registry));
+                }
+                (name.clone(), code)
+            }
         })
         .collect();
 
@@ -258,11 +285,19 @@ async fn run_generate(
         let word = if query_count == 1 { "query" } else { "queries" };
         format!(" and {query_count} {word}")
     };
+    let model_part = match &model_registry {
+        Some(registry) if !registry.models.is_empty() => {
+            let word = if registry.models.len() == 1 { "model" } else { "models" };
+            format!(" and {} {word}", registry.models.len())
+        }
+        _ => String::new(),
+    };
     let summary = format!(
-        "generated {} target(s) from {} table(s){}:",
+        "generated {} target(s) from {} table(s){}{}:",
         generated.len(),
         catalog.tables.len(),
         query_part,
+        model_part,
     );
     let tables = catalog
         .tables

@@ -119,4 +119,36 @@ pub enum AxiomError {
     #[error("Failed to serialize cache manifest: {0}")]
     #[diagnostic(code(axiom::cache::archive))]
     Archive(#[from] rkyv::rancor::Error),
+
+    /// A `.axm` model file could not be parsed.
+    #[error("Failed to parse `{path}`: {message}")]
+    #[diagnostic(
+        code(axiom::axm::parse),
+        help("Fix the syntax error in the flagged `.axm` file, then re-run the generator.")
+    )]
+    ModelParseError { path: PathBuf, message: String },
+
+    /// Two `.axm` files declare a model with the same name.
+    #[error("Duplicate model `{name}` declared in `{first}` and `{second}`")]
+    #[diagnostic(
+        code(axiom::axm::duplicate),
+        help("Rename one of the models; the generated namespace shares a single model name.")
+    )]
+    ModelDuplicate { name: String, first: String, second: String },
+
+    /// An import or field type reference could not be linked.
+    #[error("Failed to resolve `{path}`: {message}")]
+    #[diagnostic(
+        code(axiom::axm::resolution),
+        help("Make sure the import path is correct and every referenced model is defined locally or imported.")
+    )]
+    ModelResolutionError { path: PathBuf, message: String },
+
+    /// `.axm` imports form a cycle.
+    #[error("Import cycle detected: {chain}")]
+    #[diagnostic(
+        code(axiom::axm::import_cycle),
+        help("Break the cycle by removing one of the imports in the reported chain.")
+    )]
+    ModelImportCycle { chain: String },
 }

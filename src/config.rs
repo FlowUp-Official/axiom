@@ -43,6 +43,10 @@ impl Default for CacheConfig {
 pub struct InputsConfig {
     pub schema: Vec<String>,
     pub queries: Vec<String>,
+    /// Glob patterns for `.axm` domain-model files. Absent for projects that
+    /// only generate from SQL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -154,6 +158,7 @@ impl AxiomConfig {
             inputs: InputsConfig {
                 schema: vec!["./schema.sql".to_string()],
                 queries: vec!["./queries/**/*.sql".to_string()],
+                models: vec!["./models/**/*.axm".to_string()],
             },
             validation: ValidationConfig {
                 on_error: "fail".to_string(),

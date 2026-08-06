@@ -1,5 +1,6 @@
 //! Axiom — code generator and schema synchronizer for SQL projects.
 
+pub mod axm;
 pub mod cache;
 pub mod catalog;
 pub mod codegen;
