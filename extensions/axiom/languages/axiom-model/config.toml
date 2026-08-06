@@ -1,0 +1,7 @@
+name = "Axiom Model"
+grammar = "axiom-model"
+path_suffixes = ["axm"]
+tab_size = 2
+
+[overrides.string]
+completion_query_characters = [".", ":"]

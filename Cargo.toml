@@ -7,6 +7,8 @@ members = [
     "crates/axiom-check",
     "crates/axiom-format",
     "crates/axiom-lint",
+    "crates/axiom-analysis",
+    "crates/axiom-lsp",
 ]
 
 [workspace.package]
@@ -30,5 +32,6 @@ sqlparser = "0.62.0"
 thiserror = "2"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-postgres = "0.7.18"
+tower-lsp = "0.20.0"
 winnow = "0.7"
 regex = "1"

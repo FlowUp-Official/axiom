@@ -33,6 +33,7 @@ export default defineConfig({
             { text: 'Database Sync', link: '/guide/database-sync' },
             { text: 'Performance', link: '/guide/performance' },
             { text: 'Monorepos', link: '/guide/monorepos' },
+            { text: 'LSP', link: '/guide/lsp' },
             { text: 'License', link: '/guide/license' },
           ],
         },

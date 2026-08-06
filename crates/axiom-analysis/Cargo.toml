@@ -1,0 +1,13 @@
+[package]
+name = "axiom-analysis"
+version.workspace = true
+edition.workspace = true
+description = "Incremental, editor-friendly semantic analysis over Axiom workspaces."
+
+[dependencies]
+axiom-check = { path = "../axiom-check" }
+axiom-core = { path = "../axiom-core" }
+axiom-diagnostics = { path = "../axiom-diagnostics" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
