@@ -35,8 +35,11 @@ fn missing_url_is_an_error_mentioning_both_sources() {
 #[test]
 fn blank_cli_url_is_still_authoritative() {
     assert_eq!(
-        db::resolve_db_url_from(Some(String::new()), Some("postgres://env.example/db".to_string()))
-            .unwrap(),
+        db::resolve_db_url_from(
+            Some(String::new()),
+            Some("postgres://env.example/db".to_string())
+        )
+        .unwrap(),
         ""
     );
 }
@@ -68,7 +71,9 @@ async fn pushes_schema_batch_to_live_postgres() {
     )
     .unwrap();
 
-    let count = db::push_schema(&client, &[ddl]).await.expect("push_schema failed");
+    let count = db::push_schema(&client, &[ddl])
+        .await
+        .expect("push_schema failed");
     assert_eq!(count, 1);
 
     let row = client

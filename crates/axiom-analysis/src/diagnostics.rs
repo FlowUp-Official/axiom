@@ -63,12 +63,20 @@ impl AnalysisDatabase {
                     match self.file_lang(path) {
                         Some(Lang::Sql) => {
                             if let Err(err) = axiom_core::catalog::parse_sql_catalog(text) {
-                                diags.push(axiom_check::diagnostics::parse_error(path, "check.sql-parse", err.to_string()));
+                                diags.push(axiom_check::diagnostics::parse_error(
+                                    path,
+                                    "check.sql-parse",
+                                    err.to_string(),
+                                ));
                             }
                         }
                         Some(Lang::Axm) => {
                             if let Err(err) = axiom_core::axm::parser::parse_axm_file(text) {
-                                diags.push(axiom_check::diagnostics::parse_error(path, "check.axm-parse", err.to_string()));
+                                diags.push(axiom_check::diagnostics::parse_error(
+                                    path,
+                                    "check.axm-parse",
+                                    err.to_string(),
+                                ));
                             }
                         }
                         None => {}
@@ -149,7 +157,8 @@ impl AnalysisDatabase {
             .map(|f| (f.path.clone(), f.text.clone()))
             .collect()
     }
-}/// Attach a byte span to a diagnostic that the compiler produced without one.
+}
+/// Attach a byte span to a diagnostic that the compiler produced without one.
 fn enrich(path: &Path, text: &str, index: &PositionIndex, mut diag: Diagnostic) -> Diagnostic {
     if diag.span.is_some() {
         return diag;

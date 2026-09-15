@@ -43,14 +43,13 @@ impl AnalysisDatabase {
         let tokens = &index.tokens;
 
         // `alias.` or `table.` — column completion.
-        if let Some(dot) = tokens
+        if let Some(dot) = tokens.iter().find(|t| {
+            t.kind == TokenKind::Punct && t.text == "." && t.start <= offset && offset <= t.end + 1
+        }) && let Some(qualifier) = tokens
             .iter()
-            .find(|t| t.kind == TokenKind::Punct && t.text == "." && t.start <= offset && offset <= t.end + 1)
-            && let Some(qualifier) = tokens
-                .iter()
-                .rev()
-                .find(|t| t.kind != TokenKind::Comment && t.end <= dot.start)
-                .filter(|t| t.is_word())
+            .rev()
+            .find(|t| t.kind != TokenKind::Comment && t.end <= dot.start)
+            .filter(|t| t.is_word())
             && let Some(columns) = self.columns_for_qualifier(path, qualifier.ident_value())
         {
             return columns
@@ -102,7 +101,11 @@ impl AnalysisDatabase {
             && let Some(table) = symbols.table(&name)
         {
             for column in &table.columns {
-                if column.name.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                if column
+                    .name
+                    .to_lowercase()
+                    .starts_with(&prefix.to_lowercase())
+                {
                     items.push(CompletionItem {
                         label: column.name.clone(),
                         detail: column.type_name.clone(),
@@ -169,10 +172,9 @@ impl AnalysisDatabase {
         let tokens = &index.tokens;
 
         // `x.` — model field completion and/or validator callables.
-        if let Some(dot) = tokens
-            .iter()
-            .find(|t| t.kind == TokenKind::Punct && t.text == "." && t.start <= offset && offset <= t.end + 1)
-        {
+        if let Some(dot) = tokens.iter().find(|t| {
+            t.kind == TokenKind::Punct && t.text == "." && t.start <= offset && offset <= t.end + 1
+        }) {
             let qualifier = tokens
                 .iter()
                 .rev()
@@ -216,18 +218,17 @@ impl AnalysisDatabase {
             .find(|t| t.kind != TokenKind::Comment && t.end <= word_start)
             .is_some_and(|t| t.kind == TokenKind::Punct && t.text == ":")
         {
-            let mut items: Vec<CompletionItem> = [
-                "string", "int", "float", "boolean", "json", "timestamp",
-            ]
-            .iter()
-            .filter(|p| p.starts_with(&prefix.to_lowercase()))
-            .map(|p| CompletionItem {
-                label: (*p).to_string(),
-                detail: "primitive".to_string(),
-                kind: CompletionKind::Type,
-                insert_text: (*p).to_string(),
-            })
-            .collect();
+            let mut items: Vec<CompletionItem> =
+                ["string", "int", "float", "boolean", "json", "timestamp"]
+                    .iter()
+                    .filter(|p| p.starts_with(&prefix.to_lowercase()))
+                    .map(|p| CompletionItem {
+                        label: (*p).to_string(),
+                        detail: "primitive".to_string(),
+                        kind: CompletionKind::Type,
+                        insert_text: (*p).to_string(),
+                    })
+                    .collect();
             items.extend(self.model_completions(&prefix));
             return items;
         }

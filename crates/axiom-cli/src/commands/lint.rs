@@ -6,13 +6,13 @@ use axiom_core::cache::ToolCache;
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
 use axiom_core::paths::resolve_path;
-use axiom_diagnostics::{render_all, Renderer, summary};
-use axiom_lint::{lint_sources, LintOptions, WorkspaceView};
+use axiom_diagnostics::{Renderer, render_all, summary};
+use axiom_lint::{LintOptions, WorkspaceView, lint_sources};
 use owo_colors::{OwoColorize, Stream};
 
+use crate::LintArgs;
 use crate::commands::base_dir;
 use crate::commands::tty::is_tty;
-use crate::LintArgs;
 
 /// Run the configured lint rules over every input file, honoring
 /// `--rules` selection and the content-addressed [`ToolCache`].
@@ -20,9 +20,7 @@ pub fn run(args: LintArgs, config: &AxiomConfig, config_path: &Path) -> Result<i
     let base = base_dir(config_path);
     let workspace = axiom_check::resolve_inputs(config, &base)?;
 
-    let mut files = Vec::with_capacity(
-        workspace.schema_files.len() + workspace.model_files.len(),
-    );
+    let mut files = Vec::with_capacity(workspace.schema_files.len() + workspace.model_files.len());
     files.extend(workspace.schema_files.iter().cloned());
     files.extend(workspace.model_files.iter().cloned());
 
@@ -57,9 +55,8 @@ pub fn run(args: LintArgs, config: &AxiomConfig, config_path: &Path) -> Result<i
     if errors + warnings == 0 {
         println!(
             "{}",
-            "No lint issues found".if_supports_color(Stream::Stdout, |s| {
-                s.green().bold().to_string()
-            }),
+            "No lint issues found"
+                .if_supports_color(Stream::Stdout, |s| { s.green().bold().to_string() }),
         );
         return Ok(0);
     }

@@ -98,7 +98,10 @@ pub fn parse_sql_catalog<'a>(sql: &'a str) -> Result<TableCatalog<'a>, AxiomErro
 
 fn column_nullable(col: &ColumnDef) -> bool {
     col.options.iter().all(|o| {
-        !matches!(o.option, ColumnOption::NotNull | ColumnOption::PrimaryKey(_))
+        !matches!(
+            o.option,
+            ColumnOption::NotNull | ColumnOption::PrimaryKey(_)
+        )
     })
 }
 

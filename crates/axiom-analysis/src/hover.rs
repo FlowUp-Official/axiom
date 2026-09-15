@@ -4,9 +4,9 @@ use std::path::Path;
 
 use axiom_core::axm::ast::Rule;
 
+use crate::HoverInfo;
 use crate::database::{AnalysisDatabase, Lang, Role};
 use crate::symbols::Span;
-use crate::HoverInfo;
 
 impl AnalysisDatabase {
     pub fn hover(&mut self, path: &Path, offset: usize) -> Option<HoverInfo> {
@@ -98,13 +98,12 @@ impl AnalysisDatabase {
             .filter_map(|f| {
                 let field_index = index.find_word_any(&f.name)?;
                 (field_index.start == token.start).then(|| {
-                    let rules: Vec<String> = f
-                        .ty
-                        .rules
-                        .iter()
-                        .map(rule_label)
-                        .chain(f.ty.transforms.iter().map(transform_label))
-                        .collect();
+                    let rules: Vec<String> =
+                        f.ty.rules
+                            .iter()
+                            .map(rule_label)
+                            .chain(f.ty.transforms.iter().map(transform_label))
+                            .collect();
                     (f.name.as_str(), format!("{:?}", f.ty), rules)
                 })
             })

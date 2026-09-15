@@ -17,7 +17,9 @@ pub enum AxiomError {
     #[error("Configuration file `axiom.json` not found in current directory.")]
     #[diagnostic(
         code(axiom::config::missing),
-        help("Create an `axiom.json` file in the project root, or specify an explicit path using `--config <PATH>`.")
+        help(
+            "Create an `axiom.json` file in the project root, or specify an explicit path using `--config <PATH>`."
+        )
     )]
     MissingConfig,
 
@@ -38,7 +40,9 @@ pub enum AxiomError {
     #[error("Configuration file `{path}` does not match the Axiom JSON schema:\n{errors}")]
     #[diagnostic(
         code(axiom::config::validation_failed),
-        help("Fix the flagged keys in `axiom.json`, or consult the canonical schema at https://raw.githubusercontent.com/FlowUp-Official/axiom/main/schemas/axiom.schema.json")
+        help(
+            "Fix the flagged keys in `axiom.json`, or consult the canonical schema at https://raw.githubusercontent.com/FlowUp-Official/axiom/main/schemas/axiom.schema.json"
+        )
     )]
     ConfigValidationFailed { path: PathBuf, errors: String },
 
@@ -46,7 +50,9 @@ pub enum AxiomError {
     #[error("Configuration file `{path}` already exists.")]
     #[diagnostic(
         code(axiom::config::already_exists),
-        help("Use `--force` to overwrite the existing configuration file, or specify a different path with `--output <PATH>`.")
+        help(
+            "Use `--force` to overwrite the existing configuration file, or specify a different path with `--output <PATH>`."
+        )
     )]
     ConfigAlreadyExists { path: String },
 
@@ -59,7 +65,9 @@ pub enum AxiomError {
     #[error("Environment file `{0}` does not exist.")]
     #[diagnostic(
         code(axiom::push::env_file_missing),
-        help("Point `--env-file` at a valid dotenv file, or omit it to fall back to `.env` and the process environment.")
+        help(
+            "Point `--env-file` at a valid dotenv file, or omit it to fall back to `.env` and the process environment."
+        )
     )]
     EnvFileMissing(PathBuf),
 
@@ -120,13 +128,19 @@ pub enum AxiomError {
         code(axiom::axm::duplicate),
         help("Rename one of the models; the generated namespace shares a single model name.")
     )]
-    ModelDuplicate { name: String, first: String, second: String },
+    ModelDuplicate {
+        name: String,
+        first: String,
+        second: String,
+    },
 
     /// An import or field type reference could not be linked.
     #[error("Failed to resolve `{path}`: {message}")]
     #[diagnostic(
         code(axiom::axm::resolution),
-        help("Make sure the import path is correct and every referenced model is defined locally or imported.")
+        help(
+            "Make sure the import path is correct and every referenced model is defined locally or imported."
+        )
     )]
     ModelResolutionError { path: PathBuf, message: String },
 

@@ -41,9 +41,7 @@ impl Token {
     /// The identifier value of a word or quoted identifier, without quotes.
     pub fn ident_value(&self) -> &str {
         match self.kind {
-            TokenKind::QuotedIdent if self.text.len() >= 2 => {
-                &self.text[1..self.text.len() - 1]
-            }
+            TokenKind::QuotedIdent if self.text.len() >= 2 => &self.text[1..self.text.len() - 1],
             _ => &self.text,
         }
     }
@@ -99,7 +97,10 @@ impl<'a> Scanner<'a> {
 
 /// Scan an identifier-ish run (unquoted word, digits) starting at `start`.
 fn scan_word(s: &Scanner, start: usize) -> String {
-    s.text[start..].chars().take_while(|&c| is_word_char(c)).collect()
+    s.text[start..]
+        .chars()
+        .take_while(|&c| is_word_char(c))
+        .collect()
 }
 
 /// Scan an identifier-ish run (unquoted word, digits) starting at `start`.
@@ -224,8 +225,7 @@ pub fn tokenize_sql(src: &str) -> Vec<Token> {
                     text: src[start..scanner.pos].to_string(),
                 });
             }
-            ':' if scanner
-                .text[scanner.pos + 1..]
+            ':' if scanner.text[scanner.pos + 1..]
                 .chars()
                 .next()
                 .is_some_and(is_word_start) =>
@@ -442,11 +442,9 @@ impl PositionIndex {
     /// after `from`.
     pub fn find_word(&self, name: &str, from: usize) -> Option<&Token> {
         let lower = name.to_lowercase();
-        self.tokens.iter().find(|t| {
-            t.is_word()
-                && t.start >= from
-                && t.ident_value().to_lowercase() == lower
-        })
+        self.tokens
+            .iter()
+            .find(|t| t.is_word() && t.start >= from && t.ident_value().to_lowercase() == lower)
     }
 
     /// Find a word token matching `name` (case-insensitive) anywhere.
@@ -496,7 +494,10 @@ mod tests {
         let src = "-- hello\nSELECT 1 /* block */";
         let tokens = tokenize_sql(src);
         assert_eq!(
-            tokens.iter().filter(|t| t.kind == TokenKind::Comment).count(),
+            tokens
+                .iter()
+                .filter(|t| t.kind == TokenKind::Comment)
+                .count(),
             2
         );
     }

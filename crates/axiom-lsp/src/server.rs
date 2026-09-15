@@ -44,11 +44,7 @@ impl AxiomServer {
     fn publish_workspace(&self) {
         let pairs: Vec<(Url, Vec<Diagnostic>)> = {
             let mut state = self.state.lock().unwrap();
-            let paths: Vec<PathBuf> = state
-                .db
-                .file_paths()
-                .map(Path::to_path_buf)
-                .collect();
+            let paths: Vec<PathBuf> = state.db.file_paths().map(Path::to_path_buf).collect();
             paths
                 .iter()
                 .flat_map(|p| handlers::diagnostics::lsp_diagnostics(&mut state.db, p))
@@ -117,9 +113,7 @@ impl LanguageServer for AxiomServer {
         self.state.lock().unwrap().base = base;
 
         let capabilities = ServerCapabilities {
-            text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                TextDocumentSyncKind::FULL,
-            )),
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             completion_provider: Some(CompletionOptions {
                 trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
@@ -146,20 +140,19 @@ impl LanguageServer for AxiomServer {
 
         // Discover and load the project config, if any. Without one the server
         // still serves single-file diagnostics for open buffers.
-        let (config, found_at) = match axiom_core::config::AxiomConfig::find_and_load(
-            Some(&config_path),
-        ) {
-            Ok(found) => found,
-            Err(err) => {
-                // A missing config is a normal single-file setup; an existing
-                // but broken one is a problem the user should see.
-                if config_path.exists() {
-                    self.publish_error(&config_path, err.to_string());
+        let (config, found_at) =
+            match axiom_core::config::AxiomConfig::find_and_load(Some(&config_path)) {
+                Ok(found) => found,
+                Err(err) => {
+                    // A missing config is a normal single-file setup; an existing
+                    // but broken one is a problem the user should see.
+                    if config_path.exists() {
+                        self.publish_error(&config_path, err.to_string());
+                    }
+                    self.state.lock().unwrap().loaded = true;
+                    return;
                 }
-                self.state.lock().unwrap().loaded = true;
-                return;
-            }
-        };
+            };
 
         let cache_path = if config.cache.enabled {
             Some(base.join(&config.cache.path))
@@ -180,7 +173,10 @@ impl LanguageServer for AxiomServer {
         if let Err(err) = load_result {
             self.publish_error(
                 &found_at,
-                format!("Failed to load workspace from {}: {err}", found_at.display()),
+                format!(
+                    "Failed to load workspace from {}: {err}",
+                    found_at.display()
+                ),
             );
         }
 
@@ -231,9 +227,7 @@ impl LanguageServer for AxiomServer {
                 state.db.close(&path);
             }
         }
-        self.client
-            .publish_diagnostics(uri, Vec::new(), None)
-            .await;
+        self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -294,10 +288,7 @@ impl LanguageServer for AxiomServer {
         Ok(edit)
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
         let Some(path) = uri.to_file_path().ok() else {
             return Ok(None);

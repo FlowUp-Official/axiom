@@ -19,22 +19,23 @@ use std::path::{Path, PathBuf};
 
 use axiom_core::axm::ast::AxmFile;
 use axiom_core::axm::parser::parse_axm_file;
-use axiom_core::axm::resolver::{resolve_models, ModelRegistry};
-use axiom_core::cache::{compute_content_hash, ToolCache};
-use axiom_core::catalog::{parse_sql_catalog, ColumnSchema, TableCatalog, TableSchema};
+use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
+use axiom_core::cache::{ToolCache, compute_content_hash};
+use axiom_core::catalog::{ColumnSchema, TableCatalog, TableSchema, parse_sql_catalog};
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
 use axiom_core::query::QueryCatalog;
 
 use crate::references::{
-    query_return_type_refs, resolve_axm_refs, resolve_query_refs, AxmRef, QueryRefs,
+    AxmRef, QueryRefs, query_return_type_refs, resolve_axm_refs, resolve_query_refs,
 };
-use crate::symbols::{build_model_symbols, build_table_symbols, SymbolTable};
+use crate::symbols::{SymbolTable, build_model_symbols, build_table_symbols};
 use crate::token::PositionIndex;
 
 /// Opaque file identifier, following the compiler-database pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FileId(pub u32);#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileId(pub u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Sql,
     Axm,
@@ -262,7 +263,11 @@ impl AnalysisDatabase {
             role
         };
         let index = self.build_index(&lang, &text);
-        let axm = if lang == Lang::Axm { parse_axm_file(&text).ok() } else { None };
+        let axm = if lang == Lang::Axm {
+            parse_axm_file(&text).ok()
+        } else {
+            None
+        };
         self.by_path.insert(path.to_path_buf(), self.files.len());
         self.files.push(FileEntry {
             path: path.to_path_buf(),
@@ -361,14 +366,20 @@ impl AnalysisDatabase {
         seen.insert(changed.to_path_buf());
         if change.catalog {
             for entry in &self.files {
-                if entry.role == Role::Query && entry.path != changed && seen.insert(entry.path.clone()) {
+                if entry.role == Role::Query
+                    && entry.path != changed
+                    && seen.insert(entry.path.clone())
+                {
                     out.push(entry.path.clone());
                 }
             }
         }
         if change.registry {
             for entry in &self.files {
-                if entry.role == Role::Model && entry.path != changed && seen.insert(entry.path.clone()) {
+                if entry.role == Role::Model
+                    && entry.path != changed
+                    && seen.insert(entry.path.clone())
+                {
                     out.push(entry.path.clone());
                 }
             }

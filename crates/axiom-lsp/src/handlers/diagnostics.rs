@@ -8,17 +8,12 @@ use std::path::Path;
 
 use axiom_analysis::AnalysisDatabase;
 use axiom_diagnostics::Severity;
-use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Url,
-};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Url};
 
 use crate::handlers::lsp_range;
 
 /// LSP diagnostics for one file. `None` when the file is not tracked.
-pub fn lsp_diagnostics(
-    db: &mut AnalysisDatabase,
-    path: &Path,
-) -> Vec<(Url, Vec<Diagnostic>)> {
+pub fn lsp_diagnostics(db: &mut AnalysisDatabase, path: &Path) -> Vec<(Url, Vec<Diagnostic>)> {
     let Some(text) = db.file_text(path).map(str::to_string) else {
         return Vec::new();
     };

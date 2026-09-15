@@ -187,66 +187,64 @@ pub(crate) fn effective_fields(
     path: &Path,
     model: &ModelDecl,
 ) -> Vec<EffectiveField> {
-    if let Some(source) = &model.source {
-        if let Some(table) = catalog.tables.iter().find(|t| t.name == source.relation) {
-            let mut used = vec![false; model.fields.len()];
-            let mut out = Vec::with_capacity(table.columns.len() + model.fields.len());
+    if let Some(source) = &model.source
+        && let Some(table) = catalog.tables.iter().find(|t| t.name == source.relation)
+    {
+        let mut used = vec![false; model.fields.len()];
+        let mut out = Vec::with_capacity(table.columns.len() + model.fields.len());
 
-            for column in &table.columns {
-                let db_name = util::ts_field_name(&column.name);
-                let declared = model
-                    .fields
-                    .iter()
-                    .zip(&mut used)
-                    .find(|(field, matched)| {
-                        !**matched && (field.name == column.name || field.name == db_name)
-                    });
+        for column in &table.columns {
+            let db_name = util::ts_field_name(&column.name);
+            let declared = model.fields.iter().zip(&mut used).find(|(field, matched)| {
+                !**matched && (field.name == column.name || field.name == db_name)
+            });
 
-                if let Some((field, matched)) = declared {
-                    *matched = true;
-                    let mut annotated = inline_annotated(registry, path, &field.ty);
-                    if column.nullable
-                        && field.default.is_none()
-                        && !matches!(annotated.base, TypeRef::Nullable(_))
-                    {
-                        annotated.base =
-                            TypeRef::Nullable(Box::new(std::mem::replace(&mut annotated.base, TypeRef::String)));
-                    }
-                    out.push(EffectiveField {
-                        emitted_name: field.name.clone(),
-                        annotated,
-                        optional: field.optional || column.nullable,
-                        default: field.default.clone(),
-                    });
-                } else {
-                    let base = sql_type_to_type_ref(&column.data_type);
-                    let base = if column.nullable {
-                        TypeRef::Nullable(Box::new(base))
-                    } else {
-                        base
-                    };
-                    out.push(EffectiveField {
-                        emitted_name: db_name,
-                        annotated: AnnotatedType::new(base),
-                        optional: column.nullable,
-                        default: None,
-                    });
-                }
-            }
-
-            for (field, matched) in model.fields.iter().zip(&used) {
-                if *matched {
-                    continue;
+            if let Some((field, matched)) = declared {
+                *matched = true;
+                let mut annotated = inline_annotated(registry, path, &field.ty);
+                if column.nullable
+                    && field.default.is_none()
+                    && !matches!(annotated.base, TypeRef::Nullable(_))
+                {
+                    annotated.base = TypeRef::Nullable(Box::new(std::mem::replace(
+                        &mut annotated.base,
+                        TypeRef::String,
+                    )));
                 }
                 out.push(EffectiveField {
                     emitted_name: field.name.clone(),
-                    annotated: inline_annotated(registry, path, &field.ty),
-                    optional: field.optional,
+                    annotated,
+                    optional: field.optional || column.nullable,
                     default: field.default.clone(),
                 });
+            } else {
+                let base = sql_type_to_type_ref(&column.data_type);
+                let base = if column.nullable {
+                    TypeRef::Nullable(Box::new(base))
+                } else {
+                    base
+                };
+                out.push(EffectiveField {
+                    emitted_name: db_name,
+                    annotated: AnnotatedType::new(base),
+                    optional: column.nullable,
+                    default: None,
+                });
             }
-            return out;
         }
+
+        for (field, matched) in model.fields.iter().zip(&used) {
+            if *matched {
+                continue;
+            }
+            out.push(EffectiveField {
+                emitted_name: field.name.clone(),
+                annotated: inline_annotated(registry, path, &field.ty),
+                optional: field.optional,
+                default: field.default.clone(),
+            });
+        }
+        return out;
     }
 
     model
@@ -277,7 +275,12 @@ pub(crate) fn inline_annotated(
     inline_alias(registry, path, ann, 0)
 }
 
-fn inline_alias(registry: &ModelRegistry, path: &Path, ann: &AnnotatedType, depth: usize) -> AnnotatedType {
+fn inline_alias(
+    registry: &ModelRegistry,
+    path: &Path,
+    ann: &AnnotatedType,
+    depth: usize,
+) -> AnnotatedType {
     match &ann.base {
         TypeRef::Named(name) => {
             let effective = registry.effective_name(path, name);
@@ -331,7 +334,9 @@ fn inline_element(registry: &ModelRegistry, path: &Path, ty: &TypeRef, depth: us
                 _ => ty.clone(),
             }
         }
-        TypeRef::Array(inner) => TypeRef::Array(Box::new(inline_element(registry, path, inner, depth))),
+        TypeRef::Array(inner) => {
+            TypeRef::Array(Box::new(inline_element(registry, path, inner, depth)))
+        }
         TypeRef::Nullable(inner) => {
             TypeRef::Nullable(Box::new(inline_element(registry, path, inner, depth)))
         }
@@ -376,7 +381,13 @@ pub(crate) fn named_kind(registry: &ModelRegistry, path: &Path, name: &str) -> N
     }
 }
 
-fn resolve_pure(registry: &ModelRegistry, path: &Path, written: &str, fallback: TypeRef, depth: usize) -> TypeRef {
+fn resolve_pure(
+    registry: &ModelRegistry,
+    path: &Path,
+    written: &str,
+    fallback: TypeRef,
+    depth: usize,
+) -> TypeRef {
     let effective = registry.effective_name(path, written);
     if let Some(resolved) = registry.type_by_name(effective) {
         if depth >= MAX_ALIAS_DEPTH {
@@ -386,7 +397,13 @@ fn resolve_pure(registry: &ModelRegistry, path: &Path, written: &str, fallback: 
         if inlined.transforms.is_empty() && inlined.rules.is_empty() {
             match &inlined.base {
                 TypeRef::Named(next) => {
-                    return resolve_pure(registry, &resolved.path, next, inlined.base.clone(), depth + 1);
+                    return resolve_pure(
+                        registry,
+                        &resolved.path,
+                        next,
+                        inlined.base.clone(),
+                        depth + 1,
+                    );
                 }
                 _ => return inlined.base,
             }
@@ -400,13 +417,9 @@ fn resolve_pure(registry: &ModelRegistry, path: &Path, written: &str, fallback: 
 pub(crate) fn sql_type_to_type_ref(data_type: &str) -> TypeRef {
     match core_type(data_type).as_str() {
         "BIGINT" | "BIGSERIAL" | "INT8" => TypeRef::BigInt,
-        "INT" | "INT2" | "INT4" | "INTEGER" | "SMALLINT" | "SERIAL" | "SMALLSERIAL" => {
-            TypeRef::Int
-        }
+        "INT" | "INT2" | "INT4" | "INTEGER" | "SMALLINT" | "SERIAL" | "SMALLSERIAL" => TypeRef::Int,
         "FLOAT" | "FLOAT4" | "REAL" => TypeRef::Float,
-        "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" | "DECIMAL" | "DEC" | "NUMERIC" => {
-            TypeRef::Float
-        }
+        "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" | "DECIMAL" | "DEC" | "NUMERIC" => TypeRef::Float,
         "BOOL" | "BOOLEAN" => TypeRef::Boolean,
         "UUID" => TypeRef::Uuid,
         "JSON" | "JSONB" => TypeRef::Json,

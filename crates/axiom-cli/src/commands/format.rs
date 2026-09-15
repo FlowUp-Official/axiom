@@ -2,14 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use axiom_core::config::{resolve_glob_paths, AxiomConfig};
+use axiom_core::config::{AxiomConfig, resolve_glob_paths};
 use axiom_core::errors::AxiomError;
-use axiom_diagnostics::{render_all, Diagnostic, Renderer, summary};
+use axiom_diagnostics::{Diagnostic, Renderer, render_all, summary};
 use owo_colors::{OwoColorize, Stream};
 
+use crate::FormatArgs;
 use crate::commands::base_dir;
 use crate::commands::tty::is_tty;
-use crate::FormatArgs;
 
 /// Format every configured input (or the explicit `--files`), writing the
 /// canonical form back to disk. With `--check` nothing is written; the run
@@ -28,12 +28,8 @@ pub fn run(args: FormatArgs, config: &AxiomConfig, config_path: &Path) -> Result
             None => continue,
             Some(Err(message)) => {
                 diagnostics.push(
-                    Diagnostic::error(
-                        path,
-                        "format.parse",
-                        format!("failed to format: {message}"),
-                    )
-                    .with_help("fix the syntax error so the file can be parsed"),
+                    Diagnostic::error(path, "format.parse", format!("failed to format: {message}"))
+                        .with_help("fix the syntax error so the file can be parsed"),
                 );
                 continue;
             }
@@ -44,12 +40,8 @@ pub fn run(args: FormatArgs, config: &AxiomConfig, config_path: &Path) -> Result
                 changed += 1;
                 if args.check {
                     diagnostics.push(
-                        Diagnostic::warning(
-                            path,
-                            "format.would-reformat",
-                            "file is not formatted",
-                        )
-                        .with_help("run `axiom format` to reformat it"),
+                        Diagnostic::warning(path, "format.would-reformat", "file is not formatted")
+                            .with_help("run `axiom format` to reformat it"),
                     );
                     continue;
                 }
@@ -80,9 +72,8 @@ pub fn run(args: FormatArgs, config: &AxiomConfig, config_path: &Path) -> Result
         }
         println!(
             "{}",
-            "All files are formatted".if_supports_color(Stream::Stdout, |s| {
-                s.green().bold().to_string()
-            }),
+            "All files are formatted"
+                .if_supports_color(Stream::Stdout, |s| { s.green().bold().to_string() }),
         );
         return Ok(0);
     }

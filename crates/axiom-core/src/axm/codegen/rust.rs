@@ -14,13 +14,13 @@ use std::path::Path;
 
 use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, Transform, TypeRef};
 use crate::axm::codegen::{
-    collect_uses, effective_fields, inline_annotated, model_name, named_kind, rule_message,
-    NamedKind, Uses,
+    NamedKind, Uses, collect_uses, effective_fields, inline_annotated, model_name, named_kind,
+    rule_message,
 };
 use crate::axm::resolver::ModelRegistry;
+use crate::catalog::TableCatalog;
 use crate::codegen::rust::REGEX_MATCHER;
 use crate::codegen::util;
-use crate::catalog::TableCatalog;
 
 /// Generate the Rust module body for a registry. Assumes the surrounding
 /// output already defines `ValidationError` (which the SQL generator always
@@ -32,14 +32,24 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
 
     let uses = collect_uses(registry, catalog);
     let mut out = String::new();
-    out.push_str("\n// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "\n// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// .axm models\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     emit_helpers(&mut out, &uses);
 
     for resolved in &registry.types {
-        emit_type_alias(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+        emit_type_alias(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.ty.name,
+            &resolved.ty.ty,
+        );
     }
     for resolved in &registry.models {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
@@ -50,7 +60,13 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
         emit_impl_and_coerce(&mut out, registry, &resolved.path, &resolved.model, &fields);
     }
     for resolved in &registry.types {
-        emit_alias_coerce(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+        emit_alias_coerce(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.ty.name,
+            &resolved.ty.ty,
+        );
     }
     for resolved in &registry.queries {
         emit_query(&mut out, registry, &resolved.path, &resolved.query);
@@ -94,7 +110,9 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     out.push_str("    out\n");
     out.push_str("}\n\n");
 
-    out.push_str("fn push_error(errors: &mut Vec<ValidationError>, path: &[PathSegment], message: &str) {\n");
+    out.push_str(
+        "fn push_error(errors: &mut Vec<ValidationError>, path: &[PathSegment], message: &str) {\n",
+    );
     out.push_str("    errors.push(ValidationError {\n");
     out.push_str("        path: render_path(path),\n");
     out.push_str("        message: message.to_string(),\n");
@@ -144,7 +162,7 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
             out.push_str(line);
             out.push('\n');
         }
-        out.push_str("\n");
+        out.push('\n');
 
         out.push_str("fn coerce_datetime(value: &serde_json::Value, path: &mut Vec<PathSegment>, errors: &mut Vec<ValidationError>) -> String {\n");
         out.push_str("    match value.as_str() {\n");
@@ -165,7 +183,9 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         out.push_str("                match item.as_u64() {\n");
         out.push_str("                    Some(n) if n <= 255 => out.push(n as u8),\n");
         out.push_str("                    _ => {\n");
-        out.push_str("                        push_error(errors, path, \"expected a byte sequence\");\n");
+        out.push_str(
+            "                        push_error(errors, path, \"expected a byte sequence\");\n",
+        );
         out.push_str("                        return Vec::new();\n");
         out.push_str("                    }\n");
         out.push_str("                }\n");
@@ -452,16 +472,25 @@ fn emit_impl_and_coerce(
         out,
         "    pub fn safe_parse(value: &serde_json::Value) -> Result<{type_name}, Vec<ValidationError>> {{"
     );
-    let _ = writeln!(out, "        let mut errors: Vec<ValidationError> = Vec::new();");
+    let _ = writeln!(
+        out,
+        "        let mut errors: Vec<ValidationError> = Vec::new();"
+    );
     let _ = writeln!(out, "        let mut path: Vec<PathSegment> = Vec::new();");
-    let _ = writeln!(out, "        let out = {coerce_name}(value, &mut path, &mut errors);");
+    let _ = writeln!(
+        out,
+        "        let out = {coerce_name}(value, &mut path, &mut errors);"
+    );
     let _ = writeln!(out, "        if errors.is_empty() {{");
     let _ = writeln!(out, "            Ok(out)");
     let _ = writeln!(out, "        }} else {{");
     let _ = writeln!(out, "            Err(errors)");
     let _ = writeln!(out, "        }}");
     let _ = writeln!(out, "    }}\n");
-    let _ = writeln!(out, "    pub fn parse(value: &serde_json::Value) -> {type_name} {{");
+    let _ = writeln!(
+        out,
+        "    pub fn parse(value: &serde_json::Value) -> {type_name} {{"
+    );
     let _ = writeln!(out, "        match Self::safe_parse(value) {{");
     let _ = writeln!(out, "            Ok(value) => value,");
     let _ = writeln!(
@@ -478,7 +507,10 @@ fn emit_impl_and_coerce(
     );
     let _ = writeln!(out, "    let mut out = {type_name}::default();");
     let _ = writeln!(out, "    let Some(record) = value.as_object() else {{");
-    let _ = writeln!(out, "        push_error(errors, path, \"expected an object\");");
+    let _ = writeln!(
+        out,
+        "        push_error(errors, path, \"expected an object\");"
+    );
     let _ = writeln!(out, "        return out;");
     let _ = writeln!(out, "    }};");
     for field in fields {
@@ -524,7 +556,10 @@ fn emit_field(
                 out,
                 "{pad}        path.push(PathSegment::Field(\"{key}\".to_string()));"
             );
-            let _ = writeln!(out, "{pad}        push_error(errors, path, \"field is required\");");
+            let _ = writeln!(
+                out,
+                "{pad}        push_error(errors, path, \"field is required\");"
+            );
             let _ = writeln!(out, "{pad}        path.pop();");
             let _ = writeln!(out, "{pad}    }}");
             let _ = writeln!(out, "{pad}}}");
@@ -543,7 +578,11 @@ fn emit_field_body(
     let key = util::escape_rust(&field.emitted_name);
     let rust_name = util::rust_field_name(&field.emitted_name);
     let optional = field.optional;
-    let raw_expr = if field.default.is_some() { "&raw" } else { "raw" };
+    let raw_expr = if field.default.is_some() {
+        "&raw"
+    } else {
+        "raw"
+    };
 
     let _ = writeln!(
         out,
@@ -564,7 +603,6 @@ fn emit_field_body(
             let _ = writeln!(out, "{pad}    out.{rust_name} = Some(value);");
             let _ = writeln!(out, "{pad}}}");
             let _ = writeln!(out, "{pad}path.pop();");
-            return;
         }
         TypeRef::Array(inner) => {
             let _ = writeln!(
@@ -572,7 +610,10 @@ fn emit_field_body(
                 "{pad}let base = coerce_array({raw_expr}, path, errors);"
             );
             let _ = writeln!(out, "{pad}let mut items = Vec::with_capacity(base.len());");
-            let _ = writeln!(out, "{pad}for (index, entry) in base.into_iter().enumerate() {{");
+            let _ = writeln!(
+                out,
+                "{pad}for (index, entry) in base.into_iter().enumerate() {{"
+            );
             let _ = writeln!(out, "{pad}    path.push(PathSegment::Index(index));");
             let _ = writeln!(
                 out,
@@ -588,12 +629,11 @@ fn emit_field_body(
             };
             let _ = writeln!(out, "{pad}out.{rust_name} = {assign};");
             let _ = writeln!(out, "{pad}path.pop();");
-            return;
         }
         _ => {
             emit_annotated_value(out, registry, path, &field.annotated, raw_expr, base_indent);
             let assign = if optional {
-                format!("Some(value)")
+                "Some(value)".to_string()
             } else {
                 "value".to_string()
             };
@@ -690,9 +730,7 @@ fn rust_field_type(
     } else {
         rust_named_type(registry, path, &field.annotated.base)
     };
-    if field.optional && !nullable_is_base {
-        format!("Option<{base}>")
-    } else if nullable_is_base {
+    if field.optional || nullable_is_base {
         format!("Option<{base}>")
     } else {
         base
@@ -739,7 +777,10 @@ fn rust_coerce_value_expr(
         TypeRef::Bytes => format!("coerce_bytes({value}, path, errors)"),
         TypeRef::Named(name) => match named_kind(registry, path, name) {
             NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
-                format!("coerce_{}({value}, path, errors)", util::rust_field_name(&name))
+                format!(
+                    "coerce_{}({value}, path, errors)",
+                    util::rust_field_name(&name)
+                )
             }
             NamedKind::Pure(base) => rust_coerce_value_expr(registry, path, &base, value),
         },
@@ -779,7 +820,10 @@ fn emit_query(
     let params_type = format!("{pascal}Params");
     let fn_name = util::rust_field_name(&query.name);
 
-    let _ = writeln!(out, "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]");
+    let _ = writeln!(
+        out,
+        "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"
+    );
     let _ = writeln!(out, "pub struct {params_type} {{");
     for param in &query.params {
         let field = util::rust_field_name(&param.name);
@@ -899,7 +943,7 @@ fn emit_param_validation(
         format!("self.{field}")
     } else {
         let _ = writeln!(out, "        let {field} = self.{field}{chain};");
-        format!("{field}")
+        field.to_string()
     };
     for rule in &inlined.rules {
         let msg = util::escape_rust(&rule_message(rule));
@@ -1007,11 +1051,8 @@ mod tests {
     use crate::catalog::TableCatalog;
 
     fn registry(src: &str) -> ModelRegistry {
-        resolve_models(&[(
-            std::path::PathBuf::from("models/test.axm"),
-            src.to_string(),
-        )])
-        .expect("resolve")
+        resolve_models(&[(std::path::PathBuf::from("models/test.axm"), src.to_string())])
+            .expect("resolve")
     }
 
     fn no_catalog() -> TableCatalog<'static> {
@@ -1024,7 +1065,9 @@ mod tests {
             &registry("model User {\n  email: String .email()\n  age: Int\n}"),
             &no_catalog(),
         );
-        assert!(out.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, sqlx::FromRow)]"));
+        assert!(out.contains(
+            "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, sqlx::FromRow)]"
+        ));
         assert!(out.contains("pub struct User {"));
         assert!(out.contains("pub email: String,"));
         assert!(out.contains("pub age: i64,"));
@@ -1035,11 +1078,11 @@ mod tests {
 
     #[test]
     fn emits_safe_parse_and_parse() {
-        let out = generate_rust_models(
-            &registry("model User {\n  email: String\n}"),
-            &no_catalog(),
-        );
-        assert!(out.contains("pub fn safe_parse(value: &serde_json::Value) -> Result<User, Vec<ValidationError>>"));
+        let out =
+            generate_rust_models(&registry("model User {\n  email: String\n}"), &no_catalog());
+        assert!(out.contains(
+            "pub fn safe_parse(value: &serde_json::Value) -> Result<User, Vec<ValidationError>>"
+        ));
         assert!(out.contains("pub fn parse(value: &serde_json::Value) -> User {"));
         assert!(out.contains("panic!(\"User validation failed: {errors:?}\")"));
     }
@@ -1068,10 +1111,8 @@ mod tests {
 
     #[test]
     fn required_fields_report_missing() {
-        let out = generate_rust_models(
-            &registry("model User {\n  email: String\n}"),
-            &no_catalog(),
-        );
+        let out =
+            generate_rust_models(&registry("model User {\n  email: String\n}"), &no_catalog());
         assert!(out.contains("push_error(errors, path, \"field is required\");"));
     }
 
@@ -1089,7 +1130,9 @@ mod tests {
     #[test]
     fn error_paths_render_arrays_and_fields() {
         let out = generate_rust_models(
-            &registry("type Address = String .nonempty()\nmodel User {\n  history: Address[]\n  email: String .email()\n}"),
+            &registry(
+                "type Address = String .nonempty()\nmodel User {\n  history: Address[]\n  email: String .email()\n}",
+            ),
             &no_catalog(),
         );
         assert!(out.contains("pub enum PathSegment {"));
@@ -1114,7 +1157,10 @@ mod tests {
 
     #[test]
     fn empty_registry_generates_nothing() {
-        assert_eq!(generate_rust_models(&ModelRegistry::default(), &no_catalog()), "");
+        assert_eq!(
+            generate_rust_models(&ModelRegistry::default(), &no_catalog()),
+            ""
+        );
     }
 
     #[test]
@@ -1131,10 +1177,7 @@ mod tests {
 
     #[test]
     fn nullable_fields_emit_option() {
-        let out = generate_rust_models(
-            &registry("model User {\n  bio: String?\n}"),
-            &no_catalog(),
-        );
+        let out = generate_rust_models(&registry("model User {\n  bio: String?\n}"), &no_catalog());
         assert!(out.contains("pub bio: Option<String>,"));
         assert!(out.contains(".is_null()"));
         assert!(out.contains("out.bio = Some(value);"));

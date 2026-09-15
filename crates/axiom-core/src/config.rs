@@ -95,9 +95,7 @@ pub struct AxiomConfig {
 }
 
 impl AxiomConfig {
-    pub fn find_and_load(
-        explicit_path: Option<&Path>,
-    ) -> Result<(Self, PathBuf), AxiomError> {
+    pub fn find_and_load(explicit_path: Option<&Path>) -> Result<(Self, PathBuf), AxiomError> {
         let path = match explicit_path {
             Some(p) => p.to_path_buf(),
             None => {
@@ -145,7 +143,10 @@ impl AxiomConfig {
     pub fn default_template() -> Self {
         let project_name = std::env::current_dir()
             .ok()
-            .and_then(|dir| dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .and_then(|dir| {
+                dir.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "my-axiom-project".to_string());
 
@@ -204,17 +205,16 @@ impl AxiomConfig {
 /// Resolve the configured glob patterns into ordered file paths, relative to
 /// `base` (the directory containing the config file). Absolute patterns are
 /// used as-is. Shared by `generate`, `check`, `format`, and `lint`.
-pub fn resolve_glob_paths(
-    patterns: &[String],
-    base: &Path,
-) -> Result<Vec<PathBuf>, AxiomError> {
+pub fn resolve_glob_paths(patterns: &[String], base: &Path) -> Result<Vec<PathBuf>, AxiomError> {
     let mut paths = Vec::new();
     for pattern in patterns {
         let pattern_path = Path::new(pattern);
         let joined = if pattern_path.is_absolute() {
             pattern.to_string()
         } else {
-            resolve_path(base, pattern_path).to_string_lossy().into_owned()
+            resolve_path(base, pattern_path)
+                .to_string_lossy()
+                .into_owned()
         };
         for path in glob::glob(&joined)? {
             paths.push(path?);
@@ -227,9 +227,8 @@ pub fn resolve_glob_paths(
 ///
 /// Returns the rendered validation errors on failure, and `()` on success.
 fn validate_config_json(value: &serde_json::Value) -> Result<(), String> {
-    let schema: serde_json::Value =
-        serde_json::from_str(&AxiomConfig::generate_json_schema())
-            .expect("generated schema is always valid JSON");
+    let schema: serde_json::Value = serde_json::from_str(&AxiomConfig::generate_json_schema())
+        .expect("generated schema is always valid JSON");
     let validator = jsonschema::validator_for(&schema)
         .map_err(|error| format!("failed to build schema validator: {error}"))?;
 
@@ -368,12 +367,19 @@ mod tests {
         let path = fixture_path("force");
         AxiomConfig::init_config(&path, false).expect("first init should succeed");
 
-        std::fs::write(&path, r#"{ "project": { "name": "old", "dialect": "mysql" } }"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "project": { "name": "old", "dialect": "mysql" } }"#,
+        )
+        .unwrap();
         AxiomConfig::init_config(&path, true).expect("forced init should succeed");
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert!(value["outputs"]["core"]["type"].is_string(), "template was written");
+        assert!(
+            value["outputs"]["core"]["type"].is_string(),
+            "template was written"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

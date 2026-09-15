@@ -22,7 +22,11 @@ pub fn lsp_definition(
         target_uri,
         target_range,
         target_selection_range: target_range,
-        origin_selection_range: Some(lsp_range(db, path, axiom_analysis::Span::new(origin, origin))),
+        origin_selection_range: Some(lsp_range(
+            db,
+            path,
+            axiom_analysis::Span::new(origin, origin),
+        )),
     };
     Some(GotoDefinitionResponse::Link(vec![link]))
 }

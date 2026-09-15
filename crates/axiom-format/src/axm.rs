@@ -5,12 +5,12 @@
 //! returned as an error and left untouched by callers.
 
 use axiom_core::axm::ast::{
-    AnnotatedType, FieldDecl, ImportedName, ImportStmt, Literal, ModelDecl, ParamDecl, QueryDecl,
+    AnnotatedType, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ParamDecl, QueryDecl,
     QueryReturn, Rule, Transform, TypeDecl, TypeRef,
 };
 use axiom_core::axm::parser::parse_axm_file;
 
-use crate::printer::{fits_inline, indent, Lines, MAX_INLINE_WIDTH};
+use crate::printer::{Lines, MAX_INLINE_WIDTH, fits_inline, indent};
 
 /// Format a `.axm` source file to canonical form.
 ///
@@ -43,7 +43,12 @@ pub fn format_axm(src: &str) -> Result<String, String> {
 fn format_import(import: &ImportStmt) -> String {
     format!(
         "import {{ {} }} from \"{}\"",
-        import.names.iter().map(format_imported_name).collect::<Vec<_>>().join(", "),
+        import
+            .names
+            .iter()
+            .map(format_imported_name)
+            .collect::<Vec<_>>()
+            .join(", "),
         import.source
     )
 }
@@ -302,7 +307,8 @@ model UserView extends select<public.users> {
 
     #[test]
     fn breaks_long_rule_chains() {
-        let src = "model User {\n  username: String .alphanumeric() .min(3) .max(20) .nonempty()\n}";
+        let src =
+            "model User {\n  username: String .alphanumeric() .min(3) .max(20) .nonempty()\n}";
         assert_eq!(
             fmt(src),
             "model User {\n  username: String\n    .alphanumeric()\n    .min(3)\n    .max(20)\n    .nonempty()\n}\n"
@@ -346,7 +352,10 @@ model UserView extends select<public.users> {
     fn transforms_precede_validations() {
         let src = "model User {\n  email: String .email() .trim() .lowercase()\n}";
         let out = fmt(src);
-        assert!(out.contains("email: String.trim().lowercase().email()"), "{out}");
+        assert!(
+            out.contains("email: String.trim().lowercase().email()"),
+            "{out}"
+        );
     }
 
     #[test]

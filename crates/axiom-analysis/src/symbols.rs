@@ -102,7 +102,10 @@ impl SymbolTable {
     }
 
     pub fn column(&self, table: &str, column: &str) -> Option<&ColumnSym> {
-        self.table(table)?.columns.iter().find(|c| c.name.eq_ignore_ascii_case(column))
+        self.table(table)?
+            .columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(column))
     }
 
     pub fn model(&self, name: &str) -> Option<&ModelSym> {
@@ -136,14 +139,16 @@ impl SymbolTable {
 
     pub(crate) fn add_table(&mut self, table: TableSym) {
         if !self.table_index.contains_key(&table.name.to_lowercase()) {
-            self.table_index.insert(table.name.to_lowercase(), self.tables.len());
+            self.table_index
+                .insert(table.name.to_lowercase(), self.tables.len());
             self.tables.push(table);
         }
     }
 
     pub(crate) fn add_model(&mut self, model: ModelSym) {
         if !self.model_index.contains_key(&model.name.to_lowercase()) {
-            self.model_index.insert(model.name.to_lowercase(), self.models.len());
+            self.model_index
+                .insert(model.name.to_lowercase(), self.models.len());
             self.models.push(model);
         }
     }
@@ -152,9 +157,7 @@ impl SymbolTable {
 const AXM_PRIMITIVES: &[&str] = &["string", "int", "float", "boolean", "json", "timestamp"];
 
 pub fn is_axm_primitive(name: &str) -> bool {
-    AXM_PRIMITIVES
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(name))
+    AXM_PRIMITIVES.iter().any(|p| p.eq_ignore_ascii_case(name))
 }
 
 /// Build the SQL side of the symbol table from one schema file's owned
@@ -240,11 +243,7 @@ fn table_body_range(index: &PositionIndex, name_end: usize) -> (usize, usize) {
 
 /// Build the `.axm` side of the symbol table from one parsed model file and
 /// its position index.
-pub fn build_model_symbols(
-    file: &Path,
-    axm: &AxmFile,
-    index: &PositionIndex,
-) -> Vec<ModelSym> {
+pub fn build_model_symbols(file: &Path, axm: &AxmFile, index: &PositionIndex) -> Vec<ModelSym> {
     axm.models
         .iter()
         .map(|model| model_symbol(file, model, index))
@@ -271,12 +270,7 @@ fn model_symbol(file: &Path, model: &ModelDecl, index: &PositionIndex) -> ModelS
     }
 }
 
-fn field_symbol(
-    file: &Path,
-    field: &FieldDecl,
-    index: &PositionIndex,
-    from: usize,
-) -> FieldSym {
+fn field_symbol(file: &Path, field: &FieldDecl, index: &PositionIndex, from: usize) -> FieldSym {
     let span = index
         .find_word(&field.name, from)
         .map(|t| Span::new(t.start, t.end))
@@ -298,9 +292,10 @@ fn type_name_of(field: &FieldDecl, index: &PositionIndex, field_span: Span) -> S
         .iter()
         .find(|t| t.kind == TokenKind::Punct && t.text == ":" && t.start >= field_span.end)
         .map(|t| t.end)
-        && let Some(word) = index.tokens.iter().find(|t| {
-            t.kind == TokenKind::Word && t.start >= colon && !t.text.contains('.')
-        })
+        && let Some(word) = index
+            .tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Word && t.start >= colon && !t.text.contains('.'))
     {
         return word.text.clone();
     }
@@ -310,8 +305,8 @@ fn type_name_of(field: &FieldDecl, index: &PositionIndex, field_span: Span) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiom_core::catalog::ColumnSchema;
     use axiom_core::axm::parser::parse_axm_file;
+    use axiom_core::catalog::ColumnSchema;
 
     fn catalog_with(columns: &[(&str, &str, bool)]) -> TableCatalog<'static> {
         let mut table = TableSchema {
@@ -333,7 +328,8 @@ mod tests {
 
     #[test]
     fn builds_table_symbols_with_spans() {
-        let src = "CREATE TABLE users (\n  id BIGSERIAL PRIMARY KEY,\n  email VARCHAR(255) NOT NULL\n);";
+        let src =
+            "CREATE TABLE users (\n  id BIGSERIAL PRIMARY KEY,\n  email VARCHAR(255) NOT NULL\n);";
         let index = PositionIndex::new_sql(src);
         let catalog = catalog_with(&[("id", "BIGSERIAL", false), ("email", "VARCHAR(255)", false)]);
         let tables = build_table_symbols(Path::new("schema.sql"), &catalog, &index);
@@ -341,8 +337,14 @@ mod tests {
         let table = &tables[0];
         assert_eq!(&src[table.span.start..table.span.end], "users");
         assert_eq!(table.columns.len(), 2);
-        assert_eq!(&src[table.columns[0].span.start..table.columns[0].span.end], "id");
-        assert_eq!(&src[table.columns[1].span.start..table.columns[1].span.end], "email");
+        assert_eq!(
+            &src[table.columns[0].span.start..table.columns[0].span.end],
+            "id"
+        );
+        assert_eq!(
+            &src[table.columns[1].span.start..table.columns[1].span.end],
+            "email"
+        );
         assert_eq!(table.columns[1].type_name, "VARCHAR(255)");
     }
 
@@ -356,7 +358,10 @@ mod tests {
         let model = &models[0];
         assert_eq!(&src[model.span.start..model.span.end], "User");
         assert_eq!(model.fields.len(), 2);
-        assert_eq!(&src[model.fields[0].span.start..model.fields[0].span.end], "email");
+        assert_eq!(
+            &src[model.fields[0].span.start..model.fields[0].span.end],
+            "email"
+        );
         assert_eq!(model.fields[0].type_name, "Email");
         assert_eq!(model.fields[1].type_name, "Address");
     }
@@ -365,7 +370,11 @@ mod tests {
     fn symbol_table_lookup_is_case_insensitive() {
         let src = "CREATE TABLE users (id serial)";
         let index = PositionIndex::new_sql(src);
-        let tables = build_table_symbols(Path::new("schema.sql"), &catalog_with(&[("id", "serial", false)]), &index);
+        let tables = build_table_symbols(
+            Path::new("schema.sql"),
+            &catalog_with(&[("id", "serial", false)]),
+            &index,
+        );
         let mut st = SymbolTable::default();
         for t in tables {
             st.add_table(t);

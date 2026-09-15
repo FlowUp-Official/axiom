@@ -177,7 +177,10 @@ pub fn ts_regex_literal(pattern: &str, flags: &str) -> String {
 
 /// Is this rule a transform rather than a validation?
 pub fn is_transform(kind: &RuleKind<'_>) -> bool {
-    matches!(kind, RuleKind::Trim | RuleKind::LowerCase | RuleKind::UpperCase)
+    matches!(
+        kind,
+        RuleKind::Trim | RuleKind::LowerCase | RuleKind::UpperCase
+    )
 }
 
 /// Default human-readable message for a rule kind.

@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use axiom_core::axm::{generate_rust_models, generate_typescript_models, ModelRegistry};
+use axiom_core::axm::{ModelRegistry, generate_rust_models, generate_typescript_models};
 use axiom_core::catalog::TableCatalog;
 use axiom_core::codegen::{generate_rust, generate_typescript};
 use axiom_core::config::{AxiomConfig, OutputConfig};
-use axiom_core::paths::resolve_path;
 use axiom_core::errors::AxiomError;
+use axiom_core::paths::resolve_path;
 use axiom_core::query::QueryCatalog;
 use axiom_diagnostics::Diagnostic;
 

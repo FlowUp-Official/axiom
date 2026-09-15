@@ -55,9 +55,7 @@ pub fn resolve_db_url(
 }
 
 /// Establish an asynchronous connection and spawn the connection upkeep task.
-pub async fn connect(
-    db_url: &str,
-) -> Result<tokio_postgres::Client, AxiomError> {
+pub async fn connect(db_url: &str) -> Result<tokio_postgres::Client, AxiomError> {
     let (client, connection) = tokio_postgres::connect(db_url, tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -124,7 +122,13 @@ mod tests {
     #[test]
     fn missing_both_sources_is_an_actionable_error() {
         let err = resolve_db_url_from(None, None).unwrap_err().to_string();
-        assert!(err.contains("--db-url"), "error should hint at --db-url: {err}");
-        assert!(err.contains("DATABASE_URL"), "error should mention DATABASE_URL: {err}");
+        assert!(
+            err.contains("--db-url"),
+            "error should hint at --db-url: {err}"
+        );
+        assert!(
+            err.contains("DATABASE_URL"),
+            "error should mention DATABASE_URL: {err}"
+        );
     }
 }

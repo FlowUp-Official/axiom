@@ -46,10 +46,7 @@ async fn notify(
     method: &'static str,
     params: serde_json::Value,
 ) {
-    service
-        .oneshot(rpc_request(method, params))
-        .await
-        .unwrap();
+    service.oneshot(rpc_request(method, params)).await.unwrap();
 }
 
 /// A small, valid Axiom workspace on disk.
@@ -94,8 +91,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
     (dir, base)
 }
 
-async fn setup(    base: &std::path::Path,
-) -> (LspService<AxiomServer>, ClientSocket, Url) {
+async fn setup(base: &std::path::Path) -> (LspService<AxiomServer>, ClientSocket, Url) {
     let (service, socket) = LspService::new(AxiomServer::new);
     let mut service = service;
 
@@ -208,16 +204,14 @@ async fn did_open_reports_parse_errors_for_unknown_files() {
     )
     .await;
 
-    let (uri, diags) = wait_for_publish(
-        &mut socket,
-        |u| u == &broken,
-        Duration::from_secs(2),
-    )
-    .await;
+    let (uri, diags) =
+        wait_for_publish(&mut socket, |u| u == &broken, Duration::from_secs(2)).await;
     assert_eq!(uri, broken);
     assert!(!diags.is_empty(), "expected at least one diagnostic");
     assert!(
-        diags.iter().any(|d| d.severity == Some(DiagnosticSeverity::ERROR)),
+        diags
+            .iter()
+            .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)),
         "expected an error severity, got {diags:?}"
     );
     drop((dir, service));
@@ -437,12 +431,8 @@ async fn broken_config_publishes_error_diagnostic() {
     let (service, mut socket, _root) = setup(&base).await;
 
     let config_uri = file_uri(&base, "axiom.json");
-    let (uri, diags) = wait_for_publish(
-        &mut socket,
-        |u| u == &config_uri,
-        Duration::from_secs(2),
-    )
-    .await;
+    let (uri, diags) =
+        wait_for_publish(&mut socket, |u| u == &config_uri, Duration::from_secs(2)).await;
     assert_eq!(uri, config_uri);
     assert_eq!(diags.len(), 1, "expected one config error, got {diags:?}");
     assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
@@ -474,12 +464,8 @@ async fn workspace_load_failure_publishes_error_diagnostic() {
     let (service, mut socket, _root) = setup(&base).await;
 
     let config_uri = file_uri(&base, "axiom.json");
-    let (uri, diags) = wait_for_publish(
-        &mut socket,
-        |u| u == &config_uri,
-        Duration::from_secs(2),
-    )
-    .await;
+    let (uri, diags) =
+        wait_for_publish(&mut socket, |u| u == &config_uri, Duration::from_secs(2)).await;
     assert_eq!(uri, config_uri);
     assert_eq!(diags.len(), 1, "expected one load error, got {diags:?}");
     assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));

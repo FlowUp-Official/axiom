@@ -25,12 +25,7 @@ const PRESETS: &[(&str, &str, &str, &str)] = &[
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
         "",
     ),
-    (
-        "ULID",
-        "ulid",
-        "^[0-9A-HJKMNP-TV-Z]{26}$",
-        "",
-    ),
+    ("ULID", "ulid", "^[0-9A-HJKMNP-TV-Z]{26}$", ""),
     (
         "IPV4",
         "ipv4",
@@ -43,18 +38,8 @@ const PRESETS: &[(&str, &str, &str, &str)] = &[
         "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$",
         "",
     ),
-    (
-        "ISO_DATE",
-        "iso_date",
-        "^\\d{4}-\\d{2}-\\d{2}$",
-        "",
-    ),
-    (
-        "ALPHANUMERIC",
-        "alphanumeric",
-        "^[a-zA-Z0-9]+$",
-        "",
-    ),
+    ("ISO_DATE", "iso_date", "^\\d{4}-\\d{2}-\\d{2}$", ""),
+    ("ALPHANUMERIC", "alphanumeric", "^[a-zA-Z0-9]+$", ""),
 ];
 
 /// Generate a TypeScript module describing the catalog tables, their
@@ -256,7 +241,10 @@ fn emit_param_validation(out: &mut String, param: &str, rules: &[ValidationRule]
         let condition = ts_condition(&rule.kind, &value);
         let message = util::escape_ts(&util::rule_message(rule));
         let _ = writeln!(out, "  if (!({condition})) {{");
-        let _ = writeln!(out, "    errors.push({{ path: \"{field}\", message: \"{message}\" }});");
+        let _ = writeln!(
+            out,
+            "    errors.push({{ path: \"{field}\", message: \"{message}\" }});"
+        );
         let _ = writeln!(out, "  }}");
     }
 }
@@ -318,11 +306,7 @@ mod tests {
         QueryCatalog::default()
     }
 
-    fn col(
-        name: &'static str,
-        data_type: &'static str,
-        nullable: bool,
-    ) -> ColumnSchema<'static> {
+    fn col(name: &'static str, data_type: &'static str, nullable: bool) -> ColumnSchema<'static> {
         ColumnSchema {
             name: Cow::Borrowed(name),
             data_type: Cow::Borrowed(data_type),
@@ -348,7 +332,10 @@ mod tests {
     fn catalog_with_one_table() -> TableCatalog<'static> {
         let t = table(
             "users",
-            vec![col("email", "VARCHAR(255)", false), col("id", "BIGSERIAL", false)],
+            vec![
+                col("email", "VARCHAR(255)", false),
+                col("id", "BIGSERIAL", false),
+            ],
         );
         TableCatalog { tables: vec![t] }
     }
@@ -396,10 +383,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let out = generate_typescript(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("/^[a-z0-9-]+$/.test(params.slug)"));
     }
 
@@ -429,9 +413,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        QueryCatalog {
-            queries: vec![q],
-        }
+        QueryCatalog { queries: vec![q] }
     }
 
     #[test]
@@ -478,10 +460,7 @@ mod tests {
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
         };
-        let out = generate_typescript(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("WHERE email = ${params.email} AND id < ${params.maxId}"));
         assert!(out.contains("): Promise<void> {"));
     }
@@ -504,10 +483,7 @@ mod tests {
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
         };
-        let out = generate_typescript(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(
             out.contains("WHERE email = ${params.email} AND id < ${params.limit}"),
             "named placeholders must interpolate their declared param:\n{out}"
@@ -549,10 +525,7 @@ mod tests {
             return_type: QueryReturnType::Single(Cow::Borrowed("Users")),
             validations: Default::default(),
         };
-        let out = generate_typescript(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("): Promise<Users | null> {"));
         assert!(out.contains("const rows = await sql<Users[]>`"));
         assert!(out.contains("return rows[0] ?? null;"));

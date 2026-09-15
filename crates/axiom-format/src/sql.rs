@@ -15,15 +15,82 @@ use crate::printer::Lines;
 /// identifiers that sqlparser also classifies as keywords (e.g. `id`, `name`)
 /// untouched while still canonicalizing clause keywords.
 const KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "ORDER", "BY",
-    "ASC", "DESC", "LIMIT", "OFFSET", "GROUP", "HAVING", "JOIN", "INNER", "LEFT",
-    "RIGHT", "FULL", "OUTER", "CROSS", "ON", "AS", "CREATE", "TABLE", "INSERT",
-    "INTO", "VALUES", "UPDATE", "SET", "DELETE", "DROP", "ALTER", "ADD", "COLUMN",
-    "CONSTRAINT", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "INDEX",
-    "CHECK", "DEFAULT", "CASE", "WHEN", "THEN", "ELSE", "END", "EXISTS", "BETWEEN",
-    "LIKE", "ILIKE", "DISTINCT", "UNION", "ALL", "RETURNING", "WITH", "USING",
-    "IF", "REPLACE", "TEMPORARY", "TEMP", "BEGIN", "COMMIT", "ROLLBACK",
-    "TRANSACTION", "EXPLAIN", "ANALYZE", "CAST", "OVER", "PARTITION", "WINDOW",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "IS",
+    "NULL",
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "GROUP",
+    "HAVING",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "AS",
+    "CREATE",
+    "TABLE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "CONSTRAINT",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "INDEX",
+    "CHECK",
+    "DEFAULT",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "EXISTS",
+    "BETWEEN",
+    "LIKE",
+    "ILIKE",
+    "DISTINCT",
+    "UNION",
+    "ALL",
+    "RETURNING",
+    "WITH",
+    "USING",
+    "IF",
+    "REPLACE",
+    "TEMPORARY",
+    "TEMP",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "EXPLAIN",
+    "ANALYZE",
+    "CAST",
+    "OVER",
+    "PARTITION",
+    "WINDOW",
 ];
 
 /// Format SQL to canonical form. Output always ends with exactly one `\n`.
@@ -144,11 +211,7 @@ fn flush_line(lines: &mut Lines, current: &mut String, line_index: usize) -> usi
     } else {
         lines.push(trimmed);
     }
-    if ends_stmt {
-        0
-    } else {
-        line_index + 1
-    }
+    if ends_stmt { 0 } else { line_index + 1 }
 }
 
 /// Used when the input does not tokenize: strip trailing whitespace per line
@@ -199,7 +262,10 @@ mod tests {
     #[test]
     fn placeholders_and_literals_pass_through() {
         let sql = "SELECT $1, 'it''s', 42 FROM users WHERE email = $1";
-        assert_eq!(fmt(sql), "SELECT $1, 'it''s', 42 FROM users WHERE email = $1\n");
+        assert_eq!(
+            fmt(sql),
+            "SELECT $1, 'it''s', 42 FROM users WHERE email = $1\n"
+        );
     }
 
     #[test]
@@ -228,7 +294,10 @@ mod tests {
     fn unparseable_sql_falls_back_to_trimming() {
         let sql = "THIS IS NOT VALID SQL ###   ";
         let out = fmt(sql);
-        assert!(!out.ends_with("   "), "trailing whitespace removed: {out:?}");
+        assert!(
+            !out.ends_with("   "),
+            "trailing whitespace removed: {out:?}"
+        );
         assert!(out.ends_with('\n'));
     }
 }

@@ -9,22 +9,104 @@ use std::path::PathBuf;
 
 use axiom_core::query::QueryCatalog;
 
-use crate::symbols::{is_axm_primitive, Span, SymbolTable};
+use crate::symbols::{Span, SymbolTable, is_axm_primitive};
 use crate::token::{PositionIndex, Token, TokenKind};
 
 /// SQL keywords that are never identifiers. Kept deliberately small: anything
 /// not in this set is a candidate column reference and is later filtered by the
 /// symbol table.
 const SQL_KEYWORDS: &[&str] = &[
-    "select", "from", "where", "join", "inner", "left", "right", "full", "outer", "cross",
-    "on", "as", "and", "or", "not", "in", "is", "null", "like", "ilike", "between", "exists",
-    "insert", "into", "values", "update", "set", "delete", "create", "table", "alter", "add",
-    "drop", "order", "group", "by", "having", "limit", "offset", "union", "all", "distinct",
-    "returning", "primary", "key", "references", "constraint", "unique", "check", "default",
-    "index", "with", "case", "when", "then", "else", "end", "cast", "count", "sum", "avg",
-    "min", "max", "desc", "asc", "true", "false", "using", "collate", "nulls", "first", "last",
-    "window", "over", "partition", "row", "rows", "fetch", "next", "only", "offset", "conflict",
-    "do", "nothing", "return", "execute", "function", "begin", "commit", "rollback", "to",
+    "select",
+    "from",
+    "where",
+    "join",
+    "inner",
+    "left",
+    "right",
+    "full",
+    "outer",
+    "cross",
+    "on",
+    "as",
+    "and",
+    "or",
+    "not",
+    "in",
+    "is",
+    "null",
+    "like",
+    "ilike",
+    "between",
+    "exists",
+    "insert",
+    "into",
+    "values",
+    "update",
+    "set",
+    "delete",
+    "create",
+    "table",
+    "alter",
+    "add",
+    "drop",
+    "order",
+    "group",
+    "by",
+    "having",
+    "limit",
+    "offset",
+    "union",
+    "all",
+    "distinct",
+    "returning",
+    "primary",
+    "key",
+    "references",
+    "constraint",
+    "unique",
+    "check",
+    "default",
+    "index",
+    "with",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "cast",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "desc",
+    "asc",
+    "true",
+    "false",
+    "using",
+    "collate",
+    "nulls",
+    "first",
+    "last",
+    "window",
+    "over",
+    "partition",
+    "row",
+    "rows",
+    "fetch",
+    "next",
+    "only",
+    "offset",
+    "conflict",
+    "do",
+    "nothing",
+    "return",
+    "execute",
+    "function",
+    "begin",
+    "commit",
+    "rollback",
+    "to",
 ];
 
 fn is_keyword(word: &str) -> bool {
@@ -87,7 +169,8 @@ pub fn resolve_query_refs(
     // Alias -> table name map (case-insensitive aliases).
     for table in &table_uses {
         if let Some(alias) = &table.alias {
-            refs.aliases.push((alias.to_lowercase(), table.name.clone()));
+            refs.aliases
+                .push((alias.to_lowercase(), table.name.clone()));
         }
     }
 
@@ -133,9 +216,11 @@ pub fn resolve_query_refs(
         let matching: Vec<&str> = table_names
             .iter()
             .filter(|name| {
-                symbols
-                    .table(name)
-                    .is_some_and(|t| t.columns.iter().any(|c| c.name.eq_ignore_ascii_case(token.ident_value())))
+                symbols.table(name).is_some_and(|t| {
+                    t.columns
+                        .iter()
+                        .any(|c| c.name.eq_ignore_ascii_case(token.ident_value()))
+                })
             })
             .map(String::as_str)
             .collect();
@@ -186,7 +271,29 @@ fn find_table_uses(_file: &std::path::Path, tokens: &[Token]) -> Vec<TableUse> {
             .get(j + 1)
             .filter(|t| t.is_word())
             .map(|t| t.ident_value())
-            .filter(|a| !is_keyword(a) && !matches!(a.to_ascii_lowercase().as_str(), "where" | "on" | "order" | "group" | "limit" | "offset" | "having" | "union" | "set" | "returning" | "values" | "join" | "left" | "right" | "inner" | "full" | "cross"))
+            .filter(|a| {
+                !is_keyword(a)
+                    && !matches!(
+                        a.to_ascii_lowercase().as_str(),
+                        "where"
+                            | "on"
+                            | "order"
+                            | "group"
+                            | "limit"
+                            | "offset"
+                            | "having"
+                            | "union"
+                            | "set"
+                            | "returning"
+                            | "values"
+                            | "join"
+                            | "left"
+                            | "right"
+                            | "inner"
+                            | "full"
+                            | "cross"
+                    )
+            })
             .map(|a| a.to_string());
 
         uses.push(TableUse {
@@ -255,7 +362,11 @@ pub fn resolve_axm_refs(
                 .iter()
                 .find(|t| t.is_word() && t.ident_value() == written)
                 .map(|t| Span::new(t.start, t.end))
-                .or_else(|| index.find_word_any(written).map(|t| Span::new(t.start, t.end)));
+                .or_else(|| {
+                    index
+                        .find_word_any(written)
+                        .map(|t| Span::new(t.start, t.end))
+                });
             if let Some(span) = span {
                 refs.push(AxmRef {
                     name: written.to_string(),
@@ -291,9 +402,9 @@ fn field_type_span(
     field_end: usize,
     type_name: &str,
 ) -> Option<Span> {
-    let colon = tokens.iter().find(|t| {
-        t.start >= field_end && t.kind == TokenKind::Punct && t.text == ":"
-    })?;
+    let colon = tokens
+        .iter()
+        .find(|t| t.start >= field_end && t.kind == TokenKind::Punct && t.text == ":")?;
     let word = tokens.iter().find(|t| {
         t.start >= colon.end && t.is_word() && t.ident_value().eq_ignore_ascii_case(type_name)
     })?;
@@ -373,9 +484,9 @@ fn axm_return_span(src: &str, query_name: &str, return_name: &str) -> Option<Spa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiom_core::catalog::{ColumnSchema, TableCatalog, TableSchema};
+    use crate::symbols::{SymbolTable, build_model_symbols, build_table_symbols};
     use axiom_core::axm::parser::parse_axm_file;
-    use crate::symbols::{build_model_symbols, build_table_symbols, SymbolTable};
+    use axiom_core::catalog::{ColumnSchema, TableCatalog, TableSchema};
 
     fn make_symbols(schema: &str, axm: Option<&str>) -> SymbolTable {
         let mut symbols = SymbolTable::default();
@@ -436,7 +547,11 @@ mod tests {
         assert_eq!(refs.columns.len(), 3);
         assert!(refs.columns.iter().any(|c| c.label == "users.email"));
         assert!(refs.columns.iter().any(|c| c.label == "users.id"));
-        assert!(refs.columns.iter().any(|c| c.label == "users.email" && c.span.start > 10));
+        assert!(
+            refs.columns
+                .iter()
+                .any(|c| c.label == "users.email" && c.span.start > 10)
+        );
     }
 
     #[test]
@@ -445,7 +560,13 @@ mod tests {
         let symbols = make_symbols("", Some(axm));
         let index = PositionIndex::new_axm(axm);
         let parsed = parse_axm_file(axm).unwrap();
-        let refs = resolve_axm_refs(std::path::Path::new("models/a.axm"), axm, &index, &parsed, &symbols);
+        let refs = resolve_axm_refs(
+            std::path::Path::new("models/a.axm"),
+            axm,
+            &index,
+            &parsed,
+            &symbols,
+        );
         let user_refs: Vec<_> = refs.iter().filter(|r| r.name == "User").collect();
         assert_eq!(user_refs.len(), 1);
         assert!(user_refs[0].resolved_file.is_some());
@@ -465,8 +586,7 @@ mod tests {
             return_type: axiom_core::query::QueryReturnType::Single("User".into()),
             validations: Default::default(),
         });
-        let refs =
-            query_return_type_refs(std::path::Path::new("models/a.axm"), src, &queries);
+        let refs = query_return_type_refs(std::path::Path::new("models/a.axm"), src, &queries);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "User");
         assert_eq!(&src[refs[0].span.start..refs[0].span.end], "User");

@@ -17,9 +17,7 @@ use tower_lsp::lsp_types::{Position, Range};
 pub fn byte_offset(db: &AnalysisDatabase, path: &Path, pos: Position) -> usize {
     let text = db.file_text(path).unwrap_or("");
     db.position_index(path)
-        .and_then(|idx| {
-            idx.from_text_position(text, TextPosition::new(pos.line, pos.character))
-        })
+        .and_then(|idx| idx.from_text_position(text, TextPosition::new(pos.line, pos.character)))
         .unwrap_or(0)
 }
 

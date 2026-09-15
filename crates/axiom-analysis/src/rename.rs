@@ -63,7 +63,9 @@ impl AnalysisDatabase {
                         let refs = self.query_refs(&file).unwrap_or_default();
                         for r in refs.columns {
                             if r.table.eq_ignore_ascii_case(&parent)
-                                && r.column.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&sym.name))
+                                && r.column
+                                    .as_deref()
+                                    .is_some_and(|c| c.eq_ignore_ascii_case(&sym.name))
                             {
                                 push(&file, r.span);
                             }
@@ -94,8 +96,6 @@ impl AnalysisDatabase {
             }
         }
 
-        Some(Rename {
-            edits: grouped,
-        })
+        Some(Rename { edits: grouped })
     }
 }

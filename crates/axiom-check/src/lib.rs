@@ -24,10 +24,10 @@ use axiom_core::query::QueryCatalog;
 use axiom_diagnostics::Diagnostic;
 
 pub use diagnostics::{line_of_offset, span_for_line};
-pub use synchronization::{write_fixed_outputs, SyncCheck};
+pub use synchronization::{SyncCheck, write_fixed_outputs};
 pub use workspace::{
-    check_models, check_queries, check_schemas, collect_referenced_models, resolve_inputs,
-    Workspace,
+    Workspace, check_models, check_queries, check_schemas, collect_referenced_models,
+    resolve_inputs,
 };
 
 /// The outcome of a full `axiom check` run.

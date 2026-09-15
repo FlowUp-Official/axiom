@@ -43,6 +43,9 @@ mod tests {
     #[test]
     fn plain_join() {
         let base = Path::new("/project");
-        assert_eq!(resolve_path(base, Path::new("gen/api.ts")), Path::new("/project/gen/api.ts"));
+        assert_eq!(
+            resolve_path(base, Path::new("gen/api.ts")),
+            Path::new("/project/gen/api.ts")
+        );
     }
 }

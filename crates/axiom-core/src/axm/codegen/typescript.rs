@@ -15,8 +15,8 @@ use std::path::Path;
 
 use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, Transform, TypeRef};
 use crate::axm::codegen::{
-    canonical_name, collect_uses, effective_fields, inline_annotated, model_name, named_kind,
-    NamedKind, Uses,
+    NamedKind, Uses, canonical_name, collect_uses, effective_fields, inline_annotated, model_name,
+    named_kind,
 };
 use crate::axm::resolver::ModelRegistry;
 use crate::catalog::TableCatalog;
@@ -24,7 +24,8 @@ use crate::codegen::util;
 
 const EMAIL_RE: &str = r#"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"#;
 const URL_RE: &str = r#"^(https?://)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*/?$"#;
-const UUID_RE: &str = r#"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#;
+const UUID_RE: &str =
+    r#"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#;
 const ULID_RE: &str = r#"^[0-9A-HJKMNP-TV-Z]{26}$"#;
 const IPV4_RE: &str = r#"^(\d{1,3}\.){3}\d{1,3}$"#;
 const IPV6_RE: &str = r#"^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$"#;
@@ -42,14 +43,24 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
 
     let uses = collect_uses(registry, catalog);
     let mut out = String::new();
-    out.push_str("\n// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "\n// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// .axm models\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     emit_helpers(&mut out, &uses);
 
     for resolved in &registry.types {
-        emit_type_alias_for(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+        emit_type_alias_for(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.ty.name,
+            &resolved.ty.ty,
+        );
     }
 
     for resolved in &registry.models {
@@ -58,7 +69,13 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
     }
 
     for resolved in &registry.types {
-        emit_alias_coerce(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+        emit_alias_coerce(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.ty.name,
+            &resolved.ty.ty,
+        );
     }
 
     for resolved in &registry.queries {
@@ -79,12 +96,21 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     out.push_str("  return out;\n");
     out.push_str("}\n\n");
 
-    out.push_str("function fail(errors: ValidationError[], path: Seg[], message: string): boolean {\n");
+    out.push_str(
+        "function fail(errors: ValidationError[], path: Seg[], message: string): boolean {\n",
+    );
     out.push_str("  errors.push({ path: renderPath(path), message });\n");
     out.push_str("  return false;\n");
     out.push_str("}\n\n");
 
-    emit_coerce_helper(out, "coerceString", "string", "expected a string", "'string'", "");
+    emit_coerce_helper(
+        out,
+        "coerceString",
+        "string",
+        "expected a string",
+        "'string'",
+        "",
+    );
     if uses.int {
         emit_coerce_helper(
             out,
@@ -98,7 +124,9 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     if uses.bigint {
         out.push_str("function coerceBigInt(value: unknown, path: Seg[], errors: ValidationError[]): bigint {\n");
         out.push_str("  if (typeof value === 'bigint') return value;\n");
-        out.push_str("  if (typeof value === 'number' && Number.isInteger(value)) return BigInt(value);\n");
+        out.push_str(
+            "  if (typeof value === 'number' && Number.isInteger(value)) return BigInt(value);\n",
+        );
         out.push_str("  fail(errors, path, 'expected a big integer');\n");
         out.push_str("  return 0n;\n");
         out.push_str("}\n\n");
@@ -125,7 +153,9 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     }
     if uses.json {
         out.push_str("function coerceJson(value: unknown, path: Seg[], errors: ValidationError[]): unknown {\n");
-        out.push_str("  if (value === null || typeof value === 'string' || typeof value === 'number' ||\n");
+        out.push_str(
+            "  if (value === null || typeof value === 'string' || typeof value === 'number' ||\n",
+        );
         out.push_str("      typeof value === 'boolean' || Array.isArray(value) || typeof value === 'object') return value;\n");
         out.push_str("  fail(errors, path, 'expected a JSON value');\n");
         out.push_str("  return null;\n");
@@ -135,7 +165,13 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         emit_regex_coerce_helper(out, "coerceDate", DATE_RE, "", "expected an ISO 8601 date");
     }
     if uses.datetime {
-        emit_regex_coerce_helper(out, "coerceDateTime", TIMESTAMP_RE, "", "expected an ISO 8601 timestamp");
+        emit_regex_coerce_helper(
+            out,
+            "coerceDateTime",
+            TIMESTAMP_RE,
+            "",
+            "expected an ISO 8601 timestamp",
+        );
     }
     if uses.bytes {
         out.push_str("function coerceBytes(value: unknown, path: Seg[], errors: ValidationError[]): Uint8Array {\n");
@@ -154,7 +190,13 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     }
 
     if uses.email {
-        emit_regex_check_helper(out, "checkEmail", EMAIL_RE, "i", "must be a valid email address");
+        emit_regex_check_helper(
+            out,
+            "checkEmail",
+            EMAIL_RE,
+            "i",
+            "must be a valid email address",
+        );
     }
     if uses.url {
         emit_regex_check_helper(out, "checkUrl", URL_RE, "i", "must be a valid URL");
@@ -170,20 +212,34 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         out.push_str("  if (!IPV4.test(value) || value.split('.').some((oct) => Number(oct) > 255)) return fail(errors, path, 'must be a valid IPv4 address');\n");
         out.push_str("  return true;\n");
         out.push_str("}\n\n");
-        let _ = writeln!(
-            out,
-            "const IPV4 = {};",
-            util::ts_regex_literal(IPV4_RE, "")
-        );
+        let _ = writeln!(out, "const IPV4 = {};", util::ts_regex_literal(IPV4_RE, ""));
     }
     if uses.ipv6 {
-        emit_regex_check_helper(out, "checkIpv6", IPV6_RE, "", "must be a valid IPv6 address");
+        emit_regex_check_helper(
+            out,
+            "checkIpv6",
+            IPV6_RE,
+            "",
+            "must be a valid IPv6 address",
+        );
     }
     if uses.isodate {
-        emit_regex_check_helper(out, "checkIsoDate", DATE_RE, "", "must be a valid ISO 8601 date");
+        emit_regex_check_helper(
+            out,
+            "checkIsoDate",
+            DATE_RE,
+            "",
+            "must be a valid ISO 8601 date",
+        );
     }
     if uses.alphanumeric {
-        emit_regex_check_helper(out, "checkAlphanumeric", ALPHANUMERIC_RE, "", "must be alphanumeric");
+        emit_regex_check_helper(
+            out,
+            "checkAlphanumeric",
+            ALPHANUMERIC_RE,
+            "",
+            "must be alphanumeric",
+        );
     }
     if uses.nonempty {
         out.push_str("function checkNonEmpty(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
@@ -192,10 +248,20 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         out.push_str("}\n\n");
     }
     if uses.min_len {
-        emit_bounded_helper(out, "checkMinLen", "value.length < bound", "must be at least ");
+        emit_bounded_helper(
+            out,
+            "checkMinLen",
+            "value.length < bound",
+            "must be at least ",
+        );
     }
     if uses.max_len {
-        emit_bounded_helper(out, "checkMaxLen", "value.length > bound", "must be at most ");
+        emit_bounded_helper(
+            out,
+            "checkMaxLen",
+            "value.length > bound",
+            "must be at most ",
+        );
     }
     if uses.min {
         emit_bounded_helper(out, "checkMin", "value < bound", "must be >= ");
@@ -237,7 +303,13 @@ fn emit_coerce_helper(
     let _ = writeln!(out, "}}\n");
 }
 
-fn emit_regex_coerce_helper(out: &mut String, name: &str, pattern: &str, flags: &str, message: &str) {
+fn emit_regex_coerce_helper(
+    out: &mut String,
+    name: &str,
+    pattern: &str,
+    flags: &str,
+    message: &str,
+) {
     let _ = writeln!(
         out,
         "function {name}(value: unknown, path: Seg[], errors: ValidationError[]): string {{"
@@ -252,7 +324,13 @@ fn emit_regex_coerce_helper(out: &mut String, name: &str, pattern: &str, flags: 
     let _ = writeln!(out, "}}\n");
 }
 
-fn emit_regex_check_helper(out: &mut String, name: &str, pattern: &str, flags: &str, message: &str) {
+fn emit_regex_check_helper(
+    out: &mut String,
+    name: &str,
+    pattern: &str,
+    flags: &str,
+    message: &str,
+) {
     let _ = writeln!(
         out,
         "function {name}(value: string, path: Seg[], errors: ValidationError[]): boolean {{"
@@ -267,29 +345,55 @@ fn emit_regex_check_helper(out: &mut String, name: &str, pattern: &str, flags: &
 }
 
 fn emit_bounded_helper(out: &mut String, name: &str, condition: &str, prefix: &str) {
-    let _ = writeln!(out, "function {name}(value: number, bound: number, path: Seg[], errors: ValidationError[]): boolean {{");
-    let _ = writeln!(out, "  if ({condition}) return fail(errors, path, `{prefix}${{bound}}`);");
+    let _ = writeln!(
+        out,
+        "function {name}(value: number, bound: number, path: Seg[], errors: ValidationError[]): boolean {{"
+    );
+    let _ = writeln!(
+        out,
+        "  if ({condition}) return fail(errors, path, `{prefix}${{bound}}`);"
+    );
     let _ = writeln!(out, "  return true;");
     let _ = writeln!(out, "}}\n");
 }
 
-fn emit_type_alias_for(out: &mut String, registry: &ModelRegistry, path: &Path, declared: &str, ann: &AnnotatedType) {
+fn emit_type_alias_for(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    declared: &str,
+    ann: &AnnotatedType,
+) {
     let ty = ts_named_type(registry, path, &ann.base);
-    let _ = writeln!(out, "export type {} = {};", canonical_name(registry, path, declared), ty);
+    let _ = writeln!(
+        out,
+        "export type {} = {};",
+        canonical_name(registry, path, declared),
+        ty
+    );
 }
 
-fn emit_alias_coerce(out: &mut String, registry: &ModelRegistry, path: &Path, declared: &str, ann: &AnnotatedType) {
+fn emit_alias_coerce(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    declared: &str,
+    ann: &AnnotatedType,
+) {
     let inlined = inline_annotated(registry, path, ann);
     if inlined.transforms.is_empty() && inlined.rules.is_empty() {
         return;
     }
     let name = canonical_name(registry, path, declared);
     let result_ty = ts_named_type(registry, path, &inlined.base);
-    emit_annotated_fn(out, registry, path, &name, &result_ty, &inlined, "anchor", 0);
+    emit_annotated_fn(
+        out, registry, path, &name, &result_ty, &inlined, "anchor", 0,
+    );
 }
 
 /// Emit a standalone `coerce{Name}` function that validates `anchor` with the
 /// given (already inlined) annotation.
+#[allow(clippy::too_many_arguments)]
 fn emit_annotated_fn(
     out: &mut String,
     registry: &ModelRegistry,
@@ -355,13 +459,22 @@ fn emit_model(
         out,
         "export type {type_name}Result = {{ ok: true; value: {type_name} }} | {{ ok: false; errors: ValidationError[] }};"
     );
-    let _ = writeln!(out, "export function safeParse{type_name}(input: unknown): {type_name}Result {{");
+    let _ = writeln!(
+        out,
+        "export function safeParse{type_name}(input: unknown): {type_name}Result {{"
+    );
     let _ = writeln!(out, "  const errors: ValidationError[] = [];");
     let _ = writeln!(out, "  const value = coerce{type_name}(input, [], errors);");
-    let _ = writeln!(out, "  if (errors.length > 0) return {{ ok: false, errors }};");
+    let _ = writeln!(
+        out,
+        "  if (errors.length > 0) return {{ ok: false, errors }};"
+    );
     let _ = writeln!(out, "  return {{ ok: true, value }};");
     let _ = writeln!(out, "}}\n");
-    let _ = writeln!(out, "export function parse{type_name}(input: unknown): {type_name} {{");
+    let _ = writeln!(
+        out,
+        "export function parse{type_name}(input: unknown): {type_name} {{"
+    );
     let _ = writeln!(out, "  const result = safeParse{type_name}(input);");
     let _ = writeln!(
         out,
@@ -385,7 +498,11 @@ fn emit_field(
 
     match &field.default {
         Some(literal) => {
-            let _ = writeln!(out, "    if (raw === undefined) raw = {};", ts_literal(literal));
+            let _ = writeln!(
+                out,
+                "    if (raw === undefined) raw = {};",
+                ts_literal(literal)
+            );
             emit_field_assign(out, registry, path, field, 4);
         }
         None if field.optional => {
@@ -414,7 +531,11 @@ fn emit_field_assign(
 ) {
     let pad = " ".repeat(indent);
     emit_annotated_value(out, registry, path, &field.annotated, "raw", indent);
-    let _ = writeln!(out, "{pad}out.{} = value;", util::escape_ts(&field.emitted_name));
+    let _ = writeln!(
+        out,
+        "{pad}out.{} = value;",
+        util::escape_ts(&field.emitted_name)
+    );
 }
 
 /// Emit statements that bind `value` from the expression `raw`, applying the
@@ -480,16 +601,19 @@ fn coerce_value_expr(
         TypeRef::Bytes => format!("coerceBytes({value}, {path_expr}, {errors})"),
         TypeRef::Named(name) => match named_kind(registry, path, name) {
             NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
-                format!("coerce{}({value}, {path_expr}, {errors})", util::pascal_case(&name))
+                format!(
+                    "coerce{}({value}, {path_expr}, {errors})",
+                    util::pascal_case(&name)
+                )
             }
-            NamedKind::Pure(base) => coerce_value_expr(registry, path, &base, value, path_expr, errors),
+            NamedKind::Pure(base) => {
+                coerce_value_expr(registry, path, &base, value, path_expr, errors)
+            }
         },
         TypeRef::Array(inner) => {
             let item_path = format!("[...{path_expr}, ['i', index]]");
             let item = coerce_value_expr(registry, path, inner, "entry", &item_path, errors);
-            format!(
-                "coerceArray({value}, {path_expr}, {errors}).map((entry, index) => {item})"
-            )
+            format!("coerceArray({value}, {path_expr}, {errors}).map((entry, index) => {item})")
         }
         TypeRef::Nullable(inner) => {
             let inner = coerce_value_expr(registry, path, inner, value, path_expr, errors);
@@ -593,7 +717,10 @@ fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
         } else if token.bytes().all(|b| b.is_ascii_digit()) {
             let n: usize = token.parse().unwrap_or(0);
             if n >= 1 && n <= params.len() {
-                Some(format!("params.{}", util::ts_field_name(&params[n - 1].name)))
+                Some(format!(
+                    "params.{}",
+                    util::ts_field_name(&params[n - 1].name)
+                ))
             } else {
                 None
             }
@@ -649,7 +776,6 @@ fn emit_query(
     out.push_str("  const errors: ValidationError[] = [];\n");
     for param in &query.params {
         emit_param_validation(out, registry, path, param);
-
     }
     out.push_str("  return errors;\n");
     out.push_str("}\n\n");
@@ -719,15 +845,12 @@ fn emit_param_validation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::axm::resolver::{resolve_models, ModelRegistry};
+    use crate::axm::resolver::{ModelRegistry, resolve_models};
     use crate::catalog::{ColumnSchema, TableCatalog, TableSchema};
 
     fn registry(src: &str) -> ModelRegistry {
-        resolve_models(&[(
-            std::path::PathBuf::from("models/test.axm"),
-            src.to_string(),
-        )])
-        .expect("resolve")
+        resolve_models(&[(std::path::PathBuf::from("models/test.axm"), src.to_string())])
+            .expect("resolve")
     }
 
     fn no_catalog() -> TableCatalog<'static> {
@@ -736,9 +859,10 @@ mod tests {
 
     #[test]
     fn emits_interface_and_helpers() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  email: String .email()\n  age: Int\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  email: String .email()\n  age: Int\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("export interface User {"));
         assert!(out.contains("  email: string;"));
         assert!(out.contains("  age: number;"));
@@ -750,46 +874,53 @@ mod tests {
 
     #[test]
     fn emits_safe_parse_and_parse() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  email: String\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  email: String\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("export type UserResult = { ok: true; value: User } | { ok: false; errors: ValidationError[] };"));
         assert!(out.contains("export function safeParseUser(input: unknown): UserResult {"));
         assert!(out.contains("export function parseUser(input: unknown): User {"));
-        assert!(out.contains("throw new Error('User validation failed: ' + JSON.stringify(result.errors));"));
+        assert!(out.contains(
+            "throw new Error('User validation failed: ' + JSON.stringify(result.errors));"
+        ));
     }
 
     #[test]
     fn emits_transforms_before_validation() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  email: String .trim() .lowercase() .email()\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  email: String .trim() .lowercase() .email()\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("let value = base.trim().toLowerCase();"));
         assert!(out.contains("checkEmail(value, fieldPath, errors);"));
     }
 
     #[test]
     fn defaults_apply_when_missing() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  country: String = \"US\"\n  age?: Int\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  country: String = \"US\"\n  age?: Int\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("if (raw === undefined) raw = \"US\";"));
         assert!(out.contains("if (raw !== undefined) {"));
     }
 
     #[test]
     fn required_fields_fail_when_missing() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  email: String\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  email: String\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("fail(errors, fieldPath, 'field is required');"));
     }
 
     #[test]
     fn recursive_array_validation() {
-let out = generate_typescript_models(&registry(
-            "type Address = String .nonempty()\nmodel User {\n  history: Address[]\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("type Address = String .nonempty()\nmodel User {\n  history: Address[]\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("history: Address[];"));
         assert!(out.contains(
             "coerceArray(raw, fieldPath, errors).map((entry, index) => coerceAddress(entry, [...fieldPath, ['i', index]], errors))"
@@ -798,9 +929,10 @@ let out = generate_typescript_models(&registry(
 
     #[test]
     fn unused_helpers_are_not_emitted() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  name: String .nonempty()\n}",
-        ), &no_catalog());
+        let out = generate_typescript_models(
+            &registry("model User {\n  name: String .nonempty()\n}"),
+            &no_catalog(),
+        );
         assert!(out.contains("function checkNonEmpty("));
         assert!(!out.contains("function checkUuid("));
         assert!(!out.contains("function coerceDateTime("));
@@ -809,7 +941,10 @@ let out = generate_typescript_models(&registry(
 
     #[test]
     fn empty_registry_generates_nothing() {
-        assert_eq!(generate_typescript_models(&ModelRegistry::default(), &no_catalog()), "");
+        assert_eq!(
+            generate_typescript_models(&ModelRegistry::default(), &no_catalog()),
+            ""
+        );
     }
 
     #[test]
@@ -826,9 +961,8 @@ let out = generate_typescript_models(&registry(
 
     #[test]
     fn nullable_fields_emit_union_types() {
-        let out = generate_typescript_models(&registry(
-            "model User {\n  bio: String?\n}",
-        ), &no_catalog());
+        let out =
+            generate_typescript_models(&registry("model User {\n  bio: String?\n}"), &no_catalog());
         assert!(out.contains("  bio: string | null;"));
         assert!(out.contains("if (raw === null) {"));
         assert!(out.contains("value = null;"));
@@ -876,7 +1010,9 @@ query GetActiveUsers() -> User[] {
 "#;
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(out.contains("export interface GetUserParams {"));
-        assert!(out.contains("export async function getUser(\n  sql: Sql,\n  params: GetUserParams"));
+        assert!(
+            out.contains("export async function getUser(\n  sql: Sql,\n  params: GetUserParams")
+        );
         assert!(out.contains("): Promise<User | null> {"));
         assert!(out.contains("${params.id}"));
         assert!(out.contains("const rows = await sql<User[]>`"));

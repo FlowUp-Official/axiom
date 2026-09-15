@@ -19,7 +19,10 @@ pub fn lsp_formatting(path: &Path, text: &str) -> Vec<TextEdit> {
     let line_count = text.lines().count().max(1) as u32;
     let last_line_len = text.lines().last().map(str::len).unwrap_or(0) as u32;
     vec![TextEdit {
-        range: Range::new(Position::new(0, 0), Position::new(line_count, last_line_len)),
+        range: Range::new(
+            Position::new(0, 0),
+            Position::new(line_count, last_line_len),
+        ),
         new_text: formatted,
     }]
 }

@@ -313,7 +313,10 @@ pub fn generate_rust(catalog: &TableCatalog, queries: &QueryCatalog) -> String {
 fn emit_table(out: &mut String, table: &TableSchema) {
     let type_name = util::type_name(table);
 
-    let _ = writeln!(out, "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]");
+    let _ = writeln!(
+        out,
+        "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"
+    );
     let _ = writeln!(out, "pub struct {type_name} {{");
     for column in &table.columns {
         let field = util::rust_field_name(&column.name);
@@ -446,7 +449,10 @@ fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition)
     let params_type = format!("{pascal}Params");
     let fn_name = util::rust_field_name(&query.name);
 
-    let _ = writeln!(out, "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]");
+    let _ = writeln!(
+        out,
+        "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"
+    );
     let _ = writeln!(out, "pub struct {params_type} {{");
     for param in &query.params {
         let field = util::rust_field_name(&param.name);
@@ -501,8 +507,7 @@ fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition)
         QueryReturnType::Many(row) | QueryReturnType::Single(row) => {
             let sql_lit = rust_raw_string(&query.to_driver_sql());
             let _ = writeln!(out, "    let rows = sqlx::query_as!(");
-            let _ = writeln!(out, "        {},",
-                util::row_type(catalog, row));
+            let _ = writeln!(out, "        {},", util::row_type(catalog, row));
             let _ = writeln!(out, "        {sql_lit},");
             for field in bound_fields(query) {
                 let _ = writeln!(out, "        params.{field},");
@@ -719,11 +724,7 @@ mod tests {
         QueryCatalog::default()
     }
 
-    fn col(
-        name: &'static str,
-        data_type: &'static str,
-        nullable: bool,
-    ) -> ColumnSchema<'static> {
+    fn col(name: &'static str, data_type: &'static str, nullable: bool) -> ColumnSchema<'static> {
         ColumnSchema {
             name: Cow::Borrowed(name),
             data_type: Cow::Borrowed(data_type),
@@ -750,7 +751,10 @@ mod tests {
     fn emits_struct_with_serde_derive() {
         let t = table(
             "users",
-            vec![col("email", "VARCHAR(255)", false), col("id", "BIGSERIAL", false)],
+            vec![
+                col("email", "VARCHAR(255)", false),
+                col("id", "BIGSERIAL", false),
+            ],
         );
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
         assert!(out.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
@@ -781,7 +785,12 @@ mod tests {
     #[test]
     fn emits_regex_matcher_only_when_query_uses_regex() {
         let plain = table("plain", vec![col("email", "VARCHAR", false)]);
-        let out = generate_rust(&TableCatalog { tables: vec![plain] }, &no_queries());
+        let out = generate_rust(
+            &TableCatalog {
+                tables: vec![plain],
+            },
+            &no_queries(),
+        );
         assert!(!out.contains("fn regex_is_match"));
 
         let q = QueryDefinition {
@@ -799,10 +808,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let out = generate_rust(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("fn regex_is_match"));
         assert!(out.contains("!regex_is_match(\"^[a-z0-9-]+$\", &self.slug)"));
     }
@@ -856,7 +862,9 @@ mod tests {
         assert!(out.contains("pool: &sqlx::PgPool,"));
         assert!(out.contains("params: GetUserParams,"));
         assert!(out.contains(") -> Result<Option<Users>, Box<dyn std::error::Error>> {"));
-        assert!(out.contains("params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"));
+        assert!(out.contains(
+            "params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"
+        ));
         assert!(out.contains("sqlx::query_as!("));
         assert!(out.contains("Users,"));
         assert!(out.contains("params.email,"));
@@ -876,10 +884,7 @@ mod tests {
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
         };
-        let out = generate_rust(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains(") -> Result<(), Box<dyn std::error::Error>> {"));
         assert!(out.contains("sqlx::query("));
         assert!(out.contains(".bind(params.id)"));
@@ -906,10 +911,7 @@ mod tests {
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
         };
-        let out = generate_rust(
-            &TableCatalog::default(),
-            &QueryCatalog { queries: vec![q] },
-        );
+        let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(
             out.contains("DELETE FROM users WHERE id = $1"),
             "named placeholder must be rewritten to a positional marker:\n{out}"

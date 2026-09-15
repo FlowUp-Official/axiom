@@ -68,7 +68,11 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn error(file: impl Into<PathBuf>, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn error(
+        file: impl Into<PathBuf>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: Severity::Error,
             file: file.into(),
@@ -79,7 +83,11 @@ impl Diagnostic {
         }
     }
 
-    pub fn warning(file: impl Into<PathBuf>, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn warning(
+        file: impl Into<PathBuf>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: Severity::Warning,
             file: file.into(),
@@ -254,15 +262,14 @@ pub fn summary(diagnostics: &[Diagnostic]) -> (usize, usize) {
     (errors, diagnostics.len() - errors)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn plain_render_is_greppable() {
-        let diag = Diagnostic::error("models/user.axm", "check.parse", "boom")
-            .with_span(Span::new(5, 9));
+        let diag =
+            Diagnostic::error("models/user.axm", "check.parse", "boom").with_span(Span::new(5, 9));
         let renderer = Renderer::new(false);
         let out = renderer.render(&diag, None);
         assert_eq!(out, "models/user.axm: error[check.parse]: boom\n");
@@ -273,8 +280,8 @@ mod tests {
         let source = "model User {\n  name: String\n}";
         // byte offset of `name` (line 2, col 3)
         let start = source.find("name").expect("name present");
-        let diag = Diagnostic::error("user.axm", "lint.foo", "bad")
-            .with_span(Span::new(start, start + 4));
+        let diag =
+            Diagnostic::error("user.axm", "lint.foo", "bad").with_span(Span::new(start, start + 4));
         let renderer = Renderer::new(true);
         let out = renderer.render(&diag, Some(source));
         assert!(out.contains("--> user.axm:2:3"), "got: {out}");

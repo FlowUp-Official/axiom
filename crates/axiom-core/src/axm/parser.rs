@@ -28,10 +28,10 @@
 
 use std::fmt;
 
+use winnow::Parser;
 use winnow::combinator::{alt, delimited, not, opt, peek, repeat, separated, terminated};
 use winnow::error::{ContextError, ErrMode, FromExternalError};
 use winnow::token::{any, one_of, take_while};
-use winnow::Parser;
 
 /// Parser result type for this module. Modal (`ErrMode`) so that semantic
 /// errors (unknown rules, bad arguments) can be raised as [`ErrMode::Cut`] and
@@ -80,11 +80,9 @@ enum Call {
 /// Parse a full `.axm` source file.
 pub fn parse_axm_file(input: &str) -> Result<AxmFile, AxmParseError> {
     let mut rest = input;
-    let file = axm_file
-        .parse_next(&mut rest)
-        .map_err(|e| AxmParseError {
-            message: render_parse_error(&e),
-        })?;
+    let file = axm_file.parse_next(&mut rest).map_err(|e| AxmParseError {
+        message: render_parse_error(&e),
+    })?;
     if !rest.trim().is_empty() {
         return Err(AxmParseError {
             message: format!("unexpected trailing input: `{}`", rest.trim()),
@@ -111,8 +109,7 @@ fn ws(input: &mut &str) -> PResult<()> {
     loop {
         let rest = input.trim_start();
         *input = rest;
-        if rest.starts_with("//") {
-            let after = &rest[2..];
+        if let Some(after) = rest.strip_prefix("//") {
             let end = after.find('\n').unwrap_or(after.len());
             *input = &rest[2 + end..];
             continue;
@@ -155,9 +152,11 @@ fn primitive<'a>(
 /// A database identifier inside `select<...>`, which may be schema-qualified
 /// (`public.users`) and follows the SQL dialect's identifier charset.
 fn db_ident(input: &mut &str) -> PResult<String> {
-    take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-        .map(|s: &str| s.to_string())
-        .parse_next(input)
+    take_while(1.., |c: char| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '.'
+    })
+    .map(|s: &str| s.to_string())
+    .parse_next(input)
 }
 
 fn string_literal(input: &mut &str) -> PResult<String> {
@@ -190,8 +189,8 @@ fn number_literal(input: &mut &str) -> PResult<Literal> {
     take_while(1.., |c: char| c.is_ascii_digit())
         .parse_next(input)
         .and_then(|integer: &str| {
-            let frac = opt(('.', take_while(1.., |c: char| c.is_ascii_digit())))
-                .parse_next(input)?;
+            let frac =
+                opt(('.', take_while(1.., |c: char| c.is_ascii_digit()))).parse_next(input)?;
             match frac {
                 Some((_, frac)) => {
                     let text = format!("{integer}.{frac}");
@@ -259,36 +258,36 @@ fn classify_call(name: &str, args: &[Literal]) -> Result<Call, RuleError> {
     };
 
     let int_arg = |is_len: bool| -> Result<(Option<i64>, Option<String>), RuleError> {
-            match args.len() {
-                0 => rule_err(format!(
-                    "`.{name}()` requires an integer argument{}",
-                    if is_len {
-                        " (e.g. `.min_length(3)`) or a string literal"
-                    } else {
-                        ""
-                    }
+        match args.len() {
+            0 => rule_err(format!(
+                "`.{name}()` requires an integer argument{}",
+                if is_len {
+                    " (e.g. `.min_length(3)`) or a string literal"
+                } else {
+                    ""
+                }
+            )),
+            1 => match (&args[0], is_len) {
+                (Literal::Int(n), _) => Ok((Some(*n), None)),
+                (Literal::String(_), true) => rule_err(format!(
+                    "`.{name}()` requires an integer argument; a message alone must come after the value: `.min_length(3, \"...\")`"
                 )),
-                1 => match (&args[0], is_len) {
-                    (Literal::Int(n), _) => Ok((Some(*n), None)),
-                    (Literal::String(_), true) => rule_err(format!(
-                        "`.{name}()` requires an integer argument; a message alone must come after the value: `.min_length(3, \"...\")`"
-                    )),
-                    (other, _) => rule_err(format!(
-                        "`.{name}()` expects an integer argument (got `{other:?}`)"
-                    )),
-                },
-                2 => match (&args[0], &args[1]) {
-                    (Literal::Int(n), Literal::String(msg)) => Ok((Some(*n), Some(msg.clone()))),
-                    (Literal::Int(n), other) => rule_err(format!(
-                        "`.{name}()` second (message) argument must be a string (got `{other:?}`) for value `{n}`"
-                    )),
-                    (other, _) => rule_err(format!(
-                        "`.{name}()` first argument must be an integer (got `{other:?}`)"
-                    )),
-                },
-                _ => rule_err(format!("`.{name}()` takes at most two arguments")),
-            }
-        };
+                (other, _) => rule_err(format!(
+                    "`.{name}()` expects an integer argument (got `{other:?}`)"
+                )),
+            },
+            2 => match (&args[0], &args[1]) {
+                (Literal::Int(n), Literal::String(msg)) => Ok((Some(*n), Some(msg.clone()))),
+                (Literal::Int(n), other) => rule_err(format!(
+                    "`.{name}()` second (message) argument must be a string (got `{other:?}`) for value `{n}`"
+                )),
+                (other, _) => rule_err(format!(
+                    "`.{name}()` first argument must be an integer (got `{other:?}`)"
+                )),
+            },
+            _ => rule_err(format!("`.{name}()` takes at most two arguments")),
+        }
+    };
 
     let string_arg = || -> Result<(Option<String>, Option<String>), RuleError> {
         match args.len() {
@@ -373,11 +372,17 @@ fn classify_call(name: &str, args: &[Literal]) -> Result<Call, RuleError> {
         }
         "min_length" | "min_len" => {
             let (v, m) = int_arg(true)?;
-            Ok(Call::Rule(Rule::MinLength(v.unwrap_or(0).max(0) as usize, m)))
+            Ok(Call::Rule(Rule::MinLength(
+                v.unwrap_or(0).max(0) as usize,
+                m,
+            )))
         }
         "max_length" | "max_len" => {
             let (v, m) = int_arg(true)?;
-            Ok(Call::Rule(Rule::MaxLength(v.unwrap_or(0).max(0) as usize, m)))
+            Ok(Call::Rule(Rule::MaxLength(
+                v.unwrap_or(0).max(0) as usize,
+                m,
+            )))
         }
         "regex" => {
             let (v, m) = string_arg()?;
@@ -411,9 +416,8 @@ fn annotated_type(input: &mut &str) -> PResult<AnnotatedType> {
         ))
         .parse_next(input)?
         .unwrap_or_default();
-        let call = classify_call(&name, &args).map_err(|e| {
-            ErrMode::Cut(ContextError::from_external_error(input, e))
-        })?;
+        let call = classify_call(&name, &args)
+            .map_err(|e| ErrMode::Cut(ContextError::from_external_error(input, e)))?;
         match call {
             Call::Transform(t) => transforms.push(t),
             Call::Rule(r) => rules.push(r),
@@ -531,12 +535,12 @@ fn query_decl(input: &mut &str) -> PResult<QueryDecl> {
     ws(input)?;
     let name = ident.parse_next(input)?;
     ws(input)?;
-let params: Vec<ParamDecl> = delimited(
-    ('(', ws).map(|(c, _): (char, ())| c),
-    separated(0.., param_decl, (ws, ',')),
-    (ws, ')').map(|(_, c): ((), char)| c),
-)
-.parse_next(input)?;
+    let params: Vec<ParamDecl> = delimited(
+        ('(', ws).map(|(c, _): (char, ())| c),
+        separated(0.., param_decl, (ws, ',')),
+        (ws, ')').map(|(_, c): ((), char)| c),
+    )
+    .parse_next(input)?;
 
     let return_type = opt((ws, "->", ws, type_ref))
         .parse_next(input)?
@@ -645,12 +649,10 @@ fn scan_sql_body(input: &mut &str) -> PResult<String> {
                     i += 1;
                 }
             }
-            b'/' if i + 1 < n && bytes[i + 1] == b'*' => {
-                match src[i + 2..].find("*/") {
-                    Some(off) => i = i + 2 + off + 2,
-                    None => i = n,
-                }
-            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'*' => match src[i + 2..].find("*/") {
+                Some(off) => i = i + 2 + off + 2,
+                None => i = n,
+            },
             b'{' => {
                 depth += 1;
                 i += 1;
@@ -742,7 +744,12 @@ model User extends select<users> {
         );
         let model = &file.models[0];
         assert_eq!(model.name, "User");
-        assert_eq!(model.source, Some(ModelSource { relation: "users".into() }));
+        assert_eq!(
+            model.source,
+            Some(ModelSource {
+                relation: "users".into()
+            })
+        );
         assert_eq!(model.fields.len(), 3);
         assert_eq!(model.fields[0].name, "email");
         assert_eq!(model.fields[0].ty.base, TypeRef::String);
@@ -753,7 +760,12 @@ model User extends select<users> {
     #[test]
     fn parses_schema_qualified_select_source() {
         let file = parse("model User extends select<public.users> { id: UUID }");
-        assert_eq!(file.models[0].source, Some(ModelSource { relation: "public.users".into() }));
+        assert_eq!(
+            file.models[0].source,
+            Some(ModelSource {
+                relation: "public.users".into()
+            })
+        );
     }
 
     #[test]
@@ -815,18 +827,25 @@ model User extends select<users> {
 }"#,
         );
         let fields = &file.models[0].fields;
-        assert_eq!(fields[0].ty.base, TypeRef::Nullable(Box::new(TypeRef::String)));
+        assert_eq!(
+            fields[0].ty.base,
+            TypeRef::Nullable(Box::new(TypeRef::String))
+        );
         assert_eq!(
             fields[1].ty.base,
             TypeRef::Array(Box::new(TypeRef::Named("User".into())))
         );
         assert_eq!(
             fields[2].ty.base,
-            TypeRef::Array(Box::new(TypeRef::Nullable(Box::new(TypeRef::Named("User".into())))))
+            TypeRef::Array(Box::new(TypeRef::Nullable(Box::new(TypeRef::Named(
+                "User".into()
+            )))))
         );
         assert_eq!(
             fields[3].ty.base,
-            TypeRef::Nullable(Box::new(TypeRef::Array(Box::new(TypeRef::Named("User".into())))))
+            TypeRef::Nullable(Box::new(TypeRef::Array(Box::new(TypeRef::Named(
+                "User".into()
+            )))))
         );
     }
 
@@ -861,11 +880,20 @@ type Username = String
 }"#,
         );
         let fields = &file.models[0].fields;
-        assert_eq!(fields[0].ty.rules, vec![Rule::Email(Some("Invalid email address".into()))]);
-        assert_eq!(fields[1].ty.rules, vec![Rule::MinLength(3, Some("Too short".into()))]);
+        assert_eq!(
+            fields[0].ty.rules,
+            vec![Rule::Email(Some("Invalid email address".into()))]
+        );
+        assert_eq!(
+            fields[1].ty.rules,
+            vec![Rule::MinLength(3, Some("Too short".into()))]
+        );
         assert_eq!(
             fields[2].ty.rules,
-            vec![Rule::Regex("^[a-z]+$".into(), Some("lowercase only".into()))]
+            vec![Rule::Regex(
+                "^[a-z]+$".into(),
+                Some("lowercase only".into())
+            )]
         );
         assert_eq!(fields[3].ty.rules, vec![Rule::Min(0, None)]);
         assert_eq!(fields[4].ty.rules, vec![Rule::MinLength(3, None)]);
@@ -898,8 +926,10 @@ type Username = String
 
     #[test]
     fn parses_aliased_import() {
-        let file = parse(r#"import { User as DbUser, Email } from "./users.axm";
-model T { owner: DbUser }"#);
+        let file = parse(
+            r#"import { User as DbUser, Email } from "./users.axm";
+model T { owner: DbUser }"#,
+        );
         assert_eq!(file.imports.len(), 1);
         assert_eq!(file.imports[0].names[0].name, "User");
         assert_eq!(file.imports[0].names[0].alias, Some("DbUser".into()));
@@ -940,18 +970,28 @@ query CreateUser($id: BigInt, $tags: String[]) -> User {
         assert_eq!(get.params.len(), 1);
         assert_eq!(get.params[0].name, "id");
         assert_eq!(get.params[0].ty, TypeRef::Uuid);
-        assert!(matches!(get.return_type, QueryReturn::Optional(TypeRef::Named(ref n)) if n == "User"));
+        assert!(
+            matches!(get.return_type, QueryReturn::Optional(TypeRef::Named(ref n)) if n == "User")
+        );
         assert!(get.sql.contains("SELECT id, email"));
 
         let del = &file.queries[1];
         assert_eq!(del.return_type, QueryReturn::Exec);
 
         let list = &file.queries[2];
-        assert!(matches!(list.return_type, QueryReturn::Many(TypeRef::Named(ref n)) if n == "User"));
-        assert_eq!(list.sql, "SELECT *\n    FROM users\n    ORDER BY id\n    LIMIT $limit;");
+        assert!(
+            matches!(list.return_type, QueryReturn::Many(TypeRef::Named(ref n)) if n == "User")
+        );
+        assert_eq!(
+            list.sql,
+            "SELECT *\n    FROM users\n    ORDER BY id\n    LIMIT $limit;"
+        );
 
         let create = &file.queries[3];
-        assert_eq!(create.params[1].ty, TypeRef::Array(Box::new(TypeRef::String)));
+        assert_eq!(
+            create.params[1].ty,
+            TypeRef::Array(Box::new(TypeRef::String))
+        );
         assert!(matches!(create.return_type, QueryReturn::Single(_)));
     }
 
@@ -983,7 +1023,10 @@ query CreateUser($id: BigInt, $tags: String[]) -> User {
 }"#,
         );
         assert_eq!(file.queries[0].params[0].name, "input");
-        assert_eq!(file.queries[0].params[0].ty, TypeRef::Named("CreateUserInput".into()));
+        assert_eq!(
+            file.queries[0].params[0].ty,
+            TypeRef::Named("CreateUserInput".into())
+        );
         assert!(file.queries[0].sql.contains("$input.email"));
     }
 
@@ -1023,7 +1066,10 @@ query CreateUser($id: BigInt, $tags: String[]) -> User {
         assert!(fields[0].optional);
         assert_eq!(fields[0].ty.base, TypeRef::Int);
         assert!(!fields[1].optional);
-        assert_eq!(fields[1].ty.base, TypeRef::Nullable(Box::new(TypeRef::String)));
+        assert_eq!(
+            fields[1].ty.base,
+            TypeRef::Nullable(Box::new(TypeRef::String))
+        );
     }
 
     #[test]
@@ -1090,7 +1136,10 @@ query ListUsers($limit: Int) -> User[] {
         assert_eq!(file.types.len(), 1);
         assert_eq!(file.models.len(), 1);
         assert_eq!(file.queries.len(), 2);
-        assert_eq!(file.declarations().collect::<Vec<_>>(), vec!["Email", "User", "GetUser", "ListUsers"]);
+        assert_eq!(
+            file.declarations().collect::<Vec<_>>(),
+            vec!["Email", "User", "GetUser", "ListUsers"]
+        );
     }
 
     #[test]

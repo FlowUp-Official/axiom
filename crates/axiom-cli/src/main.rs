@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use axiom_core::axm::{generate_rust_models, generate_typescript_models, resolve_models};
 use axiom_core::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
-use axiom_core::catalog::{parse_sql_catalog, TableCatalog};
+use axiom_core::catalog::{TableCatalog, parse_sql_catalog};
 use axiom_core::codegen::{generate_rust, generate_typescript};
-use axiom_core::config::{resolve_glob_paths, AxiomConfig, OutputConfig};
+use axiom_core::config::{AxiomConfig, OutputConfig, resolve_glob_paths};
 use axiom_core::db;
 use axiom_core::errors::AxiomError;
 use axiom_core::query::QueryCatalog;
@@ -221,7 +221,10 @@ async fn run_generate(
     let config_hash = compute_file_hash(config_path)?;
     let mut file_hashes: BTreeMap<String, [u8; 32]> = BTreeMap::new();
     for (path, _) in sources.iter().chain(&model_sources) {
-        file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
+        file_hashes.insert(
+            path.to_string_lossy().into_owned(),
+            compute_file_hash(path)?,
+        );
     }
 
     let cache_path = if config.cache.path.is_absolute() {
@@ -233,9 +236,8 @@ async fn run_generate(
     if config.cache.enabled && is_cache_valid(&cache_path, &config_hash, &file_hashes) {
         println!(
             "{} {}",
-            "Everything up to date".if_supports_color(Stream::Stdout, |s| {
-                s.green().bold().to_string()
-            }),
+            "Everything up to date"
+                .if_supports_color(Stream::Stdout, |s| { s.green().bold().to_string() }),
             "(<0.5ms)".if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
         );
         return Ok(());
@@ -254,7 +256,9 @@ async fn run_generate(
     };
     let mut query_catalog = QueryCatalog::default();
     if let Some(registry) = &model_registry {
-        query_catalog.queries.extend(axiom_core::axm::query_catalog(registry).queries);
+        query_catalog
+            .queries
+            .extend(axiom_core::axm::query_catalog(registry).queries);
     }
 
     let generated: Vec<(String, String)> = config
@@ -305,7 +309,11 @@ async fn run_generate(
     };
     let model_part = match &model_registry {
         Some(registry) if !registry.models.is_empty() => {
-            let word = if registry.models.len() == 1 { "model" } else { "models" };
+            let word = if registry.models.len() == 1 {
+                "model"
+            } else {
+                "models"
+            };
             format!(" and {} {word}", registry.models.len())
         }
         _ => String::new(),
@@ -367,10 +375,8 @@ async fn run_push(
     );
     println!(
         "{} {}",
-        "[axiom] Database schema push complete!".if_supports_color(
-            Stream::Stdout,
-            |s| s.green().bold().to_string()
-        ),
+        "[axiom] Database schema push complete!"
+            .if_supports_color(Stream::Stdout, |s| s.green().bold().to_string()),
         timing.if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
     );
     Ok(())

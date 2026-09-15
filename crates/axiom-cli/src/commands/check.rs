@@ -7,12 +7,12 @@ use axiom_core::cache::ToolCache;
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
 use axiom_core::paths::resolve_path;
-use axiom_diagnostics::{render_all, Renderer, summary};
+use axiom_diagnostics::{Renderer, render_all, summary};
 use owo_colors::{OwoColorize, Stream};
 
+use crate::CheckArgs;
 use crate::commands::base_dir;
 use crate::commands::tty::is_tty;
-use crate::CheckArgs;
 
 /// Run every check phase over the workspace. With `--fix`, out-of-sync
 /// generated outputs are rewritten before reporting.
@@ -48,14 +48,17 @@ pub fn run(args: CheckArgs, config: &AxiomConfig, config_path: &Path) -> Result<
 
     let (errors, warnings) = summary(&report.diagnostics);
     if !report.fixed.is_empty() {
-        let verb = if report.fixed.len() == 1 { "file" } else { "files" };
+        let verb = if report.fixed.len() == 1 {
+            "file"
+        } else {
+            "files"
+        };
         println!(
             "{} {}",
-            format!("fixed {} output {}", report.fixed.len(), verb).if_supports_color(
-                Stream::Stdout,
-                |s| s.green().bold().to_string()
-            ),
-            "(run `axiom generate` next)".if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
+            format!("fixed {} output {}", report.fixed.len(), verb)
+                .if_supports_color(Stream::Stdout, |s| s.green().bold().to_string()),
+            "(run `axiom generate` next)"
+                .if_supports_color(Stream::Stdout, |s| s.dimmed().to_string()),
         );
     }
 
@@ -77,9 +80,7 @@ pub fn run(args: CheckArgs, config: &AxiomConfig, config_path: &Path) -> Result<
     }
     println!(
         "{}",
-        "All checks passed".if_supports_color(Stream::Stdout, |s| {
-            s.green().bold().to_string()
-        }),
+        "All checks passed".if_supports_color(Stream::Stdout, |s| { s.green().bold().to_string() }),
     );
     Ok(0)
 }

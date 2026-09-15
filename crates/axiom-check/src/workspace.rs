@@ -9,12 +9,12 @@ use sqlparser::parser::Parser;
 
 use axiom_core::axm::ast::{QueryDecl, QueryReturn, TypeRef};
 use axiom_core::axm::parser::parse_axm_file;
-use axiom_core::axm::resolver::{resolve_models, ModelRegistry};
-use axiom_core::cache::{compute_content_hash, ToolCache};
-use axiom_core::catalog::{parse_sql_catalog, TableCatalog};
-use axiom_core::config::{resolve_glob_paths, AxiomConfig};
+use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
+use axiom_core::cache::{ToolCache, compute_content_hash};
+use axiom_core::catalog::{TableCatalog, parse_sql_catalog};
+use axiom_core::config::{AxiomConfig, resolve_glob_paths};
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{scan_placeholders, Placeholder, QueryCatalog};
+use axiom_core::query::{Placeholder, QueryCatalog, scan_placeholders};
 use axiom_diagnostics::Diagnostic;
 
 use crate::diagnostics::{line_of_offset, parse_error};
@@ -89,11 +89,7 @@ pub fn check_queries(
     for (path, queries) in &per_file {
         let src = src_by_path.get(path).map(String::as_str).unwrap_or("");
         let file_hash = compute_content_hash(src.as_bytes());
-        let key = format!(
-            "check:query:{}:{}",
-            hex(schema_hash),
-            hex(&file_hash)
-        );
+        let key = format!("check:query:{}:{}", hex(schema_hash), hex(&file_hash));
 
         let file_diags = if let Some(cache) = cache.as_deref()
             && let Some(payload) = cache.get(&key)
@@ -182,7 +178,9 @@ fn check_declared_query(
                             query.name
                         ),
                     )
-                    .with_help("declare the table in a schema file or the model/type in a `.axm` file"),
+                    .with_help(
+                        "declare the table in a schema file or the model/type in a `.axm` file",
+                    ),
                 );
             }
         }
@@ -227,24 +225,30 @@ fn check_return_contract(
 
     let prefix = format!("query `{}`", query.name);
     if expects_rows && !produces_rows {
-        return vec![Diagnostic::error(
-            path,
-            "check.query-contract",
-            format!(
-                "{prefix} declares a row return type, but the SQL body does not return any rows"
+        return vec![
+            Diagnostic::error(
+                path,
+                "check.query-contract",
+                format!(
+                    "{prefix} declares a row return type, but the SQL body does not return any rows"
+                ),
+            )
+            .with_help(
+                "declare `-> Type`, `-> Type?`, or `-> Type[]` only for row-returning statements",
             ),
-        )
-        .with_help("declare `-> Type`, `-> Type?`, or `-> Type[]` only for row-returning statements")];
+        ];
     }
     if !expects_rows && produces_rows {
-        return vec![Diagnostic::error(
-            path,
-            "check.query-contract",
-            format!(
-                "{prefix} is declared as `Exec` (no `->`), but the SQL body returns rows"
+        return vec![
+            Diagnostic::error(
+                path,
+                "check.query-contract",
+                format!("{prefix} is declared as `Exec` (no `->`), but the SQL body returns rows"),
+            )
+            .with_help(
+                "add a `-> Type` return contract, or use a statement that does not select rows",
             ),
-        )
-        .with_help("add a `-> Type` return contract, or use a statement that does not select rows")];
+        ];
     }
 
     let (QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty)) =
@@ -262,12 +266,10 @@ fn check_return_contract(
     }
 
     if let Some(model) = registry.model_by_name(&row_name) {
-        let field_names: Vec<String> =
-            model.model.fields.iter().map(|f| f.name.clone()).collect();
+        let field_names: Vec<String> = model.model.fields.iter().map(|f| f.name.clone()).collect();
         projection_vs_fields(path, query, &row_name, &projected, &field_names, true)
     } else if let Some(table) = catalog.table_by_name(&row_name) {
-        let field_names: Vec<String> =
-            table.columns.iter().map(|c| c.name.to_string()).collect();
+        let field_names: Vec<String> = table.columns.iter().map(|c| c.name.to_string()).collect();
         projection_vs_fields(path, query, &row_name, &projected, &field_names, false)
     } else {
         Vec::new() // unresolved row type already reported
@@ -380,7 +382,9 @@ fn check_query_body(path: &Path, sql: &str, catalog: &TableCatalog<'_>) -> Vec<D
                 Diagnostic::error(
                     path,
                     "check.missing-table",
-                    format!("query references table `{relation}`, which is not defined in the schema"),
+                    format!(
+                        "query references table `{relation}`, which is not defined in the schema"
+                    ),
                 )
                 .with_help("add the table to a schema input, or fix the query"),
             );
@@ -521,7 +525,11 @@ fn link_error(fallback: Option<&Path>, err: AxiomError) -> Diagnostic {
             .unwrap_or_else(|| PathBuf::from("models")),
     };
     match err {
-        AxiomError::ModelDuplicate { name, first, second } => Diagnostic::error(
+        AxiomError::ModelDuplicate {
+            name,
+            first,
+            second,
+        } => Diagnostic::error(
             &path,
             "check.duplicate-model",
             format!("duplicate model `{name}` in `{first}` and `{second}`"),
@@ -533,12 +541,10 @@ fn link_error(fallback: Option<&Path>, err: AxiomError) -> Diagnostic {
             format!("import cycle detected: {chain}"),
         )
         .with_help("remove one import in the cycle to break it"),
-        AxiomError::ModelResolutionError { message, .. } => Diagnostic::error(
-            &path,
-            "check.model-resolution",
-            message,
-        )
-        .with_help("make sure imports resolve and every referenced model is in scope"),
+        AxiomError::ModelResolutionError { message, .. } => {
+            Diagnostic::error(&path, "check.model-resolution", message)
+                .with_help("make sure imports resolve and every referenced model is in scope")
+        }
         AxiomError::ModelParseError { message, .. } => {
             Diagnostic::error(&path, "check.axm-parse", message)
         }

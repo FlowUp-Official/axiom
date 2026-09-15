@@ -20,7 +20,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::axm::ast::{AnnotatedType, AxmFile, ModelDecl, QueryDecl, QueryReturn, TypeDecl, TypeRef};
+use crate::axm::ast::{
+    AnnotatedType, AxmFile, ModelDecl, QueryDecl, QueryReturn, TypeDecl, TypeRef,
+};
 use crate::axm::parser::parse_axm_file;
 use crate::errors::AxiomError;
 use crate::query::{QueryCatalog, QueryDefinition, QueryParam, QueryReturnType};
@@ -183,9 +185,9 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             edges.push((file_idx, target_idx));
             for name in &import.names {
                 let target_file = &files[target_idx].1;
-                let canonical_name = if target_file.model_by_name(&name.name).is_some() {
-                    name.name.clone()
-                } else if target_file.type_by_name(&name.name).is_some() {
+                let canonical_name = if target_file.model_by_name(&name.name).is_some()
+                    || target_file.type_by_name(&name.name).is_some()
+                {
                     name.name.clone()
                 } else {
                     return Err(AxiomError::ModelResolutionError {
@@ -331,9 +333,8 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             });
         }
     }
-    for file_idx in 0..files.len() {
+    for (file_idx, (path, _)) in files.iter().enumerate() {
         if let Some(bindings) = per_file_bindings.remove(&file_idx) {
-            let path = &files[file_idx].0;
             registry.aliases.insert(canonical(path), bindings);
         }
     }
@@ -405,10 +406,7 @@ const GRAY: u8 = 1;
 const BLACK: u8 = 2;
 
 /// Detect import cycles with an iterative DFS and report the offending chain.
-fn detect_cycles(
-    files: &[(PathBuf, AxmFile)],
-    edges: &[(usize, usize)],
-) -> Result<(), AxiomError> {
+fn detect_cycles(files: &[(PathBuf, AxmFile)], edges: &[(usize, usize)]) -> Result<(), AxiomError> {
     let n = files.len();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(from, to) in edges {
@@ -454,12 +452,17 @@ fn dfs(
     stack.push(u);
     for &v in &adjacency[u] {
         if color[v] == GRAY {
-            let start = stack.iter().position(|&x| x == v).expect("v is on the stack");
+            let start = stack
+                .iter()
+                .position(|&x| x == v)
+                .expect("v is on the stack");
             let mut cycle = stack[start..].to_vec();
             cycle.push(v);
             return Some(cycle);
         }
-        if color[v] == WHITE && let Some(cycle) = dfs(v, adjacency, color, stack) {
+        if color[v] == WHITE
+            && let Some(cycle) = dfs(v, adjacency, color, stack)
+        {
             return Some(cycle);
         }
     }
@@ -524,7 +527,10 @@ mod tests {
             registry.effective_name(Path::new("models/user.axm"), "DbAddress"),
             "Address"
         );
-        assert_eq!(registry.effective_name(Path::new("models/user.axm"), "home"), "home");
+        assert_eq!(
+            registry.effective_name(Path::new("models/user.axm"), "home"),
+            "home"
+        );
     }
 
     #[test]
@@ -582,7 +588,10 @@ mod tests {
             file("models/b.axm", "model User { b: String }"),
         ])
         .expect_err("duplicate");
-        assert!(matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "User"), "{err}");
+        assert!(
+            matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "User"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -592,17 +601,29 @@ mod tests {
             file("models/b.axm", "model User { b: String }"),
         ])
         .expect_err("duplicate");
-        assert!(matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "User"), "{err}");
+        assert!(
+            matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "User"),
+            "{err}"
+        );
     }
 
     #[test]
     fn detects_duplicate_query_names() {
         let err = resolve_models(&[
-            file("models/a.axm", "query GetUser($id: UUID) -> User? {\n  SELECT * FROM users WHERE id = $id;\n}"),
-            file("models/b.axm", "query GetUser($id: UUID) -> User? {\n  SELECT * FROM users WHERE id = $id;\n}"),
+            file(
+                "models/a.axm",
+                "query GetUser($id: UUID) -> User? {\n  SELECT * FROM users WHERE id = $id;\n}",
+            ),
+            file(
+                "models/b.axm",
+                "query GetUser($id: UUID) -> User? {\n  SELECT * FROM users WHERE id = $id;\n}",
+            ),
         ])
         .expect_err("duplicate");
-        assert!(matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "GetUser"), "{err}");
+        assert!(
+            matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "GetUser"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -620,11 +641,8 @@ mod tests {
 
     #[test]
     fn detects_unreferenced_type() {
-        let err = resolve_models(&[file(
-            "models/user.axm",
-            "model User { billing: Address }",
-        )])
-        .expect_err("unknown type");
+        let err = resolve_models(&[file("models/user.axm", "model User { billing: Address }")])
+            .expect_err("unknown type");
         assert!(
             matches!(&err, AxiomError::ModelResolutionError { message, .. }
                 if message.contains("unknown type `Address`")),

@@ -4,7 +4,11 @@ use axiom_diagnostics::{Diagnostic, Span};
 use std::path::Path;
 
 /// A `Diagnostic` for a file that failed to parse, without a precise span.
-pub fn parse_error(file: impl Into<std::path::PathBuf>, code: &str, message: impl Into<String>) -> Diagnostic {
+pub fn parse_error(
+    file: impl Into<std::path::PathBuf>,
+    code: &str,
+    message: impl Into<String>,
+) -> Diagnostic {
     Diagnostic::error(file, code, message)
 }
 
@@ -29,10 +33,7 @@ pub fn span_for_line(source: &str, line_no: usize) -> Span {
 /// A zero-width span at the start of the line containing byte `offset`.
 pub fn line_of_offset(source: &str, offset: usize) -> Span {
     let offset = offset.min(source.len());
-    let start = source[..offset]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
     Span::new(start, start)
 }
 

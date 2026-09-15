@@ -46,12 +46,10 @@ impl LineIndex {
 
     /// Byte offset of the start of `line` (0-based).
     pub fn line_start(&self, line: usize) -> usize {
-        self.line_starts.get(line).copied().unwrap_or_else(|| {
-            self.line_starts
-                .last()
-                .copied()
-                .unwrap_or(0)
-        })
+        self.line_starts
+            .get(line)
+            .copied()
+            .unwrap_or_else(|| self.line_starts.last().copied().unwrap_or(0))
     }
 
     pub fn line_count(&self) -> usize {

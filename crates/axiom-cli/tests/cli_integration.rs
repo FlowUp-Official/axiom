@@ -100,10 +100,22 @@ fn generates_typescript_and_rust_outputs() {
     let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
     assert!(ts.contains("export interface Users {"));
     assert!(ts.contains("export function validateUsers(input: Users): ValidationError[] {"));
-    assert!(!ts.contains("Bad Email"), "column annotations were removed from schema");
-    assert!(!ts.contains("input.username"), "column transforms no longer emitted");
-    assert!(!ts.contains("UUID_RE"), "column uuid rule no longer emitted");
-    assert!(!ts.contains("const IPV6_RE ="), "unused preset should not be emitted");
+    assert!(
+        !ts.contains("Bad Email"),
+        "column annotations were removed from schema"
+    );
+    assert!(
+        !ts.contains("input.username"),
+        "column transforms no longer emitted"
+    );
+    assert!(
+        !ts.contains("UUID_RE"),
+        "column uuid rule no longer emitted"
+    );
+    assert!(
+        !ts.contains("const IPV6_RE ="),
+        "unused preset should not be emitted"
+    );
 
     assert!(ts.contains("import type { Sql } from 'postgres';"));
     assert!(ts.contains("export interface GetUserParams {"));
@@ -124,16 +136,27 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
     assert!(rs.contains("pub fn validate(&self) -> Result<(), Vec<ValidationError>>"));
     assert!(rs.contains("let _ = self;"));
-    assert!(!rs.contains("Bad Email"), "column annotations were removed from schema");
-    assert!(!rs.contains("if let Some(value)"), "nullable column rules no longer emitted");
-    assert!(!rs.contains("fn is_uuid"), "column uuid rule no longer emitted");
+    assert!(
+        !rs.contains("Bad Email"),
+        "column annotations were removed from schema"
+    );
+    assert!(
+        !rs.contains("if let Some(value)"),
+        "nullable column rules no longer emitted"
+    );
+    assert!(
+        !rs.contains("fn is_uuid"),
+        "column uuid rule no longer emitted"
+    );
 
     assert!(rs.contains("pub struct GetUserParams {"));
     assert!(rs.contains("pub email: String,"));
     assert!(rs.contains("pub async fn get_user("));
     assert!(rs.contains("pool: &sqlx::PgPool,"));
     assert!(rs.contains(") -> Result<Option<Users>, Box<dyn std::error::Error>> {"));
-    assert!(rs.contains("params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"));
+    assert!(rs.contains(
+        "params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"
+    ));
     assert!(rs.contains("sqlx::query_as!("));
     assert!(rs.contains(".fetch_optional(pool)"));
     assert!(rs.contains("pub async fn get_users("));
@@ -219,7 +242,10 @@ fn query_change_invalidates_cache_and_regenerates() {
     let first = run_generate(&dir);
     assert!(first.status.success(), "{}", stdout(&first));
     assert!(stdout(&first).contains("generated 2 target(s)"));
-    assert!(stdout(&first).contains("3 queries"), "summary should count queries");
+    assert!(
+        stdout(&first).contains("3 queries"),
+        "summary should count queries"
+    );
 
     let second = run_generate(&dir);
     assert!(stdout(&second).contains("Everything up to date (<0.5ms)"));
@@ -250,11 +276,7 @@ fn init_creates_valid_config_file() {
     std::fs::write(dir.join("placeholder.txt"), "").unwrap();
 
     let output = run_init(&dir, false);
-    assert!(
-        output.status.success(),
-        "init failed: {}",
-        stdout(&output)
-    );
+    assert!(output.status.success(), "init failed: {}", stdout(&output));
 
     let path = dir.join("axiom.json");
     assert!(path.exists(), "axiom.json should be created");

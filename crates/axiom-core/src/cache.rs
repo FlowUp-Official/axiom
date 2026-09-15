@@ -31,8 +31,7 @@ impl CacheManifest {
     /// validate as a well-formed rkyv archive.
     pub fn load(cache_path: &Path) -> Option<CacheManifest> {
         let mmap = mmap_cache_file(cache_path)?;
-        let archived =
-            rkyv::access::<ArchivedCacheManifest, rkyv::rancor::Error>(&mmap).ok()?;
+        let archived = rkyv::access::<ArchivedCacheManifest, rkyv::rancor::Error>(&mmap).ok()?;
         rkyv::deserialize::<CacheManifest, rkyv::rancor::Error>(archived).ok()
     }
 
@@ -102,14 +101,12 @@ impl ToolCache {
         let Some(mmap) = mmap_cache_file(cache_path) else {
             return ToolCache::default();
         };
-        let Ok(archived) =
-            rkyv::access::<ArchivedToolCacheFile, rkyv::rancor::Error>(&mmap)
-        else {
+        let Ok(archived) = rkyv::access::<ArchivedToolCacheFile, rkyv::rancor::Error>(&mmap) else {
             return ToolCache::default();
         };
-        let Ok(entries) = rkyv::deserialize::<BTreeMap<String, Vec<u8>>, rkyv::rancor::Error>(
-            &archived.entries,
-        ) else {
+        let Ok(entries) =
+            rkyv::deserialize::<BTreeMap<String, Vec<u8>>, rkyv::rancor::Error>(&archived.entries)
+        else {
             return ToolCache::default();
         };
         ToolCache { entries }
@@ -180,9 +177,7 @@ pub fn is_cache_valid(
     let Some(mmap) = mmap_cache_file(cache_path) else {
         return false;
     };
-    let Ok(archived) =
-        rkyv::access::<ArchivedCacheManifest, rkyv::rancor::Error>(&mmap)
-    else {
+    let Ok(archived) = rkyv::access::<ArchivedCacheManifest, rkyv::rancor::Error>(&mmap) else {
         return false;
     };
 
@@ -285,7 +280,10 @@ mod tests {
         assert_eq!(loaded.file_hashes, hashes);
 
         let bytes = std::fs::read(&cache).unwrap();
-        assert!(!bytes.starts_with(b"{"), "manifest must be binary, not JSON");
+        assert!(
+            !bytes.starts_with(b"{"),
+            "manifest must be binary, not JSON"
+        );
         assert!(
             String::from_utf8(bytes).is_err(),
             "manifest should not decode as UTF-8 text"
@@ -348,7 +346,13 @@ mod tests {
     #[test]
     fn content_hash_is_deterministic_blake3() {
         assert_eq!(compute_content_hash(b"hello"), hash(b"hello"));
-        assert_eq!(compute_content_hash(b"hello"), compute_content_hash(b"hello"));
-        assert_ne!(compute_content_hash(b"hello"), compute_content_hash(b"hellp"));
+        assert_eq!(
+            compute_content_hash(b"hello"),
+            compute_content_hash(b"hello")
+        );
+        assert_ne!(
+            compute_content_hash(b"hello"),
+            compute_content_hash(b"hellp")
+        );
     }
 }

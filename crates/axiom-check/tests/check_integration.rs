@@ -6,7 +6,7 @@ use axiom_core::cache::ToolCache;
 
 use axiom_check::workspace::aggregate_hash;
 use axiom_check::{
-    check_models, check_queries, check_schemas, collect_referenced_models, Workspace,
+    Workspace, check_models, check_queries, check_schemas, collect_referenced_models,
 };
 
 fn file(path: &str, src: &str) -> (PathBuf, String) {
@@ -34,12 +34,18 @@ fn schema_parse_error_is_reported() {
     let (_, diags) = check_schemas(&files);
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0].code, "check.sql-parse");
-    assert!(matches!(diags[0].severity, axiom_diagnostics::Severity::Error));
+    assert!(matches!(
+        diags[0].severity,
+        axiom_diagnostics::Severity::Error
+    ));
 }
 
 #[test]
 fn well_formed_schema_produces_catalog() {
-    let files = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY, email TEXT NOT NULL);")];
+    let files = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT NOT NULL);",
+    )];
     let (catalog, diags) = check_schemas(&files);
     assert!(diags.is_empty(), "{diags:?}");
     assert_eq!(catalog.tables.len(), 1);
@@ -48,7 +54,10 @@ fn well_formed_schema_produces_catalog() {
 
 #[test]
 fn query_referencing_missing_table_is_reported() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query get_order() -> Orders[] {\n  SELECT * FROM orders WHERE id = $1\n}",
@@ -57,15 +66,15 @@ fn query_referencing_missing_table_is_reported() {
     let registry = registry_from(&models);
     let hash = [0u8; 32];
     let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
-    assert!(
-        codes(&diags).contains(&"check.missing-table"),
-        "{diags:?}"
-    );
+    assert!(codes(&diags).contains(&"check.missing-table"), "{diags:?}");
 }
 
 #[test]
 fn query_return_type_must_exist() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query list_users() -> Nope[] {\n  SELECT id FROM users\n}",
@@ -82,7 +91,10 @@ fn query_return_type_must_exist() {
 
 #[test]
 fn return_type_matches_table_case_insensitively() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query list_users() -> Users[] {\n  SELECT id FROM users\n}",
@@ -113,7 +125,10 @@ fn named_placeholders_check_cleanly() {
 
 #[test]
 fn unknown_named_placeholder_is_reported() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query get_user($email: String) -> users {\n  SELECT id FROM users WHERE email = $nope\n}",
@@ -130,7 +145,10 @@ fn unknown_named_placeholder_is_reported() {
 
 #[test]
 fn positional_placeholder_beyond_declared_is_reported() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query get_user($email: String) -> users {\n  SELECT id FROM users WHERE id = $1 AND email = $2\n}",
@@ -147,7 +165,10 @@ fn positional_placeholder_beyond_declared_is_reported() {
 
 #[test]
 fn exec_contract_rejects_select() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query reset_users() {\n  SELECT id FROM users\n}",
@@ -156,15 +177,15 @@ fn exec_contract_rejects_select() {
     let registry = registry_from(&models);
     let hash = [0u8; 32];
     let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
-    assert!(
-        codes(&diags).contains(&"check.query-contract"),
-        "{diags:?}"
-    );
+    assert!(codes(&diags).contains(&"check.query-contract"), "{diags:?}");
 }
 
 #[test]
 fn projected_column_must_be_a_return_field() {
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "model User { id: Int, email: String }\n\nquery list_users() -> User {\n  SELECT password FROM users\n}",
@@ -173,10 +194,7 @@ fn projected_column_must_be_a_return_field() {
     let registry = registry_from(&models);
     let hash = [0u8; 32];
     let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
-    assert!(
-        codes(&diags).contains(&"check.query-contract"),
-        "{diags:?}"
-    );
+    assert!(codes(&diags).contains(&"check.query-contract"), "{diags:?}");
 }
 
 #[test]
@@ -186,7 +204,10 @@ fn model_duplicates_are_reported() {
         file("models/b.axm", "model User { b: String }"),
     ];
     let (_, diags) = check_models(None, &files);
-    assert!(codes(&diags).contains(&"check.duplicate-model"), "{diags:?}");
+    assert!(
+        codes(&diags).contains(&"check.duplicate-model"),
+        "{diags:?}"
+    );
 }
 
 #[test]
@@ -215,23 +236,22 @@ fn invalid_regex_is_reported() {
 #[test]
 fn query_results_are_cached_by_content() {
     let mut cache = ToolCache::default();
-    let schema = vec![file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")];
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )];
     let models = vec![file(
         "models/queries.axm",
         "query list_users() -> Users[] {\n  SELECT id FROM missing_table\n}",
     )];
     let (catalog, _) = check_schemas(&schema);
     let registry = registry_from(&models);
-    let schema_hash =
-        aggregate_hash(&[file("schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);")]);
+    let schema_hash = aggregate_hash(&[file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);",
+    )]);
 
-    let (_, first) = check_queries(
-        Some(&mut cache),
-        &schema_hash,
-        &catalog,
-        &registry,
-        &models,
-    );
+    let (_, first) = check_queries(Some(&mut cache), &schema_hash, &catalog, &registry, &models);
     assert!(!first.is_empty(), "first run computes diagnostics");
 
     // Second run with identical content hits the cache and skips re-analysis.
