@@ -35,6 +35,16 @@ impl AnalysisDatabase {
                 );
             }
             Role::Query => {
+                if let Some(err) = self
+                    .file_text(path)
+                    .and_then(|text| axiom_core::catalog::parse_sql_catalog(text).err())
+                {
+                    diags.push(axiom_check::diagnostics::parse_error(
+                        path,
+                        "check.sql-parse",
+                        err.to_string(),
+                    ));
+                }
                 diags.extend(
                     self.query_diags()
                         .into_iter()

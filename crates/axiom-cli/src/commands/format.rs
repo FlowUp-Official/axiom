@@ -121,8 +121,8 @@ fn resolve_targets(
     }
 
     let mut patterns: Vec<String> = Vec::new();
-    patterns.extend(config.inputs.schema.iter().cloned());
-    patterns.extend(config.inputs.models.iter().cloned());
+    patterns.extend(config.source.schema.iter().cloned());
+    patterns.extend(config.source.axm.iter().cloned());
     let mut files = Vec::new();
     for path in resolve_glob_paths(&patterns, base)? {
         if path.extension().is_some_and(|e| e == "sql" || e == "axm") {

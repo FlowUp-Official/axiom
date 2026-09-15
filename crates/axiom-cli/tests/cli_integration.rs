@@ -47,7 +47,7 @@ fn write_fixture(dir: &Path, schema: &str) {
   "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
-  "inputs": { "schema": ["schema.sql"], "queries": [], "models": ["models/models.axm"] },
+  "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
   "validation": { "on_error": "fail" },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },
@@ -307,7 +307,7 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
   "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
-  "inputs": { "schema": ["schema.sql"], "queries": [], "models": ["models/models.axm"] },
+  "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
   "validation": { "on_error": "fail" },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },

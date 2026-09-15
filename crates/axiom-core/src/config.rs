@@ -41,13 +41,13 @@ impl Default for CacheConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct InputsConfig {
+pub struct SourceConfig {
+    /// Glob patterns for schema SQL files.
     pub schema: Vec<String>,
-    pub queries: Vec<String>,
-    /// Glob patterns for `.axm` domain-model files. Absent for projects that
-    /// only generate from SQL.
+    /// Glob patterns for `.axm` files (models, types, and query declarations).
+    /// Absent for projects that only generate from SQL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
+    pub axm: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -89,7 +89,7 @@ pub struct AxiomConfig {
     pub schema: Option<String>,
     pub project: ProjectConfig,
     pub cache: CacheConfig,
-    pub inputs: InputsConfig,
+    pub source: SourceConfig,
     pub validation: ValidationConfig,
     pub outputs: BTreeMap<String, OutputConfig>,
 }
@@ -156,10 +156,9 @@ impl AxiomConfig {
                 dialect: "postgres".to_string(),
             },
             cache: CacheConfig::default(),
-            inputs: InputsConfig {
+            source: SourceConfig {
                 schema: vec!["./schema.sql".to_string()],
-                queries: vec!["./queries/**/*.sql".to_string()],
-                models: vec!["./models/**/*.axm".to_string()],
+                axm: vec!["./models/**/*.axm".to_string()],
             },
             validation: ValidationConfig {
                 on_error: "fail".to_string(),
@@ -253,7 +252,7 @@ mod tests {
             "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": true, "path": ".axiom.cache" },
-            "inputs": { "schema": ["schema.sql"], "queries": ["queries/accounts.sql"] },
+            "source": { "schema": ["schema.sql"], "axm": ["models/accounts.axm"] },
             "validation": { "on_error": "fail" },
             "outputs": {
                 "api": { "type": "typescript", "path": "gen/api.ts" }
@@ -304,11 +303,11 @@ mod tests {
         value
             .as_object_mut()
             .expect("config is an object")
-            .remove("inputs");
+            .remove("source");
 
         let err = validate_config_json(&value).expect_err("expected validation failure");
         assert!(
-            err.contains("inputs"),
+            err.contains("source"),
             "expected the error to mention the missing key, got: {err}"
         );
     }

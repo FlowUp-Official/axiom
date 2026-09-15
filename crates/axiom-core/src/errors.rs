@@ -72,7 +72,7 @@ pub enum AxiomError {
     #[error("Invalid glob pattern `{0}`")]
     #[diagnostic(
         code(axiom::io::glob_pattern),
-        help("Check the `inputs.schema` / `inputs.queries` patterns in `axiom.json`.")
+        help("Check the `source.schema` / `source.axm` patterns in `axiom.json`.")
     )]
     Glob(#[from] glob::PatternError),
 

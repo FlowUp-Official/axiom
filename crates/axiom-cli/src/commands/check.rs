@@ -89,9 +89,6 @@ fn source_map(workspace: &axiom_check::Workspace) -> BTreeMap<PathBuf, String> {
     for (path, src) in &workspace.schema_files {
         map.insert(path.clone(), src.clone());
     }
-    for (path, src) in &workspace.query_files {
-        map.insert(path.clone(), src.clone());
-    }
     for (path, src) in &workspace.model_files {
         map.insert(path.clone(), src.clone());
     }

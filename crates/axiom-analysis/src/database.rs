@@ -180,9 +180,8 @@ impl AnalysisDatabase {
             }
             Ok(())
         };
-        read(&config.inputs.schema, Role::Schema)?;
-        read(&config.inputs.queries, Role::Query)?;
-        read(&config.inputs.models, Role::Model)?;
+        read(&config.source.schema, Role::Schema)?;
+        read(&config.source.axm, Role::Model)?;
         Ok(())
     }
 
@@ -254,6 +253,14 @@ impl AnalysisDatabase {
         }
 
         let lang = lang_for_path(path);
+        // Files opened directly in the editor (not via config globs) get their
+        // role from their language: arbitrary SQL files are treated as query
+        // files, so hover/rename/completion still apply to ad-hoc SQL.
+        let role = if role == Role::Unknown && lang == Lang::Sql {
+            Role::Query
+        } else {
+            role
+        };
         let index = self.build_index(&lang, &text);
         let axm = if lang == Lang::Axm { parse_axm_file(&text).ok() } else { None };
         self.by_path.insert(path.to_path_buf(), self.files.len());

@@ -31,17 +31,17 @@ repo/
 Run `axiom generate` inside any of these directories and only *that* package is
 processed, with its own inputs and outputs.
 
-## Glob-driven inputs
+## Glob-driven sources
 
-Schema, `.axm` model, and query inputs are resolved with flexible glob
+Schema and `.axm` model/query inputs are resolved with flexible glob
 patterns, keeping your inputs aligned with your directory layout without
 hand-listing files:
 
 ```json
 {
-  "inputs": {
+  "source": {
     "schema": ["./schema.sql", "./migrations/**/*.sql"],
-    "models": ["./models/**/*.axm"]
+    "axm": ["./models/**/*.axm"]
   }
 }
 ```

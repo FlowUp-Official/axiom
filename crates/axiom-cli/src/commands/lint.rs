@@ -21,10 +21,9 @@ pub fn run(args: LintArgs, config: &AxiomConfig, config_path: &Path) -> Result<i
     let workspace = axiom_check::resolve_inputs(config, &base)?;
 
     let mut files = Vec::with_capacity(
-        workspace.schema_files.len() + workspace.query_files.len() + workspace.model_files.len(),
+        workspace.schema_files.len() + workspace.model_files.len(),
     );
     files.extend(workspace.schema_files.iter().cloned());
-    files.extend(workspace.query_files.iter().cloned());
     files.extend(workspace.model_files.iter().cloned());
 
     let mut view = WorkspaceView::empty();

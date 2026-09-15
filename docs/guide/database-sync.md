@@ -7,7 +7,7 @@ executing them as a batch on a single connection.
 axiom push --db-url postgres://user:pass@host:5432/db
 ```
 
-Schema files are resolved from the `inputs.schema` globs in `axiom.json`, in
+Schema files are resolved from the `source.schema` globs in `axiom.json`, in
 configured order. If no schema files match, the command reports a notice and
 does nothing rather than failing.
 

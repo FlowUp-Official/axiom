@@ -38,9 +38,9 @@ An `axiom init` template looks like this:
   "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "my-project", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
-  "inputs": {
+  "source": {
     "schema": ["./schema.sql"],
-    "models": ["./models/**/*.axm"]
+    "axm": ["./models/**/*.axm"]
   },
   "validation": { "on_error": "fail" },
   "outputs": {
@@ -68,13 +68,12 @@ The cache stores BLAKE3 digests of the config and every input file. When all
 digests match, generation is skipped entirely. See
 [Performance](/guide/performance).
 
-### `inputs`
+### `source`
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `schema` | string[] | Glob patterns for schema SQL files |
-| `models` | string[] | Glob patterns for `.axm` files (models, types, and query declarations) |
-| `queries` | string[] | *Optional, legacy.* Glob patterns for standalone SQL files. Query *definitions* now come from `query` declarations in `.axm` files; these globs only contribute to the cache hash. |
+| `axm` | string[] | Glob patterns for `.axm` files (models, types, and query declarations) |
 
 Paths are resolved relative to the directory containing the config file.
 

@@ -205,32 +205,22 @@ async fn run_generate(
         .unwrap_or_else(|| Path::new("."));
 
     let mut sources: Vec<(PathBuf, String)> = Vec::new();
-    for path in resolve_glob_paths(&config.inputs.schema, base)? {
+    for path in resolve_glob_paths(&config.source.schema, base)? {
         let sql = std::fs::read_to_string(&path)?;
         sources.push((path, sql));
     }
 
-    let mut query_sources: Vec<(PathBuf, String)> = Vec::new();
-    for path in resolve_glob_paths(&config.inputs.queries, base)? {
-        let sql = std::fs::read_to_string(&path)?;
-        query_sources.push((path, sql));
-    }
-
     let mut model_sources: Vec<(PathBuf, String)> = Vec::new();
-    for path in resolve_glob_paths(&config.inputs.models, base)? {
+    for path in resolve_glob_paths(&config.source.axm, base)? {
         let src = std::fs::read_to_string(&path)?;
         model_sources.push((path, src));
     }
 
-    // BLAKE3 digests of the config file and every resolved input file (schema,
-    // query, and model sources alike, so edits invalidate the cache).
+    // BLAKE3 digests of the config file and every resolved input file (schema
+    // and model sources alike, so edits invalidate the cache).
     let config_hash = compute_file_hash(config_path)?;
     let mut file_hashes: BTreeMap<String, [u8; 32]> = BTreeMap::new();
-    for (path, _) in sources
-        .iter()
-        .chain(&query_sources)
-        .chain(&model_sources)
-    {
+    for (path, _) in sources.iter().chain(&model_sources) {
         file_hashes.insert(path.to_string_lossy().into_owned(), compute_file_hash(path)?);
     }
 
@@ -353,11 +343,11 @@ async fn run_push(
         .unwrap_or_else(|| Path::new("."));
 
     let db_url = db::resolve_db_url(args.db_url, args.env_file.as_deref())?;
-    let schema_files = resolve_glob_paths(&config.inputs.schema, base)?;
+    let schema_files = resolve_glob_paths(&config.source.schema, base)?;
     if schema_files.is_empty() {
         let notice = format!(
             "[axiom] no schema files matched `{}`; nothing to push",
-            config.inputs.schema.join(", ")
+            config.source.schema.join(", ")
         );
         println!(
             "{}",

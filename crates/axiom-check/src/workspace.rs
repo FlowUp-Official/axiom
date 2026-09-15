@@ -22,7 +22,6 @@ use crate::diagnostics::{line_of_offset, parse_error};
 /// All resolved input sources, with their file contents.
 pub struct Workspace {
     pub schema_files: Vec<(PathBuf, String)>,
-    pub query_files: Vec<(PathBuf, String)>,
     pub model_files: Vec<(PathBuf, String)>,
 }
 
@@ -36,9 +35,8 @@ pub fn resolve_inputs(config: &AxiomConfig, base: &Path) -> Result<Workspace, Ax
         Ok(out)
     };
     Ok(Workspace {
-        schema_files: read(&config.inputs.schema)?,
-        query_files: read(&config.inputs.queries)?,
-        model_files: read(&config.inputs.models)?,
+        schema_files: read(&config.source.schema)?,
+        model_files: read(&config.source.axm)?,
     })
 }
 

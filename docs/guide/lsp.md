@@ -32,9 +32,10 @@ editor at the full path.
 ## Configuration
 
 The server discovers `axiom.json` from the workspace root on startup and loads
-every configured input (`schema`, `queries`, `models`), so cross-file
-references resolve without opening each file. When no `axiom.json` is present
-the server still reports single-file parse errors for open buffers.
+every configured source (`schema`, `axm`), plus any SQL file you open in the
+editor as an ad-hoc query, so cross-file references resolve without opening
+each file. When no `axiom.json` is present the server still reports single-file
+parse errors for open buffers.
 
 The BLAKE3 `ToolCache` is reused: diagnostics are cached by content hash and
 only the file that changed is re-analyzed, keeping keystroke latency in the

@@ -63,10 +63,9 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
             "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": false, "path": ".axiom.cache" },
-            "inputs": {
+            "source": {
                 "schema": ["schema.sql"],
-                "queries": ["queries/**/*.sql"],
-                "models": ["models/**/*.axm"]
+                "axm": ["models/**/*.axm"]
             },
             "validation": { "on_error": "fail" },
             "outputs": {
@@ -177,15 +176,15 @@ async fn workspace_load_publishes_diagnostics() {
     let (dir, base) = workspace();
     let (service, mut socket, _root) = setup(&base).await;
 
-    // `queries/one.sql` references `users`, which exists -> no diagnostics.
+    // `schema.sql` and `models/user.axm` are well-formed -> no diagnostics.
     let (uri, diags) = wait_for_publish(
         &mut socket,
-        |u| u.path().ends_with("one.sql"),
+        |u| u.path().ends_with("schema.sql"),
         Duration::from_secs(2),
     )
     .await;
     assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:?}");
-    assert!(uri.path().ends_with("one.sql"));
+    assert!(uri.path().ends_with("schema.sql"));
     drop((dir, service));
 }
 
@@ -466,7 +465,7 @@ async fn workspace_load_failure_publishes_error_diagnostic() {
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": false },
             "validation": { "on_error": "fail" },
-            "inputs": { "schema": ["["], "queries": [], "models": [] },
+            "source": { "schema": ["["], "axm": [] },
             "outputs": {}
         }"#,
     )
