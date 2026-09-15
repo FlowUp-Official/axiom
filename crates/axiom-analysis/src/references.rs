@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn axm_refs_pick_named_types() {
-        let axm = "model User { email: string }\nmodel Account {\n  owner: User\n}";
+        let axm = "model User { email: String }\nmodel Account {\n  owner: User\n}";
         let symbols = make_symbols("", Some(axm));
         let index = PositionIndex::new_axm(axm);
         let parsed = parse_axm_file(axm).unwrap();

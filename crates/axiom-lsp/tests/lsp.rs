@@ -88,7 +88,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
     std::fs::create_dir(base.join("models")).unwrap();
     std::fs::write(
         base.join("models/user.axm"),
-        "export model User {\n  email: string\n}\n",
+        "export model User {\n  email: String\n}\n",
     )
     .unwrap();
 

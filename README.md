@@ -1,8 +1,8 @@
 # Axiom
 
-> A high-performance code generator for SQL schemas and queries, built for large monorepos.
+> A high-performance code generator for SQL schemas, `.axm` models, and queries, built for large monorepos.
 
-Axiom turns your SQL schema and query definitions into type-safe, validated client code — for both **TypeScript** and **Rust** — keeps the databases that mirror them in sync, and brings the whole compiler into your editor via a Language Server. It is written entirely in Rust.
+Axiom turns your SQL schema and `.axm` model and query definitions into type-safe, validated client code — for both **TypeScript** and **Rust** — keeps the databases that mirror them in sync, and brings the whole compiler into your editor via a Language Server. It is written entirely in Rust.
 
 ## Why Axiom?
 
@@ -12,7 +12,7 @@ Axiom makes your database the **single source of truth**:
 
 - **Declarative, validated configuration.** `axiom.json` is checked against a generated JSON schema at load time, so misconfiguration fails fast with a readable diagnostic — not a runtime surprise.
 - **One schema, many languages.** Generate consistent, type-safe TypeScript and Rust client code from the same SQL inputs, so a table change propagates everywhere at once.
-- **Embedded input validation.** Column and parameter rules (email, UUID, range, length, regex, normalization, and more) are declared in SQL comments and compiled straight into the generated code.
+- **Embedded input validation.** Field and parameter rules (email, UUID, range, length, regex, normalization, and more) are declared in `.axm` files and compiled straight into the generated code.
 - **Synchronized databases.** Push your schema to Postgres targets so the live database, the generated clients, and your source of truth never diverge.
 - **IDE-grade authoring.** A native Language Server (`axiom-lsp`) plugs the compiler directly into your editor — diagnostics as you type, go-to-definition, hover, completion, and cross-file rename — plus a [Zed extension](extensions/axiom) that wires it up in one click. Generated `axiom.json` files reference a versioned `$schema` URL for autocompletion and inline errors in any JSON-schema-aware editor.
 - **A small, focused command surface.** Seven focused commands: bootstrap (`init`), generate, push, check, format, and lint — each one doing exactly one thing well.
@@ -34,7 +34,7 @@ The net effect: repeated runs cost microseconds, letting generation be invoked f
 Monorepos multiply the pain of database-driven development — many services, many schemas, many languages, all sharing one repository. Axiom is designed around that reality:
 
 - **Per-directory configuration.** Each package or service owns an `axiom.json` in its own directory, auto-detected without global state.
-- **Glob-driven inputs.** Schema and query files are resolved with flexible glob patterns, so your inputs stay aligned with your directory layout.
+- **Glob-driven inputs.** Schema and `.axm` model files are resolved with flexible glob patterns, so your inputs stay aligned with your directory layout.
 - **Independent, hashed caching.** Every project caches against its own config and inputs; changes in one directory never invalidate another, keeping incremental builds fast at monorepo scale.
 - **Polyglot from one source.** The same SQL drives both TypeScript and Rust targets, so services written in different languages stay consistent without duplicated effort.
 - **Predictable schema URLs.** Versioned `$schema` links mean every release's config format is pinned and verifiable across the whole repository.
@@ -55,12 +55,12 @@ A [Zed extension](extensions/axiom) is bundled for one-click setup; any editor t
 ## Features
 
 - Single-binary CLI with seven focused commands: initialize a project, generate typed clients, push a schema to a database, verify correctness, format, lint, and print the config schema.
-- TypeScript and Rust code generation from SQL schemas and annotated query files.
-- Typed, async query functions generated from `@fn` annotations, with **named parameters** (`$email`) or positional placeholders (`$1`), per-parameter `@validate` rules, and case-insensitive return-type resolution (`: users` → `Users`).
-- Compiler-grade `check` with diagnostics for unresolved tables/columns, missing models, return-type mismatches, and invalid placeholders — the exact same engine the editor runs.
+- TypeScript and Rust code generation from SQL schemas and `.axm` models and queries.
+- Typed, async query functions generated from `query` declarations in `.axm` files, with **named parameters** (`$email`) or positional placeholders (`$1`), row-return contracts (`-> T`, `-> T?`, `-> T[]`), and return types resolved against tables and models.
+- Compiler-grade `check` with diagnostics for unresolved tables/columns, missing models, bad placeholders, return-contract mismatches, and invalid return types — the exact same engine the editor runs.
 - A **Language Server** (`axiom-lsp`) with diagnostics, completion, hover, go-to-definition, rename, and formatting, plus a **Zed extension**.
 - Deterministic `format` for `.axm` models and SQL inputs, and static-analysis `lint` rules.
-- Column and parameter validation rules compiled into the output: `email`, `url`, `uuid`, `ulid`, `ipv4`, `ipv6`, `isodate`, `alphanumeric`, `trim`, `lower`, `upper`, `min_len`, `max_len`, `min`, `max`, and custom `regex`.
+- Field and parameter validation rules compiled into the output: `email`, `url`, `uuid`, `ulid`, `ipv4`, `ipv6`, `isodate`, `alphanumeric`, `nonempty`, `trim`, `lowercase`, `uppercase`, `min_length`, `max_length`, `min`, `max`, and custom `regex`.
 - JSON Schema validation of `axiom.json` at load time, with colorized `miette` diagnostics on failure.
 - Postgres schema synchronization with flexible URL resolution from CLI flags, `.env` files, and environment variables.
 - Release artifacts signed with SHA-256 checksums for both Linux and Windows.

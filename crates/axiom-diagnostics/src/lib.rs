@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn tty_render_includes_location_and_caret() {
-        let source = "model User {\n  name: string\n}";
+        let source = "model User {\n  name: String\n}";
         // byte offset of `name` (line 2, col 3)
         let start = source.find("name").expect("name present");
         let diag = Diagnostic::error("user.axm", "lint.foo", "bad")

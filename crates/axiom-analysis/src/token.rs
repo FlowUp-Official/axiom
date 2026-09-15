@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn scans_axm() {
-        let src = "import User from \"user\"\n\nmodel Account {\n  email: string .email() .trim()\n}";
+        let src = "import { User } from \"user\"\n\nmodel Account {\n  email: String.email().trim()\n}\n\nquery GetUser($id: UUID) -> Account {\n  SELECT email FROM accounts WHERE id = $id\n}";
         let tokens = tokenize_axm(src);
         let words: Vec<&str> = tokens
             .iter()
@@ -519,7 +519,11 @@ mod tests {
             .collect();
         assert_eq!(
             words,
-            vec!["import", "User", "from", "model", "Account", "email", "string", "email", "trim"]
+            vec![
+                "import", "User", "from", "model", "Account", "email", "String", "email", "trim",
+                "query", "GetUser", "id", "UUID", "Account", "SELECT", "email", "FROM", "accounts",
+                "WHERE", "id", "id"
+            ]
         );
     }
 
