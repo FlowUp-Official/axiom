@@ -16,12 +16,14 @@
 //! Axiom identifiers are strictly case-sensitive, and the resolver never
 //! canonicalizes them: `User` and `user` are distinct names.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::axm::ast::{AnnotatedType, AxmFile, ModelDecl, QueryDecl, TypeDecl, TypeRef};
+use crate::axm::ast::{AnnotatedType, AxmFile, ModelDecl, QueryDecl, QueryReturn, TypeDecl, TypeRef};
 use crate::axm::parser::parse_axm_file;
 use crate::errors::AxiomError;
+use crate::query::{QueryCatalog, QueryDefinition, QueryParam, QueryReturnType};
 
 /// A model together with the file it was declared in.
 #[derive(Debug, Clone)]
@@ -91,6 +93,55 @@ impl ModelRegistry {
             .and_then(|m| m.get(written))
             .map(|s| s.as_str())
             .unwrap_or(written)
+    }
+}
+
+/// Compile every query declaration in a registry into the query catalog the
+/// code generators and `axiom check` consume.
+///
+/// Query parameters carry no validation rules in the `.axm` grammar, so the
+/// catalog's per-parameter rules are always empty.
+pub fn query_catalog(registry: &ModelRegistry) -> QueryCatalog<'static> {
+    let queries = registry
+        .queries
+        .iter()
+        .map(|resolved| query_definition(&resolved.query))
+        .collect();
+    QueryCatalog { queries }
+}
+
+/// Compile a single query declaration into its shared [`QueryDefinition`].
+pub fn query_definition(query: &QueryDecl) -> QueryDefinition<'static> {
+    QueryDefinition {
+        name: Cow::Owned(query.name.clone()),
+        sql: query.sql.clone(),
+        params: query
+            .params
+            .iter()
+            .map(|p| QueryParam {
+                name: Cow::Owned(p.name.clone()),
+                param_type: Cow::Owned(type_ref_name(&p.ty)),
+            })
+            .collect(),
+        return_type: match &query.return_type {
+            QueryReturn::Exec => QueryReturnType::Exec,
+            QueryReturn::Single(ty) => QueryReturnType::Single(Cow::Owned(type_ref_name(ty))),
+            QueryReturn::Optional(ty) => QueryReturnType::Single(Cow::Owned(type_ref_name(ty))),
+            QueryReturn::Many(ty) => QueryReturnType::Many(Cow::Owned(type_ref_name(ty))),
+        },
+        validations: BTreeMap::new(),
+    }
+}
+
+/// Render a type reference back to its source spelling, e.g. `String[]` or
+/// `User`. The `?` postfix is dropped: `User?` and `User` both surface as the
+/// single-optional `User` row contract.
+pub fn type_ref_name(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Named(name) => name.clone(),
+        TypeRef::Array(inner) => format!("{}[]", type_ref_name(inner)),
+        TypeRef::Nullable(inner) => type_ref_name(inner),
+        other => other.primitive_name().unwrap_or("Unknown").to_string(),
     }
 }
 
@@ -245,17 +296,11 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
                     path,
                 )?;
             }
-            match &query.return_type {
-                crate::axm::ast::QueryReturn::Exec => {}
-                crate::axm::ast::QueryReturn::Single(ty)
-                | crate::axm::ast::QueryReturn::Optional(ty)
-                | crate::axm::ast::QueryReturn::Many(ty) => check_type_refs(
-                    ty,
-                    scope,
-                    &format!("return type of query `{}`", query.name),
-                    path,
-                )?,
-            }
+            // Return types are intentionally *not* verified here: a `query`
+            // may return the rows of a table declared in a `.sql` schema that
+            // is invisible to import resolution. Whether the name resolves to
+            // a table, model, or type alias is checked against the linked
+            // catalog in the query-check phase.
         }
     }
 

@@ -11,7 +11,20 @@ pub mod codegen;
 pub mod parser;
 pub mod resolver;
 
-pub use ast::{FieldDecl, ModelDecl, Rule, Transform, TypeRef};
+pub use ast::{AxmFile, FieldDecl, ModelDecl, QueryDecl, Rule, Transform, TypeRef};
 pub use codegen::{generate_rust_models, generate_typescript_models};
 pub use parser::parse_axm_file;
-pub use resolver::{resolve_models, ModelRegistry};
+pub use resolver::{
+    query_catalog, query_definition, resolve_models, type_ref_name, ModelRegistry,
+};
+
+/// Compile the query declarations of a single parsed file into a catalog.
+pub fn queries_in_file(file: &AxmFile) -> crate::query::QueryCatalog<'static> {
+    crate::query::QueryCatalog {
+        queries: file
+            .queries
+            .iter()
+            .map(crate::axm::query_definition)
+            .collect(),
+    }
+}

@@ -24,7 +24,7 @@ use axiom_core::cache::{compute_content_hash, ToolCache};
 use axiom_core::catalog::{parse_sql_catalog, ColumnSchema, TableCatalog, TableSchema};
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{parse_query_file, QueryCatalog};
+use axiom_core::query::QueryCatalog;
 
 use crate::references::{
     query_return_type_refs, resolve_axm_refs, resolve_query_refs, AxmRef, QueryRefs,
@@ -297,15 +297,15 @@ impl AnalysisDatabase {
                     .map(|c| own_catalog(&c))
                     .unwrap_or_default();
                 self.file_catalogs.insert(path.to_path_buf(), catalog);
-                let queries = parse_query_file(&text)
-                    .ok()
-                    .map(|q| own_query_catalog(&q))
-                    .unwrap_or_default();
-                self.file_query_catalogs.insert(path.to_path_buf(), queries);
             }
             Lang::Axm => {
                 // The axm refs are recomputed lazily against the symbol table.
-                let _ = (&text, &index, &axm);
+                let _ = (&text, &index);
+                let queries = axm
+                    .as_ref()
+                    .map(axiom_core::axm::queries_in_file)
+                    .unwrap_or_default();
+                self.file_query_catalogs.insert(path.to_path_buf(), queries);
             }
         }
 
@@ -537,7 +537,7 @@ impl AnalysisDatabase {
         let Some((_hash, text, _index)) = self.file_data(path) else {
             return Vec::new();
         };
-        if self.file_lang(path) != Some(Lang::Sql) {
+        if self.file_lang(path) != Some(Lang::Axm) {
             return Vec::new();
         }
         if let Some(queries) = self.file_query_catalogs.get(path) {
@@ -594,69 +594,4 @@ fn own_catalog(catalog: &TableCatalog) -> TableCatalog<'static> {
         })
         .collect();
     TableCatalog { tables }
-}
-
-fn own_query_catalog(catalog: &QueryCatalog) -> QueryCatalog<'static> {
-    use axiom_core::query::{QueryDefinition, QueryParam, QueryReturnType};
-    let queries = catalog
-        .queries
-        .iter()
-        .map(|q| QueryDefinition {
-            name: q.name.to_string().into(),
-            sql: q.sql.clone(),
-            params: q
-                .params
-                .iter()
-                .map(|p| QueryParam {
-                    name: p.name.to_string().into(),
-                    param_type: p.param_type.to_string().into(),
-                })
-                .collect(),
-            return_type: match &q.return_type {
-                QueryReturnType::Single(n) => QueryReturnType::Single(n.to_string().into()),
-                QueryReturnType::Many(n) => QueryReturnType::Many(n.to_string().into()),
-                QueryReturnType::Exec => QueryReturnType::Exec,
-            },
-            validations: q
-                .validations
-                .iter()
-                .map(|(k, v)| {
-                    let owned: Vec<_> = v
-                        .iter()
-                        .map(|rule| axiom_core::query::ValidationRule {
-                            kind: own_rule_kind(&rule.kind),
-                            custom_message: rule
-                                .custom_message
-                                .as_ref()
-                                .map(|m| std::borrow::Cow::Owned(m.to_string())),
-                        })
-                        .collect();
-                    (k.to_string().into(), owned)
-                })
-                .collect(),
-        })
-        .collect();
-    QueryCatalog { queries }
-}
-
-fn own_rule_kind(kind: &axiom_core::query::RuleKind) -> axiom_core::query::RuleKind<'static> {
-    use axiom_core::query::RuleKind;
-    match kind {
-        RuleKind::Regex(p) => RuleKind::Regex(std::borrow::Cow::Owned(p.to_string())),
-        RuleKind::MinLen(n) => RuleKind::MinLen(*n),
-        RuleKind::MaxLen(n) => RuleKind::MaxLen(*n),
-        RuleKind::Min(n) => RuleKind::Min(*n),
-        RuleKind::Max(n) => RuleKind::Max(*n),
-        RuleKind::Email => RuleKind::Email,
-        RuleKind::Url => RuleKind::Url,
-        RuleKind::Uuid => RuleKind::Uuid,
-        RuleKind::Ulid => RuleKind::Ulid,
-        RuleKind::Ipv4 => RuleKind::Ipv4,
-        RuleKind::Ipv6 => RuleKind::Ipv6,
-        RuleKind::IsoDate => RuleKind::IsoDate,
-        RuleKind::Alphanumeric => RuleKind::Alphanumeric,
-        RuleKind::Trim => RuleKind::Trim,
-        RuleKind::LowerCase => RuleKind::LowerCase,
-        RuleKind::UpperCase => RuleKind::UpperCase,
-    }
 }

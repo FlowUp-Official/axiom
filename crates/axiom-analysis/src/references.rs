@@ -300,8 +300,9 @@ fn field_type_span(
     Some(Span::new(word.start, word.end))
 }
 
-/// Collect `-- @fn name(...) : ReturnType` return-type references. These live
-/// in comment lines, so they are found by scanning lines rather than tokens.
+/// Collect `-> Type` return-type references from `query` declarations in an
+/// `.axm` file, located by scanning the source text between the query name and
+/// its opening brace.
 pub fn query_return_type_refs(
     file: &std::path::Path,
     src: &str,
@@ -313,7 +314,7 @@ pub fn query_return_type_refs(
             axiom_core::query::QueryReturnType::Single(name)
             | axiom_core::query::QueryReturnType::Many(name) => {
                 let name = name.trim().to_string();
-                match find_annotation_name(src, &name, &query.name) {
+                match axm_return_span(src, &query.name, &name) {
                     Some(span) => (name, span),
                     None => continue,
                 }
@@ -331,37 +332,42 @@ pub fn query_return_type_refs(
     refs
 }
 
-/// Find the byte span of `name` within the `-- @fn <query.name> ... : name`
-/// annotation line.
-fn find_annotation_name(src: &str, name: &str, query_name: &str) -> Option<Span> {
-    let needle = format!("@{fn}", fn = "fn");
-    for (line_no, line) in src.lines().enumerate() {
-        if !line.contains(&needle) || !line.contains(query_name) {
-            continue;
-        }
-        let line_start = line_start_of(src, line_no);
-        if let Some(colon) = line.rfind(':') {
-            let after = &line[colon + 1..];
-            let trimmed = after.trim();
-            let target = trimmed
-                .trim_end_matches(']')
-                .trim_end_matches("[]")
-                .trim();
-            if target.eq_ignore_ascii_case(name) {
-                let name_offset = line_start + colon + 1 + (after.len() - after.trim_start().len());
-                let end = name_offset + target.len();
-                return Some(Span::new(name_offset, end));
-            }
-        }
-    }
-    None
+fn is_axm_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
-fn line_start_of(src: &str, line_no: usize) -> usize {
-    src.lines()
-        .take(line_no)
-        .map(|l| l.len() + 1)
-        .sum::<usize>()
+/// Find the byte span of the return type of `query <name>`: the first word
+/// after `->` within the declaration's header.
+fn axm_return_span(src: &str, query_name: &str, return_name: &str) -> Option<Span> {
+    let needle = "query ";
+    let mut search = 0usize;
+    while let Some(rel) = src[search..].find(needle) {
+        let decl = search + rel;
+        let after = &src[decl + needle.len()..];
+        let name_len = after
+            .find(|c: char| !is_axm_word_char(c))
+            .unwrap_or(after.len());
+        let name = &after[..name_len];
+        if name == query_name {
+            let header_start = decl + needle.len() + name_len;
+            let header = &src[header_start..];
+            let header = &header[..header.find('{').unwrap_or(header.len())];
+            let arrow = header.find("->")?;
+            let tail = &header[arrow + 2..];
+            let start = tail.find(is_axm_word_char)?;
+            let word = &tail[start..];
+            let word_len = word
+                .find(|c: char| !is_axm_word_char(c))
+                .unwrap_or(word.len());
+            if word[..word_len].eq_ignore_ascii_case(return_name) {
+                let abs = header_start + arrow + 2 + start;
+                return Some(Span::new(abs, abs + word_len));
+            }
+            return None;
+        }
+        search = decl + needle.len() + name_len;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -446,10 +452,21 @@ mod tests {
     }
 
     #[test]
-    fn return_type_refs_found_in_comments() {
-        let src = "-- @fn get_user(email: String) : User\nSELECT id FROM users WHERE email = $1;";
-        let queries = axiom_core::query::parse_query_file(src).unwrap();
-        let refs = query_return_type_refs(std::path::Path::new("q.sql"), src, &queries);
+    fn return_type_refs_found_in_axm_queries() {
+        let src = "model User {}\n\nquery get_user($email: String) -> User {\n  SELECT id FROM users WHERE email = $email;\n}";
+        let mut queries = QueryCatalog::default();
+        queries.queries.push(axiom_core::query::QueryDefinition {
+            name: "get_user".into(),
+            sql: "SELECT id FROM users WHERE email = $email;".into(),
+            params: vec![axiom_core::query::QueryParam {
+                name: "email".into(),
+                param_type: "String".into(),
+            }],
+            return_type: axiom_core::query::QueryReturnType::Single("User".into()),
+            validations: Default::default(),
+        });
+        let refs =
+            query_return_type_refs(std::path::Path::new("models/a.axm"), src, &queries);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "User");
         assert_eq!(&src[refs[0].span.start..refs[0].span.end], "User");

@@ -15,16 +15,18 @@ CREATE TABLE users (
 );
 "#;
 
-const QUERIES_SQL: &str = r#"
--- @fn get_user(email: String) : Users
-SELECT id, email FROM users WHERE email = $1
+const MODELS_AXM: &str = r#"
+query get_user($email: String) -> Users {
+  SELECT id, email FROM users WHERE email = $email
+}
 
--- @validate email(email, trim, lower)
--- @fn get_users(limit: Int) : Users[]
-SELECT id, email FROM users ORDER BY id LIMIT $1
+query get_users($limit: Int) -> Users[] {
+  SELECT id, email FROM users ORDER BY id LIMIT $1
+}
 
--- @fn delete_user(id: BigInt) : Exec
-DELETE FROM users WHERE id = $1
+query delete_user($id: Int) {
+  DELETE FROM users WHERE id = $1
+}
 "#;
 
 fn fixture_dir(name: &str) -> PathBuf {
@@ -38,14 +40,14 @@ fn fixture_dir(name: &str) -> PathBuf {
 }
 
 fn write_fixture(dir: &Path, schema: &str) {
-    std::fs::create_dir_all(dir.join("queries")).unwrap();
+    std::fs::create_dir_all(dir.join("models")).unwrap();
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
   "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
-  "inputs": { "schema": ["schema.sql"], "queries": ["queries/accounts.sql"] },
+  "inputs": { "schema": ["schema.sql"], "queries": [], "models": ["models/models.axm"] },
   "validation": { "on_error": "fail" },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },
@@ -56,7 +58,7 @@ fn write_fixture(dir: &Path, schema: &str) {
     )
     .unwrap();
     std::fs::write(dir.join("schema.sql"), schema).unwrap();
-    std::fs::write(dir.join("queries/accounts.sql"), QUERIES_SQL).unwrap();
+    std::fs::write(dir.join("models/models.axm"), MODELS_AXM).unwrap();
 }
 
 fn run_generate(dir: &Path) -> Output {
@@ -112,8 +114,6 @@ fn generates_typescript_and_rust_outputs() {
     assert!(ts.contains("  params: GetUserParams"));
     assert!(ts.contains("): Promise<Users | null> {"));
     assert!(ts.contains("SELECT id, email FROM users WHERE email = ${params.email}"));
-    assert!(ts.contains("const email = params.email.trim().toLowerCase();"));
-    assert!(ts.contains("errors.push({ path: \"email\", message: \"must be a valid email address\" });"));
     assert!(ts.contains("export async function getUsers("));
     assert!(ts.contains("): Promise<Users[]> {"));
     assert!(ts.contains("export async function deleteUser("));
@@ -143,7 +143,6 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("sqlx::query("));
     assert!(rs.contains(".bind(params.id)"));
     assert!(rs.contains(".execute(pool)"));
-    assert!(rs.contains("fn is_email(value: &str) -> bool {"));
 }
 
 #[test]
@@ -226,7 +225,7 @@ fn query_change_invalidates_cache_and_regenerates() {
     assert!(stdout(&second).contains("Everything up to date (<0.5ms)"));
 
     // Edit a query file: the BLAKE3 cache must miss and codegen reruns.
-    let queries = dir.join("queries/accounts.sql");
+    let queries = dir.join("models/models.axm");
     let contents = std::fs::read_to_string(&queries).unwrap();
     std::fs::write(&queries, contents.replace("LIMIT $1", "LIMIT $1::int")).unwrap();
 

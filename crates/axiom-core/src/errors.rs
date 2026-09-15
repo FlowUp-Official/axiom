@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use miette::{Diagnostic, SourceSpan};
+use miette::Diagnostic;
 use thiserror::Error;
 
 /// The unified error type for all user-facing Axiom failures.
@@ -49,20 +49,6 @@ pub enum AxiomError {
         help("Use `--force` to overwrite the existing configuration file, or specify a different path with `--output <PATH>`.")
     )]
     ConfigAlreadyExists { path: String },
-
-    /// A `-- @fn` annotation line does not follow the expected signature.
-    #[error("Invalid annotation syntax: {message}")]
-    #[diagnostic(
-        code(axiom::query::annotation_error),
-        help("Ensure the function definition follows the format: `-- @fn func_name(param: Type) : ReturnType`")
-    )]
-    QueryAnnotationError {
-        message: String,
-        #[source_code]
-        src: String,
-        #[label("Syntax error near this line")]
-        span: SourceSpan,
-    },
 
     /// A push operation failed, e.g. no database URL could be resolved.
     #[error("Database migration error: {details}")]

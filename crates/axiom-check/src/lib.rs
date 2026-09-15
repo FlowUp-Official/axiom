@@ -20,13 +20,14 @@ use std::path::{Path, PathBuf};
 use axiom_core::cache::ToolCache;
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
+use axiom_core::query::QueryCatalog;
 use axiom_diagnostics::Diagnostic;
 
 pub use diagnostics::{line_of_offset, span_for_line};
 pub use synchronization::{write_fixed_outputs, SyncCheck};
 pub use workspace::{
-    check_models, check_queries, check_schemas, collect_declared_models,
-    collect_referenced_models, resolve_inputs, Workspace,
+    check_models, check_queries, check_schemas, collect_referenced_models, resolve_inputs,
+    Workspace,
 };
 
 /// The outcome of a full `axiom check` run.
@@ -51,15 +52,17 @@ pub fn check_workspace(
 ) -> Result<CheckReport, AxiomError> {
     let (catalog, schema_diags) = check_schemas(&workspace.schema_files);
     let schema_hash = workspace::aggregate_hash(&workspace.schema_files);
-    let declared_models = collect_declared_models(&workspace.model_files);
-    let (query_catalog, query_diags) = check_queries(
-        cache.as_deref_mut(),
-        &schema_hash,
-        &catalog,
-        &declared_models,
-        &workspace.query_files,
-    );
-    let (registry, model_diags) = check_models(cache, &workspace.model_files);
+    let (registry, model_diags) = check_models(cache.as_deref_mut(), &workspace.model_files);
+    let (query_catalog, query_diags) = match registry.as_ref() {
+        Some(registry) => check_queries(
+            cache,
+            &schema_hash,
+            &catalog,
+            registry,
+            &workspace.model_files,
+        ),
+        None => (QueryCatalog::default(), Vec::new()),
+    };
 
     let mut sync = synchronization::check_synchronization(
         config,

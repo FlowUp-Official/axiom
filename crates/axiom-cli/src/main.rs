@@ -9,7 +9,7 @@ use axiom_core::codegen::{generate_rust, generate_typescript};
 use axiom_core::config::{resolve_glob_paths, AxiomConfig, OutputConfig};
 use axiom_core::db;
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{parse_query_file, QueryCatalog};
+use axiom_core::query::QueryCatalog;
 use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
 
@@ -256,16 +256,16 @@ async fn run_generate(
         catalog.tables.extend(parse_sql_catalog(sql)?.tables);
     }
 
-    let mut query_catalog = QueryCatalog::default();
-    for (_, sql) in &query_sources {
-        query_catalog.queries.extend(parse_query_file(sql)?.queries);
-    }
-
+    // Query definitions come from `query` declarations in `.axm` model files.
     let model_registry = if model_sources.is_empty() {
         None
     } else {
         Some(resolve_models(&model_sources)?)
     };
+    let mut query_catalog = QueryCatalog::default();
+    if let Some(registry) = &model_registry {
+        query_catalog.queries.extend(axiom_core::axm::query_catalog(registry).queries);
+    }
 
     let generated: Vec<(String, String)> = config
         .outputs

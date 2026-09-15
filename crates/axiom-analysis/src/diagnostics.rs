@@ -91,22 +91,25 @@ impl AnalysisDatabase {
             return self.query_diags.clone().unwrap_or_default();
         }
         let schema_files = self.role_files(Role::Schema);
-        let query_files = self.role_files(Role::Query);
         let model_files = self.role_files(Role::Model);
-        let diags = if query_files.is_empty() {
+        let diags = if model_files.is_empty() {
             Vec::new()
         } else {
             let schema_hash = axiom_check::workspace::aggregate_hash(&schema_files);
-            let declared = axiom_check::collect_declared_models(&model_files);
             let catalog = self.catalog().clone();
-            let (_, diags) = check_queries(
-                self.tools.as_mut(),
-                &schema_hash,
-                &catalog,
-                &declared,
-                &query_files,
-            );
-            diags
+            let (registry, _) = check_models(self.tools.as_mut(), &model_files);
+            if let Some(registry) = registry {
+                let (_, diags) = check_queries(
+                    self.tools.as_mut(),
+                    &schema_hash,
+                    &catalog,
+                    &registry,
+                    &model_files,
+                );
+                diags
+            } else {
+                Vec::new()
+            }
         };
         self.query_diags = Some(diags.clone());
         self.query_diags_dirty = false;

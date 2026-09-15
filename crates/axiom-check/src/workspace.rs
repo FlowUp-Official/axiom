@@ -1,22 +1,20 @@
 //! Input resolution and the per-input check phases.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use sqlparser::ast::{Expr, ObjectName, Visit, Visitor};
+use sqlparser::ast::{Expr, ObjectName, Select, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use axiom_core::axm::ast::TypeRef;
+use axiom_core::axm::ast::{QueryDecl, QueryReturn, TypeRef};
 use axiom_core::axm::parser::parse_axm_file;
 use axiom_core::axm::resolver::{resolve_models, ModelRegistry};
 use axiom_core::cache::{compute_content_hash, ToolCache};
 use axiom_core::catalog::{parse_sql_catalog, TableCatalog};
 use axiom_core::config::{resolve_glob_paths, AxiomConfig};
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{
-    parse_query_file, scan_placeholders, Placeholder, QueryCatalog, QueryReturnType,
-};
+use axiom_core::query::{scan_placeholders, Placeholder, QueryCatalog};
 use axiom_diagnostics::Diagnostic;
 
 use crate::diagnostics::{line_of_offset, parse_error};
@@ -58,24 +56,40 @@ pub fn check_schemas<'a>(files: &'a [(PathBuf, String)]) -> (TableCatalog<'a>, V
     (catalog, diags)
 }
 
-/// Parse every query file and verify each query against the schema catalog:
-/// referenced tables must exist, column references must resolve, and the
-/// declared return type must match a table or model.
+/// Compile every `query` declaration in the linked registry into the shared
+/// query catalog and verify each one against the schema catalog: referenced
+/// tables must exist, column references must resolve, the declared return
+/// type must match a table, model, or type alias, and the SQL body must honor
+/// the declared return contract (rows vs. execution).
 ///
-/// Per-file results are cached in the [`ToolCache`] keyed by the file's content
-/// hash plus the aggregate schema hash, so schema edits invalidate stale
-/// results while untouched query files stay cached.
-pub fn check_queries<'a>(
+/// Queries are parsed once by [`resolve_models`]; this phase only validates
+/// and compiles, so no per-file re-parsing happens. Per-file results are
+/// cached keyed by the file's content hash plus the aggregate schema hash.
+pub fn check_queries(
     mut cache: Option<&mut ToolCache>,
     schema_hash: &[u8; 32],
     catalog: &TableCatalog<'_>,
-    declared_models: &BTreeSet<String>,
-    files: &'a [(PathBuf, String)],
-) -> (QueryCatalog<'a>, Vec<Diagnostic>) {
-    let mut query_catalog = QueryCatalog::default();
+    registry: &ModelRegistry,
+    model_files: &[(PathBuf, String)],
+) -> (QueryCatalog<'static>, Vec<Diagnostic>) {
+    let query_catalog = axiom_core::axm::query_catalog(registry);
     let mut diags = Vec::new();
 
-    for (path, src) in files {
+    let src_by_path: BTreeMap<PathBuf, String> = model_files
+        .iter()
+        .map(|(p, s)| (p.clone(), s.clone()))
+        .collect();
+
+    let mut per_file: BTreeMap<PathBuf, Vec<&QueryDecl>> = BTreeMap::new();
+    for resolved in &registry.queries {
+        per_file
+            .entry(resolved.path.clone())
+            .or_default()
+            .push(&resolved.query);
+    }
+
+    for (path, queries) in &per_file {
+        let src = src_by_path.get(path).map(String::as_str).unwrap_or("");
         let file_hash = compute_content_hash(src.as_bytes());
         let key = format!(
             "check:query:{}:{}",
@@ -89,7 +103,10 @@ pub fn check_queries<'a>(
         {
             cached
         } else {
-            let computed = check_query_file(path, src, catalog, declared_models);
+            let computed: Vec<Diagnostic> = queries
+                .iter()
+                .flat_map(|q| check_declared_query(path, src, q, catalog, registry))
+                .collect();
             if let Some(cache) = cache.as_mut()
                 && let Ok(payload) = serde_json::to_vec(&computed)
             {
@@ -98,107 +115,237 @@ pub fn check_queries<'a>(
             computed
         };
         diags.extend(file_diags);
-
-        // The query catalog is always rebuilt: synchronization needs it.
-        if let Ok(parsed) = parse_query_file(src) {
-            query_catalog.queries.extend(parsed.queries);
-        }
     }
+
     (query_catalog, diags)
 }
 
-fn check_query_file(
+/// Validate a single `query` declaration: placeholders must resolve to a
+/// declared parameter, the return type must refer to a known table, model, or
+/// type alias, and the SQL body must match the declared return contract.
+fn check_declared_query(
     path: &Path,
     src: &str,
+    query: &QueryDecl,
     catalog: &TableCatalog<'_>,
-    declared_models: &BTreeSet<String>,
+    registry: &ModelRegistry,
 ) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
+    diags.extend(check_query_body(path, query.sql.trim(), catalog));
 
-    let parsed = match parse_query_file(src) {
-        Ok(parsed) => parsed,
-        Err(AxiomError::QueryAnnotationError { message, span, .. }) => {
-            diags.push(
-                parse_error(path, "check.query-annotation", message)
-                    .with_span(line_of_offset(src, span.offset())),
-            );
-            return diags;
+    let body_start = src.find(&query.sql).unwrap_or(0);
+    for (start, _, kind) in scan_placeholders(&query.sql) {
+        let span = line_of_offset(src, body_start + start);
+        match kind {
+            Placeholder::Positional(n) if n > query.params.len() => {
+                diags.push(
+                    Diagnostic::error(
+                        path,
+                        "check.query-placeholder",
+                        format!(
+                            "query `{}` uses placeholder `${n}`, but only {} parameter{} are declared",
+                            query.name,
+                            query.params.len(),
+                            if query.params.len() == 1 { "is" } else { "s" },
+                        ),
+                    )
+                    .with_span(span),
+                );
+            }
+            Placeholder::Named(name) if query.params.iter().all(|p| p.name != name) => {
+                diags.push(
+                    Diagnostic::error(
+                        path,
+                        "check.query-placeholder",
+                        format!(
+                            "query `{}` uses placeholder `${name}`, which is not declared in the `query` signature",
+                            query.name
+                        ),
+                    )
+                    .with_help("add the parameter to the `query` declaration, or fix the placeholder")
+                    .with_span(span),
+                );
+            }
+            _ => {}
         }
-        Err(_) => return diags,
+    }
+
+    match &query.return_type {
+        QueryReturn::Exec => {}
+        QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+            let name = axiom_core::axm::type_ref_name(ty);
+            if !known_return_type(catalog, registry, &name) {
+                diags.push(
+                    Diagnostic::error(
+                        path,
+                        "check.query-return-type",
+                        format!(
+                            "query `{}` returns `{name}`, but no such table, model, or type exists",
+                            query.name
+                        ),
+                    )
+                    .with_help("declare the table in a schema file or the model/type in a `.axm` file"),
+                );
+            }
+        }
+    }
+
+    diags.extend(check_return_contract(path, query, catalog, registry));
+    diags
+}
+
+/// Whether a return type name resolves to a catalog table (case-insensitive)
+/// or a linked model or type alias (case-sensitive).
+fn known_return_type(catalog: &TableCatalog<'_>, registry: &ModelRegistry, name: &str) -> bool {
+    let table = catalog.tables.iter().any(|t| {
+        t.name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&t.name)
+            .eq_ignore_ascii_case(name)
+    });
+    table || registry.index.contains_key(name) || registry.type_index.contains_key(name)
+}
+
+/// Verify the declared return contract against the SQL body: a row-returning
+/// contract needs a statement that produces rows, `Exec` must not be a plain
+/// `SELECT`, and bare projection identifiers must be fields of the declared
+/// row type.
+fn check_return_contract(
+    path: &Path,
+    query: &QueryDecl,
+    catalog: &TableCatalog<'_>,
+    registry: &ModelRegistry,
+) -> Vec<Diagnostic> {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, &query.sql) else {
+        return Vec::new(); // body parse errors are already reported
+    };
+    let Some(statement) = statements.into_iter().next() else {
+        return Vec::new();
     };
 
-    for query in &parsed.queries {
-        diags.extend(check_query_body(path, query.sql.trim(), catalog));
+    let produces_rows = statement_produces_rows(&statement);
+    let expects_rows = !matches!(query.return_type, QueryReturn::Exec);
 
-        // Placeholder references must resolve to a declared parameter. The
-        // body starts at `body_start` within `src` so spans line up.
-        let body_start = src.find(&query.sql).unwrap_or(0);
-        for (start, _, kind) in scan_placeholders(&query.sql) {
-            let span = line_of_offset(src, body_start + start);
-            match kind {
-                Placeholder::Positional(n) if n > query.params.len() => {
-                    diags.push(
-                        Diagnostic::error(
-                            path,
-                            "check.query-placeholder",
-                            format!(
-                                "query `{}` uses placeholder `${n}`, but only {} parameter{} are declared",
-                                query.name,
-                                query.params.len(),
-                                if query.params.len() == 1 { "is" } else { "s" },
-                            ),
-                        )
-                        .with_span(span),
-                    );
-                }
-                Placeholder::Named(name) if query.param_index(name).is_none() => {
-                    diags.push(
-                        Diagnostic::error(
-                            path,
-                            "check.query-placeholder",
-                            format!(
-                                "query `{}` uses placeholder `${name}`, which is not declared in the `@fn` signature",
-                                query.name
-                            ),
-                        )
-                        .with_help("add the parameter to the `-- @fn` signature, or fix the placeholder")
-                        .with_span(span),
-                    );
-                }
-                _ => {}
-            }
-        }
+    let prefix = format!("query `{}`", query.name);
+    if expects_rows && !produces_rows {
+        return vec![Diagnostic::error(
+            path,
+            "check.query-contract",
+            format!(
+                "{prefix} declares a row return type, but the SQL body does not return any rows"
+            ),
+        )
+        .with_help("declare `-> Type`, `-> Type?`, or `-> Type[]` only for row-returning statements")];
+    }
+    if !expects_rows && produces_rows {
+        return vec![Diagnostic::error(
+            path,
+            "check.query-contract",
+            format!(
+                "{prefix} is declared as `Exec` (no `->`), but the SQL body returns rows"
+            ),
+        )
+        .with_help("add a `-> Type` return contract, or use a statement that does not select rows")];
+    }
 
-        match &query.return_type {
-            QueryReturnType::Single(name) | QueryReturnType::Many(name) => {
-                let name_str = name.trim();
-                let known_table = catalog.tables.iter().any(|t| {
-                    t.name
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(&t.name)
-                        .eq_ignore_ascii_case(name_str)
-                });
-                let known_model =
-                    declared_models.iter().any(|m| m.eq_ignore_ascii_case(name_str));
-                if !known_table && !known_model {
-                    diags.push(
-                        Diagnostic::error(
-                            path,
-                            "check.query-return-type",
-                            format!(
-                                "query `{}` returns `{name_str}`, but no such table or model exists",
-                                query.name
-                            ),
-                        )
-                        .with_help("declare the table in a schema file or the model in a `.axm` file"),
-                    );
-                }
-            }
-            QueryReturnType::Exec => {}
+    let (QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty)) =
+        &query.return_type
+    else {
+        return Vec::new();
+    };
+    let row_name = axiom_core::axm::type_ref_name(ty);
+    let Some(select) = single_select(&statement) else {
+        return Vec::new();
+    };
+    let projected = projection_identifiers(select);
+    if projected.is_empty() {
+        return Vec::new();
+    }
+
+    if let Some(model) = registry.model_by_name(&row_name) {
+        let field_names: Vec<String> =
+            model.model.fields.iter().map(|f| f.name.clone()).collect();
+        projection_vs_fields(path, query, &row_name, &projected, &field_names, true)
+    } else if let Some(table) = catalog.table_by_name(&row_name) {
+        let field_names: Vec<String> =
+            table.columns.iter().map(|c| c.name.to_string()).collect();
+        projection_vs_fields(path, query, &row_name, &projected, &field_names, false)
+    } else {
+        Vec::new() // unresolved row type already reported
+    }
+}
+
+fn projection_vs_fields(
+    path: &Path,
+    query: &QueryDecl,
+    row_name: &str,
+    projected: &[String],
+    field_names: &[String],
+    case_sensitive: bool,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for ident in projected {
+        let matched = if case_sensitive {
+            field_names.iter().any(|f| f == ident)
+        } else {
+            field_names.iter().any(|f| f.eq_ignore_ascii_case(ident))
+        };
+        if !matched {
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.query-contract",
+                    format!(
+                        "query `{}` projects column `{ident}`, which is not a field of the declared `{row_name}` type",
+                        query.name
+                    ),
+                )
+                .with_help("align the SQL projection with the declared return type's fields"),
+            );
         }
     }
     diags
+}
+
+/// Does this statement produce rows to callers?
+fn statement_produces_rows(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(_) => true,
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        _ => false,
+    }
+}
+
+/// The top-level `SELECT` of a plain (non-composed) query statement, if any.
+fn single_select(statement: &Statement) -> Option<&Select> {
+    let Statement::Query(query) = statement else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    Some(select.as_ref())
+}
+
+/// Bare (unqualified) identifiers in a `SELECT` projection. Qualified refs,
+/// expressions, and wildcards are skipped so joins do not produce false
+/// positives.
+fn projection_identifiers(select: &Select) -> Vec<String> {
+    select
+        .projection
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::UnnamedExpr(Expr::Identifier(id))
+            | SelectItem::ExprWithAlias {
+                expr: Expr::Identifier(id),
+                ..
+            } => Some(id.value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Verify a query body's tables and columns against the catalog. Returns the
@@ -447,21 +594,6 @@ fn collect_type_names(ty: &TypeRef, out: &mut std::collections::BTreeSet<String>
         TypeRef::Nullable(inner) => collect_type_names(inner, out),
         _ => {}
     }
-}
-
-/// The set of model names declared anywhere in the workspace.
-pub fn collect_declared_models(
-    model_files: &[(PathBuf, String)],
-) -> std::collections::BTreeSet<String> {
-    let mut declared = std::collections::BTreeSet::new();
-    for (_, src) in model_files {
-        if let Ok(file) = parse_axm_file(src) {
-            for model in &file.models {
-                declared.insert(model.name.clone());
-            }
-        }
-    }
-    declared
 }
 
 fn hex(hash: &[u8]) -> String {
