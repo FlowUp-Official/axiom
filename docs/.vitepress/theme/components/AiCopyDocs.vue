@@ -11,7 +11,7 @@ const order = [
   'getting-started.md',
   'configuration.md',
   'cli.md',
-  'sql-annotations.md',
+  'axm.md',
   'query-functions.md',
   'codegen.md',
   'database-sync.md',

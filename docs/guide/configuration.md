@@ -40,7 +40,7 @@ An `axiom init` template looks like this:
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "inputs": {
     "schema": ["./schema.sql"],
-    "queries": ["./queries/**/*.sql"]
+    "models": ["./models/**/*.axm"]
   },
   "validation": { "on_error": "fail" },
   "outputs": {
@@ -70,10 +70,11 @@ digests match, generation is skipped entirely. See
 
 ### `inputs`
 
-| Field    | Type     | Description                                   |
-| -------- | -------- | --------------------------------------------- |
-| `schema` | string[] | Glob patterns for schema SQL files            |
-| `queries`| string[] | Glob patterns for annotated query SQL files   |
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `schema` | string[] | Glob patterns for schema SQL files |
+| `models` | string[] | Glob patterns for `.axm` files (models, types, and query declarations) |
+| `queries` | string[] | *Optional, legacy.* Glob patterns for standalone SQL files. Query *definitions* now come from `query` declarations in `.axm` files; these globs only contribute to the cache hash. |
 
 Paths are resolved relative to the directory containing the config file.
 

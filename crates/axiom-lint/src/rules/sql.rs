@@ -1,4 +1,5 @@
-//! Lint rules over SQL schema and query files.
+//! Lint rules over SQL: schema files and the SQL body of every `.axm` `query`
+//! declaration.
 
 use std::collections::BTreeMap;
 
@@ -9,7 +10,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
-use crate::runner::{word_span, LintContext, LintRule};
+use crate::runner::{LintContext, LintRule, word_span};
 
 /// Flags `DELETE` and `UPDATE` statements that omit a `WHERE` clause, which
 /// would affect every row in the table.
@@ -43,7 +44,9 @@ impl LintRule for MissingWhereClause {
             };
             let span = keyword_span(ctx.source, keyword);
             let mut diag = Diagnostic::error(ctx.file, "lint.missing-where-clause", message)
-                .with_help("add a `WHERE` clause, or explicitly guard it with `WHERE true` if intended");
+                .with_help(
+                    "add a `WHERE` clause, or explicitly guard it with `WHERE true` if intended",
+                );
             if let Some(span) = span {
                 diag = diag.with_span(span);
             }
@@ -239,6 +242,7 @@ mod tests {
         LintContext {
             file: Path::new("schema.sql"),
             source,
+            origin: 0,
             axm: None,
             statements: sqlparser::parser::Parser::parse_sql(&GenericDialect {}, source).ok(),
             workspace,
@@ -282,7 +286,11 @@ mod tests {
     fn count_star_is_not_flagged() {
         let source = "SELECT COUNT(*) FROM users;";
         let ws = WorkspaceView::empty();
-        assert!(SelectStar.check(&ctx(source, &ws)).is_empty(), "{:?}", SelectStar.check(&ctx(source, &ws)));
+        assert!(
+            SelectStar.check(&ctx(source, &ws)).is_empty(),
+            "{:?}",
+            SelectStar.check(&ctx(source, &ws))
+        );
     }
 
     #[test]

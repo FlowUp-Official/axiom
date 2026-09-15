@@ -1,8 +1,9 @@
 # `axiom lint`
 
-`axiom lint` runs a set of static-analysis rules over your schema, query, and
-model files and reports problems before they reach the database or your
-generated clients. Warnings do not fail the command; errors do.
+`axiom lint` runs a set of static-analysis rules over your `.axm` models and
+SQL schema inputs — including the SQL body of every `query` declaration — and
+reports problems before they reach the database or your generated clients.
+Warnings do not fail the command; errors do.
 
 ```sh
 axiom lint                      # run every configured rule
@@ -21,7 +22,8 @@ axiom lint --rules select-star  # run only the named rules
 Rules are grouped by the file type they analyze. Their names are stable and can
 be passed individually to `--rules`.
 
-### SQL rules
+SQL rules run over `.sql` schema inputs and the SQL body of every `query`
+declaration in a `.axm` file:
 
 | Rule | Severity | What it reports |
 | ---- | -------- | --------------- |
@@ -41,10 +43,10 @@ be passed individually to `--rules`.
 
 ```text
 $ axiom lint
-queries/delete_all.sql: error[lint.missing-where-clause]:
+models/user.axm: error[lint.missing-where-clause]:
   `delete` without a `WHERE` clause will delete every row
   (add a `WHERE` clause, or explicitly guard it with `WHERE true` if intended)
-queries/list_users.sql: warning[lint.select-star]:
+models/user.axm: warning[lint.select-star]:
   `SELECT *` selects every column; list columns explicitly
 1 warning, 1 error found
 ```

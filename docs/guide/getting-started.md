@@ -1,8 +1,8 @@
 # Getting Started
 
-Axiom is a single-binary CLI that turns SQL schemas and annotated query files
-into type-safe, validated client code for **TypeScript** and **Rust**, and keeps
-Postgres databases in sync with your source of truth.
+Axiom is a single-binary CLI that turns SQL schemas and `.axm` models and query
+declarations into type-safe, validated client code for **TypeScript** and
+**Rust**, and keeps Postgres databases in sync with your source of truth.
 
 ## Install
 
@@ -46,7 +46,8 @@ including a versioned `$schema` URL so your editor can autocomplete the file
 immediately. Rerunning `axiom init` refuses to overwrite an existing file unless
 you pass `--force`.
 
-From there, drop a `schema.sql` beside it, and run:
+From there, drop a `schema.sql` beside it, optionally add `.axm` model and
+query files, and run:
 
 ```sh
 axiom generate
@@ -58,7 +59,7 @@ Generated clients appear at the output paths configured in `axiom.json`
 ## Core workflow
 
 1. **`axiom init`** — bootstrap an `axiom.json` with defaults.
-2. **`axiom generate`** — compile SQL schemas and queries into typed clients.
+2. **`axiom generate`** — compile SQL schemas and `.axm` models and queries into typed clients.
 3. **`axiom push`** — sync your schema to a Postgres database.
 4. **`axiom schema`** — print the JSON schema for `axiom.json`.
 

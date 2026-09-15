@@ -296,3 +296,48 @@ fn init_refuses_overwrite_then_force_overwrites() {
         stdout(&third)
     );
 }
+
+#[test]
+fn lint_flags_sql_rules_in_axm_query_bodies() {
+    let dir = fixture_dir("run_lint_axm_query_bodies");
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::write(
+        dir.join("axiom.json"),
+        r#"{
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "project": { "name": "fixture", "dialect": "postgres" },
+  "cache": { "enabled": true, "path": ".axiom.cache" },
+  "inputs": { "schema": ["schema.sql"], "queries": [], "models": ["models/models.axm"] },
+  "validation": { "on_error": "fail" },
+  "outputs": {
+    "api": { "type": "typescript", "path": "gen/api.ts" },
+    "core": { "type": "rust", "path": "gen/core.rs" }
+  }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("schema.sql"), SCHEMA_SQL).unwrap();
+    std::fs::write(
+        dir.join("models/models.axm"),
+        "model User { id: UUID }\n\nquery delete_all() {\n  DELETE FROM users\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .current_dir(&dir)
+        .arg("--config")
+        .arg("axiom.json")
+        .arg("lint")
+        .output()
+        .expect("failed to run axiom binary");
+    assert!(
+        !output.status.success(),
+        "lint should fail on a DELETE without WHERE"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("lint.missing-where-clause"),
+        "stderr should report missing-where-clause: {stderr}"
+    );
+}

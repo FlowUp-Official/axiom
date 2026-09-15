@@ -14,9 +14,8 @@ axiom check --fix        # rewrite out-of-sync generated files, then verify
 | Phase | What is verified | Diagnostic codes |
 | ----- | ---------------- | ---------------- |
 | Schema parse | Every SQL schema input parses with the configured dialect | `check.sql-parse` |
-| Query syntax | Every `-- @fn` annotation and query body parses | `check.query-annotation`, `check.query-sql` |
-| Query ↔ schema | Referenced tables and columns exist; placeholders resolve to declared parameters; return types resolve to a table or model | `check.missing-table`, `check.missing-column`, `check.query-placeholder`, `check.query-return-type` |
-| Models | Imports resolve, no duplicate models, no import cycles, models parse | `check.model-*` |
+| `.axm` resolution | Imports resolve, no duplicate names, no import cycles, every query placeholder is declared | `check.model-*`, `check.query-placeholder` |
+| Query ↔ schema | Query bodies parse; referenced tables and columns exist; return types resolve to a table, model, or type alias; the SQL body honors the declared return contract | `check.query-sql`, `check.missing-table`, `check.missing-column`, `check.query-return-type`, `check.query-contract` |
 | Generated output | The output that `axiom generate` would write matches what is on disk | `check.output-outdated` |
 
 ## Generated-output synchronization
@@ -51,7 +50,6 @@ failed run never leaves partially written output behind.
 ## Caching
 
 Query results are cached in the configured [`ToolCache`](/guide/configuration)
-keyed by the query file's content hash plus the aggregate schema hash. Editing
-a schema invalidates stale query results while untouched query files stay
-cached; the generated-output comparison is always recomputed so it can never
-go stale.
+keyed by each `.axm` file's content hash plus the aggregate schema hash. Editing
+a schema invalidates stale query results while untouched files stay cached; the
+generated-output comparison is always recomputed so it can never go stale.

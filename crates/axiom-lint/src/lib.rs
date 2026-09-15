@@ -4,12 +4,12 @@
 //! them over a workspace. Results are content-addressed in the shared
 //! [`axiom_core::cache::ToolCache`] so unchanged files are not re-analysed.
 
-pub mod runner;
 pub mod rules;
+pub mod runner;
 
-pub use runner::{
-    build_context, lint_sources, hex, word_span, LintContext, LintOptions, LintRule,
-    LintRunner, WorkspaceView,
-};
 pub use rules::axm::{DeadModel, RedundantValidator, UnusedImport};
 pub use rules::sql::{MissingWhereClause, SelectStar, UnindexedForeignKey};
+pub use runner::{
+    LintContext, LintOptions, LintRule, LintRunner, WorkspaceView, build_contexts, hex,
+    lint_sources, word_span,
+};

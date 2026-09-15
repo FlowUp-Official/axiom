@@ -27,9 +27,10 @@ Generate typed output from the configured inputs.
 | `--db-url`             | Database URL, used when generation needs a live database          |
 | `--env-file <FILE>`    | Load environment variables from a dotenv file before running       |
 
-Parses every input schema and query file, then writes the configured outputs.
-When nothing has changed since the last run, generation is skipped entirely and
-the run reports `Everything up to date` in under a millisecond.
+Parses every configured schema, `.axm` model, and query file, then writes the
+configured outputs. When nothing has changed since the last run, generation is
+skipped entirely and the run reports `Everything up to date` in under a
+millisecond.
 
 ## `axiom push`
 
@@ -95,7 +96,6 @@ codes, e.g.:
 - `axiom::config::missing` — no `axiom.json` found.
 - `axiom::config::validation_failed` — the config does not match the schema.
 - `axiom::config::already_exists` — `axiom init` hit an existing file.
-- `axiom::query::annotation_error` — a `-- @fn` line is malformed.
 - `axiom::push::db_error` — a push failed.
 - `check.output-outdated` — generated output is out of sync (see [Check](/guide/check)).
 - `check.missing-table` / `check.missing-column` — query/schema mismatch.

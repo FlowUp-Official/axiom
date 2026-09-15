@@ -13,10 +13,10 @@ A TypeScript module that pairs with the `postgres` driver:
 - **Validation** — each interface exposes a `validate()`-style check that runs
   the compiled column rules (email, UUID, regex, normalization, ...) and
   collects `{ path, message }` errors.
-- **Query functions** — one `export async function` per `-- @fn` annotation,
-  taking the `Sql` client and a typed params object. Positional (`$1`) and named
-  (`$email`) placeholders are rewritten to postgres.js parameter syntax, and
-  parameter rules run before the query executes.
+- **Query functions** — one `export async function` per `query` declaration in
+  a `.axm` file, taking the `Sql` client and a typed params object. Positional
+  (`$1`) and named (`$email`) placeholders are rewritten to postgres.js
+  parameter syntax, and params are validated before the query executes.
 
 ```ts
 import type { Sql } from 'postgres';
@@ -27,15 +27,14 @@ export interface Users {
 }
 
 export interface GetUserParams {
-  email: string;
+  id: string;
 }
 
 export async function getUser(
   sql: Sql,
   params: GetUserParams,
 ): Promise<Users | null> {
-  const email = params.email.trim().toLowerCase();
-  // ...validation + SELECT
+  // ...params validation + SELECT
 }
 ```
 
@@ -47,9 +46,9 @@ A Rust module that pairs with `sqlx`:
   struct per table.
 - **Validation** — each struct implements a `validate()` method running the
   compiled column rules.
-- **Query functions** — one `pub async fn` per `-- @fn` annotation, taking
-  `&sqlx::PgPool` and a typed params struct. Parameter validation runs before
-  `sqlx::query_as!` / `sqlx::query` execution.
+- **Query functions** — one `pub async fn` per `query` declaration in a `.axm`
+  file, taking `&sqlx::PgPool` and a typed params struct. Parameter validation
+  runs before `sqlx::query_as!` / `sqlx::query` execution.
 
 ```rust
 use sqlx::PgPool;
@@ -68,8 +67,7 @@ pub async fn get_user(
     pool: &PgPool,
     params: GetUserParams,
 ) -> Result<Option<Users>, Box<dyn std::error::Error>> {
-    let email = params.email.trim().to_lowercase();
-    // ...validation + sqlx::query_as!
+    // ...params validation + sqlx::query_as!
 }
 ```
 

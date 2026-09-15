@@ -22,7 +22,9 @@ repo/
 ├── packages/
 │   └── shared/
 │       ├── axiom.json
-│       └── queries/
+│       └── models/
+│           ├── user.axm
+│           └── team.axm
 └── ...
 ```
 
@@ -31,14 +33,15 @@ processed, with its own inputs and outputs.
 
 ## Glob-driven inputs
 
-Schema and query inputs are resolved with flexible glob patterns, keeping your
-inputs aligned with your directory layout without hand-listing files:
+Schema, `.axm` model, and query inputs are resolved with flexible glob
+patterns, keeping your inputs aligned with your directory layout without
+hand-listing files:
 
 ```json
 {
   "inputs": {
     "schema": ["./schema.sql", "./migrations/**/*.sql"],
-    "queries": ["./queries/**/*.sql"]
+    "models": ["./models/**/*.axm"]
   }
 }
 ```

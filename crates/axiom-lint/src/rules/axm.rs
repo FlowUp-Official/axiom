@@ -1,9 +1,11 @@
 //! Lint rules over `.axm` domain-model files.
 
-use axiom_core::axm::ast::{AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, Rule, TypeRef};
+use axiom_core::axm::ast::{
+    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, Rule, TypeRef,
+};
 use axiom_diagnostics::{Diagnostic, Span};
 
-use crate::runner::{word_span, LintContext, LintRule};
+use crate::runner::{LintContext, LintRule, word_span};
 
 /// Flags `import { X } from "..."` statements whose names are never used as a
 /// field type in the importing file. Aliased imports are matched by the written
@@ -182,9 +184,9 @@ fn collect_named_types(file: &AxmFile) -> Vec<String> {
         use axiom_core::axm::ast::QueryReturn;
         match &query.return_type {
             QueryReturn::Exec => {}
-            QueryReturn::Single(ty)
-            | QueryReturn::Optional(ty)
-            | QueryReturn::Many(ty) => collect_type_refs(ty, &mut names),
+            QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                collect_type_refs(ty, &mut names)
+            }
         }
     }
     names
@@ -305,6 +307,7 @@ mod tests {
         LintContext {
             file,
             source,
+            origin: 0,
             axm,
             statements: None,
             workspace,
@@ -313,8 +316,7 @@ mod tests {
 
     #[test]
     fn unused_import_is_reported() {
-        let source =
-            "import { Address, ZipCode } from \"geo\"\nmodel User {\n  name: String\n}";
+        let source = "import { Address, ZipCode } from \"geo\"\nmodel User {\n  name: String\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         let diags = UnusedImport.check(&c);
@@ -333,8 +335,7 @@ mod tests {
 
     #[test]
     fn aliased_import_matches_written_name() {
-        let source =
-            "import { Address as Home } from \"geo\"\nmodel User {\n  billing: Home\n}";
+        let source = "import { Address as Home } from \"geo\"\nmodel User {\n  billing: Home\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         assert!(UnusedImport.check(&c).is_empty());

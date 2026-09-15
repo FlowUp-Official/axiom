@@ -1,96 +1,95 @@
 # Query Functions
 
-Query files are plain SQL files where each statement is preceded by a function
-signature comment (`-- @fn`) and optional per-parameter validation comments
-(`-- @validate <param>(rules)`). Axiom turns each annotated statement into a
-typed, async function in the generated client.
+Queries are declared inside `.axm` files as first-class contracts:
 
-## Function signatures
+```axm
+model User { id: UUID, email: String }
 
-```sql
--- @fn get_user($email: String) : users
-SELECT id, email FROM users WHERE email = $email
+query GetUser($id: UUID) -> User? {
+  SELECT id, email FROM users WHERE id = $id
+}
 
--- @fn delete_user(id: BigInt)
-DELETE FROM users WHERE id = $id
+query DeleteUser($id: UUID) {
+  DELETE FROM users WHERE id = $id
+}
 
--- @fn get_users($limit: Int, $email: String) : users[]
--- @validate email(email, trim, lower)
--- @validate limit(min=1, max=100)
-SELECT id, email FROM users
-WHERE email = $email AND id < $limit
-ORDER BY id
+query ListUsers($limit: Int) -> User[] {
+  SELECT id, email FROM users ORDER BY id LIMIT $limit
+}
 ```
 
-- **`-- @fn <name>(<param>: <Type>, ...) [: <Return>]`** — the function
-  signature. A leading `$` on a parameter name marks it as a named placeholder,
-  letting the body reference it directly (`$email`); it is not part of the
-  parameter's identifier. Parameter names are snake_case and become `camelCase`
-  arguments in TypeScript and `snake_case` fields in Rust.
-- **Return type is optional.** Omitting it (or writing `: Exec`) means the query
-  performs an execution and returns no rows, so `: Exec` never needs to be
-  spelled out.
-- **`-- @validate <param>(<rules>)`** — validation rules applied to a single
-  parameter before the query runs. The rule list uses the same syntax as column
-  annotations.
+Axiom turns each `query` declaration into a typed, async function in the
+generated client based on the SQL body and the declared return contract.
+
+## Query syntax
+
+```text
+query <Name>($<param>: <Type>, ...) [-> <Return>] {
+  <SQL body>
+}
+```
+
+- **`<Name>`** — `PascalCase`, unique across the workspace. It becomes a
+  `camelCase` function in TypeScript and a `snake_case` function in Rust.
+- **`$<param>: <Type>`** — typed parameters. The `$` is part of the *placeholder
+  syntax*, not the name: the parameter is `id`, papers over the body as `$id`.
+  Parameter names are `camelCase`.
+- **`-> <Return>`** — the explicit result contract (see below). **Omitting it
+  marks the query as an execution**: no rows are returned, so `-> Exec` never
+  needs to be spelled out.
+- **`<SQL body>`** — ordinary SQL, stored verbatim and passed to the driver.
+
+### Return contracts
+
+| Declaration | Contract | Generated client |
+| ----------- | -------- | ---------------- |
+| *(no `->`)* | Execution; no rows | `Promise<void>` / `Result<(), _>` |
+| `-> T`      | Exactly one row | `T \| null` / `Option<T>` |
+| `-> T?`     | Zero or one row  | `T \| null` / `Option<T>` |
+| `-> T[]`    | Zero or more rows | `T[]` / `Vec<T>` |
+
+The row type `T` is matched against the SQL catalog (case-insensitive) and the
+linked `.axm` models and type aliases (case-sensitive). `-> users`, `-> Users`,
+and `-> User` all resolve to the canonical type.
 
 ### Placeholders
 
-Parameters can be referenced positionally (`$1`, `$2`, ...) or by name
-(`$email`) in the query body. Named placeholders are rewritten to positional
-markers for the driver, so both styles mix freely:
+Parameters can be referenced by name (`$email`) or positionally (`$1`, `$2`, ...)
+and the two styles mix freely:
 
-```sql
--- @fn get_users($limit: Int, $email: String) : Users[]
-SELECT id, email FROM users
-WHERE email = $email AND id < $limit
+```axm
+query ListUsers($limit: Int, $email: String) -> User[] {
+  SELECT id, email FROM users
+  WHERE email = $email AND id < $limit
+  ORDER BY id
+}
 ```
 
-A placeholder that does not match a declared parameter is a check error
-(`check.query-placeholder`), as is a positional index beyond the declared
-parameter count.
+Before execution the placeholders are rewritten into the driver's parameter
+syntax, so both styles call one typed function.
 
 ### Parameter types
 
-Parameters map to native types in each generated language (e.g. `String`, `Int`,
-`BigInt`, `Uuid`). They become typed struct fields / interfaces with matching
-argument validation.
+Parameters map to the natural type in each generated language (`String`, `Int`,
+`UUID`, ...), and can also reference a model or type alias. They become typed
+struct fields / interfaces validated before the query runs.
 
-### Return types
+## Verification
 
-The return type names a table (or model). Matching is case-insensitive and the
-generated client uses the canonical type name, so `: users` and `: Users` are
-equivalent for `CREATE TABLE users`.
+`axiom check` validates every declared query against the schema catalog:
 
-| Signature      | Generated client                           |
-| -------------- | ------------------------------------------ |
-| `: Users`      | A single, optional row (`Users \| null`)    |
-| `: Users[]`    | Zero or more rows (`Users[]`)               |
-| *(omitted)*    | No rows; the function performs an execution |
+- **SQL syntax** — the body parses with the configured dialect
+  (`check.query-sql`).
+- **Table / column references** — referenced tables and columns exist
+  (`check.missing-table`, `check.missing-column`).
+- **Placeholders** — every `$<name>` (or `$<n>`) matches a declared parameter
+  (`check.query-placeholder`).
+- **Return type** — the declared `->` type resolves to a table, model, or type
+  alias (`check.query-return-type`).
+- **Return contract** — a row-returning declaration needs a statement that
+  produces rows (and vice versa), and the projected columns are fields of the
+  declared row type (`check.query-contract`).
 
-The row type refers to a table in the catalog, whose columns define the shape of
-the returned struct or interface.
-
-## Parameter validation
-
-Rules reuse the [column rule reference](/guide/sql-annotations#rule-reference):
-
-```sql
--- @validate email(email, trim, lower)
--- @validate limit(min=1, max=100)
--- @fn get_users(limit: Int, email: String) : Users[]
-SELECT id, email FROM users
-WHERE email = $1 AND id < $2
-ORDER BY id
-```
-
-Each `@validate` line targets the named parameter. Parameters without rules are
-still typed and bound, but skip the extra checks.
-
-## Generated behavior
-
-- Positional `$1`, `$2`, ... and named `$name` placeholders are rewritten into
-  the driver's parameter syntax in the generated query.
-- Validation runs **before** the query, so invalid input never reaches the
-  database.
-- Failures collect all rule violations with their messages, not just the first.
+Queries are cross-checked against the rest of the `.axm` file (every
+placeholder name unique, duplicate query names rejected, return types linkable)
+as part of [`.axm` resolution](/guide/axm).

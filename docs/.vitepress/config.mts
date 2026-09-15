@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'Axiom',
   description:
-    'High-performance code generator for SQL schemas and queries, built for large monorepos.',
+    'High-performance code generator for SQL schemas, .axm models, and queries, built for large monorepos.',
   lang: 'en-US',
   base: '/axiom/',
   cleanUrls: true,
@@ -27,7 +27,7 @@ export default defineConfig({
             { text: 'Check', link: '/guide/check' },
             { text: 'Format', link: '/guide/format' },
             { text: 'Lint', link: '/guide/lint' },
-            { text: 'SQL Annotations', link: '/guide/sql-annotations' },
+            { text: 'The .axm Language', link: '/guide/axm' },
             { text: 'Query Functions', link: '/guide/query-functions' },
             { text: 'Code Generation', link: '/guide/codegen' },
             { text: 'Database Sync', link: '/guide/database-sync' },
