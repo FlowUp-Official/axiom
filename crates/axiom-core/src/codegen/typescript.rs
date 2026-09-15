@@ -2,9 +2,9 @@
 
 use std::fmt::Write;
 
-use crate::catalog::{ColumnSchema, RuleKind, TableCatalog, TableSchema, ValidationRule};
+use crate::catalog::{TableCatalog, TableSchema};
 use crate::codegen::util;
-use crate::query::{QueryCatalog, QueryDefinition, QueryReturnType};
+use crate::query::{QueryCatalog, QueryDefinition, QueryReturnType, RuleKind, ValidationRule};
 
 const PRESETS: &[(&str, &str, &str, &str)] = &[
     (
@@ -77,7 +77,7 @@ pub fn generate_typescript(catalog: &TableCatalog, queries: &QueryCatalog) -> St
     }
 
     for (const_name, preset_name, pattern, flags) in PRESETS {
-        if preset_used(catalog, queries, preset_name) {
+        if preset_used(queries, preset_name) {
             let _ = writeln!(
                 out,
                 "const {const_name}_RE = {};",
@@ -110,55 +110,9 @@ fn emit_table(out: &mut String, table: &TableSchema) {
         "export function validate{type_name}(input: {type_name}): ValidationError[] {{"
     );
     out.push_str("  const errors: ValidationError[] = [];\n");
-    for column in &table.columns {
-        emit_column_validation(out, column);
-    }
+    let _ = writeln!(out, "  let _ = input;");
     out.push_str("  return errors;\n");
     out.push_str("}\n\n");
-}
-
-fn emit_column_validation(out: &mut String, column: &ColumnSchema) {
-    let field = util::ts_field_name(&column.name);
-    let transforms = util::ts_transform_chain(column);
-    let validations: Vec<&ValidationRule> = column
-        .rules
-        .iter()
-        .filter(|rule| !util::is_transform(&rule.kind))
-        .collect();
-
-    if transforms.is_none() && validations.is_empty() {
-        return;
-    }
-
-    let input = format!("input.{field}");
-    let body_indent = if column.nullable { "    " } else { "  " };
-
-    if column.nullable {
-        let _ = writeln!(out, "  if ({input} != null) {{");
-    }
-
-    let value_expr = match &transforms {
-        Some(chain) => {
-            let _ = writeln!(out, "{body_indent}const {field} = {input}{chain};");
-            field.clone()
-        }
-        None => input,
-    };
-
-    for rule in validations {
-        let condition = ts_condition(&rule.kind, &value_expr);
-        let message = util::escape_ts(&util::rule_message(rule));
-        let _ = writeln!(out, "{body_indent}if (!({condition})) {{");
-        let _ = writeln!(
-            out,
-            "{body_indent}  errors.push({{ path: \"{field}\", message: \"{message}\" }});"
-        );
-        let _ = writeln!(out, "{body_indent}}}");
-    }
-
-    if column.nullable {
-        out.push_str("  }\n");
-    }
 }
 
 fn ts_condition(kind: &RuleKind, value: &str) -> String {
@@ -183,18 +137,7 @@ fn ts_condition(kind: &RuleKind, value: &str) -> String {
     }
 }
 
-fn preset_used(catalog: &TableCatalog, queries: &QueryCatalog, preset: &str) -> bool {
-    let in_table = catalog.tables.iter().any(|table| {
-        table.columns.iter().any(|column| {
-            column
-                .rules
-                .iter()
-                .any(|rule| preset_kind(&rule.kind) == Some(preset))
-        })
-    });
-    if in_table {
-        return true;
-    }
+fn preset_used(queries: &QueryCatalog, preset: &str) -> bool {
     queries.queries.iter().any(|query| {
         query
             .validations
@@ -368,7 +311,7 @@ fn bind_sql(query: &QueryDefinition) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ColumnSchema, TableSchema, ValidationRule};
+    use crate::catalog::{ColumnSchema, TableSchema};
     use std::borrow::Cow;
 
     fn no_queries() -> QueryCatalog<'static> {
@@ -379,14 +322,12 @@ mod tests {
         name: &'static str,
         data_type: &'static str,
         nullable: bool,
-        rules: Vec<ValidationRule<'static>>,
     ) -> ColumnSchema<'static> {
         ColumnSchema {
             name: Cow::Borrowed(name),
             data_type: Cow::Borrowed(data_type),
             nullable,
             primary_key: false,
-            rules,
         }
     }
 
@@ -407,20 +348,7 @@ mod tests {
     fn catalog_with_one_table() -> TableCatalog<'static> {
         let t = table(
             "users",
-            vec![
-                col(
-                    "email",
-                    "VARCHAR(255)",
-                    false,
-                    vec![
-                        rule(RuleKind::Email, Some("Bad Email")),
-                        rule(RuleKind::MinLen(3), None),
-                        rule(RuleKind::Trim, None),
-                        rule(RuleKind::LowerCase, None),
-                    ],
-                ),
-                col("id", "BIGSERIAL", false, vec![]),
-            ],
+            vec![col("email", "VARCHAR(255)", false), col("id", "BIGSERIAL", false)],
         );
         TableCatalog { tables: vec![t] }
     }
@@ -434,56 +362,45 @@ mod tests {
     }
 
     #[test]
-    fn emits_validation_error_push() {
+    fn emits_no_column_validation_without_annotations() {
         let out = generate_typescript(&catalog_with_one_table(), &no_queries());
-        assert!(out.contains("errors.push({ path: \"email\", message: \"Bad Email\" });"));
-        assert!(out.contains("EMAIL_RE.test(email)"));
-    }
-
-    #[test]
-    fn emits_transforms_before_validation() {
-        let out = generate_typescript(&catalog_with_one_table(), &no_queries());
-        assert!(out.contains("const email = input.email.trim().toLowerCase();"));
-        assert!(out.contains("email.length >= 3"));
-    }
-
-    #[test]
-    fn emits_preset_constants_only_when_used() {
-        let out = generate_typescript(&catalog_with_one_table(), &no_queries());
-        assert!(out.contains("const EMAIL_RE ="));
-        assert!(!out.contains("const IPV6_RE ="));
-        assert!(!out.contains("const UUID_RE ="));
+        assert!(out.contains("export function validateUsers(input: Users): ValidationError[] {"));
+        assert!(!out.contains("EMAIL_RE"));
+        assert!(!out.contains("errors.push("));
+        assert!(!out.contains("UUID_RE ="));
     }
 
     #[test]
     fn nullable_columns_are_guarded() {
-        let t = table(
-            "sessions",
-            vec![col(
-                "external_id",
-                "UUID",
-                true,
-                vec![rule(RuleKind::Uuid, Some("Bad UUID"))],
-            )],
-        );
+        let t = table("sessions", vec![col("external_id", "UUID", true)]);
         let out = generate_typescript(&TableCatalog { tables: vec![t] }, &no_queries());
-        assert!(out.contains("if (input.externalId != null) {"));
-        assert!(out.contains("UUID_RE.test(input.externalId)"));
+        assert!(out.contains("interface Sessions {"));
+        assert!(out.contains("externalId: string | null;"));
+        assert!(!out.contains("UUID_RE"));
     }
 
     #[test]
-    fn handles_regex_rule_inline() {
-        let t = table(
-            "accounts",
-            vec![col(
-                "slug",
-                "VARCHAR",
-                false,
+    fn handles_regex_rule_inline_for_query_params() {
+        let q = QueryDefinition {
+            name: Cow::Borrowed("find_slug"),
+            sql: "SELECT id FROM accounts WHERE slug = $1".to_string(),
+            params: vec![crate::query::QueryParam {
+                name: Cow::Borrowed("slug"),
+                param_type: Cow::Borrowed("String"),
+            }],
+            return_type: QueryReturnType::Exec,
+            validations: [(
+                Cow::Borrowed("slug"),
                 vec![rule(RuleKind::Regex(Cow::Borrowed("^[a-z0-9-]+$")), None)],
-            )],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let out = generate_typescript(
+            &TableCatalog::default(),
+            &QueryCatalog { queries: vec![q] },
         );
-        let out = generate_typescript(&TableCatalog { tables: vec![t] }, &no_queries());
-        assert!(out.contains("/^[a-z0-9-]+$/.test(input.slug)"));
+        assert!(out.contains("/^[a-z0-9-]+$/.test(params.slug)"));
     }
 
     fn query_catalog() -> QueryCatalog<'static> {
@@ -599,7 +516,7 @@ mod tests {
 
     #[test]
     fn lowercase_return_type_resolves_to_table_type() {
-        let t = table("users", vec![col("id", "BIGSERIAL", false, vec![])]);
+        let t = table("users", vec![col("id", "BIGSERIAL", false)]);
         let q = QueryDefinition {
             name: Cow::Borrowed("get_user"),
             sql: "SELECT id FROM users WHERE id = $1".to_string(),

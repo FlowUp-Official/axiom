@@ -26,8 +26,254 @@ use std::collections::BTreeMap;
 
 use miette::SourceSpan;
 
-use crate::catalog::{parse_rules_content, split_top_level, ValidationRule};
 use crate::errors::AxiomError;
+
+/// A single validation rule attached to a query parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationRule<'a> {
+    /// The kind of rule to apply.
+    pub kind: RuleKind<'a>,
+    /// Optional user-supplied message. If absent the rule inherits the
+    /// parameter-level fallback message.
+    pub custom_message: Option<Cow<'a, str>>,
+}
+
+/// The possible validation rule kinds understood by Axiom.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleKind<'a> {
+    // Numeric / length bounds
+    MinLen(usize),
+    MaxLen(usize),
+    Min(i64),
+    Max(i64),
+    // Custom rule (regular expression)
+    Regex(Cow<'a, str>),
+    // Built-in presets
+    Email,
+    Url,
+    Uuid,
+    Ulid,
+    Ipv4,
+    Ipv6,
+    IsoDate,
+    Alphanumeric,
+    // Transform flags
+    Trim,
+    LowerCase,
+    UpperCase,
+}
+
+/// Parse a bare rule list (no `--`/`@validate` prefix) such as
+/// `email[msg="Bad"], min_len=5` into validation rules.
+pub(crate) fn parse_rules_content<'a>(content: &'a str) -> Vec<ValidationRule<'a>> {
+    let mut fallback: Option<Cow<'a, str>> = None;
+    let mut parsed_segments = Vec::new();
+
+    for segment in split_top_level(content, ',') {
+        let Some(parsed) = parse_rule_segment(segment) else {
+            continue;
+        };
+
+        if parsed.name.eq_ignore_ascii_case("msg") {
+            fallback = parsed.value.map(Cow::Borrowed);
+        } else {
+            parsed_segments.push(parsed);
+        }
+    }
+
+    let mut rules = Vec::new();
+    for parsed in parsed_segments {
+        let Some(kind) = parse_rule_kind(parsed.name, parsed.value) else {
+            continue;
+        };
+
+        let custom_message = match parsed.msg {
+            Some(inline) => Some(Cow::Borrowed(inline)),
+            None => fallback.clone(),
+        };
+
+        rules.push(ValidationRule {
+            kind,
+            custom_message,
+        });
+    }
+
+    rules
+}
+
+struct ParsedSegment<'a> {
+    name: &'a str,
+    value: Option<&'a str>,
+    msg: Option<&'a str>,
+}
+
+/// Split a string on `delimiter`, ignoring delimiters inside double quotes.
+pub(crate) fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (i, b) in s.bytes().enumerate() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_quotes = false;
+            }
+        } else if b == b'"' {
+            in_quotes = true;
+        } else if b == delimiter as u8 {
+            parts.push(&s[start..i]);
+            start = i + 1;
+        }
+    }
+
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Parse a single comma-separated segment into `name[=value][[msg="..."]]`.
+fn parse_rule_segment<'a>(segment: &'a str) -> Option<ParsedSegment<'a>> {
+    let bytes = segment.as_bytes();
+    let len = bytes.len();
+
+    let mut i = skip_ws(bytes, 0);
+    let name_start = i;
+    while i < len && !matches!(bytes[i], b'[' | b'=' | b' ' | b'\t') {
+        i += 1;
+    }
+    let name = segment[name_start..i].trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    i = skip_ws(bytes, i);
+    let mut value = None;
+    if i < len && bytes[i] == b'=' {
+        let (val, next) = read_value(segment, i + 1);
+        value = val;
+        i = next;
+    }
+
+    i = skip_ws(bytes, i);
+    let mut msg = None;
+    if i < len && bytes[i] == b'[' {
+        let (m, _) = read_bracket_msg(segment, i + 1);
+        msg = m;
+    }
+
+    Some(ParsedSegment { name, value, msg })
+}
+
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Read a rule value starting after `=`; either a quoted string or bare text
+/// that runs until whitespace or `[`.
+fn read_value(segment: &str, start: usize) -> (Option<&str>, usize) {
+    let bytes = segment.as_bytes();
+    let mut i = skip_ws(bytes, start);
+
+    if i < bytes.len() && bytes[i] == b'"' {
+        let (content, after) = read_quoted(segment, i);
+        return (Some(content), after);
+    }
+
+    let value_start = i;
+    while i < bytes.len() && bytes[i] != b'[' && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i == value_start {
+        (None, i)
+    } else {
+        (Some(&segment[value_start..i]), i)
+    }
+}
+
+/// Read the `msg="..."` payload inside a rule's `[...]` bracket.
+fn read_bracket_msg(segment: &str, start: usize) -> (Option<&str>, usize) {
+    let bytes = segment.as_bytes();
+    let len = bytes.len();
+    let mut i = skip_ws(bytes, start);
+
+    if segment[i..].get(..3).is_some_and(|p| p.eq_ignore_ascii_case("msg")) {
+        i += 3;
+        i = skip_ws(bytes, i);
+        if i < len && bytes[i] == b'=' {
+            i += 1;
+            i = skip_ws(bytes, i);
+            if i < len && bytes[i] == b'"' {
+                let (content, after) = read_quoted(segment, i);
+                let j = skip_ws(bytes, after);
+                if j < len && bytes[j] == b']' {
+                    return (Some(content), j + 1);
+                }
+                return (Some(content), j);
+            }
+        }
+    }
+
+    let mut j = i;
+    while j < len && bytes[j] != b']' {
+        j += 1;
+    }
+    (None, j.min(len))
+}
+
+/// Read a double-quoted string starting at `start` (which must point at `"`).
+/// Returns the unescaped inner content (without the quotes) and the index just
+/// past the closing quote.
+fn read_quoted(segment: &str, start: usize) -> (&str, usize) {
+    let bytes = segment.as_bytes();
+    debug_assert!(bytes[start] == b'"');
+
+    let mut i = start + 1;
+    let mut escaped = false;
+    while i < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[i] == b'\\' {
+            escaped = true;
+        } else if bytes[i] == b'"' {
+            break;
+        }
+        i += 1;
+    }
+
+    let content = &segment[start + 1..i];
+    let after = if i < bytes.len() { i + 1 } else { i };
+    (content, after)
+}
+
+/// Map a parsed rule name (and optional value) to a [`RuleKind`].
+fn parse_rule_kind<'a>(name: &str, value: Option<&'a str>) -> Option<RuleKind<'a>> {
+    match name.to_ascii_lowercase().as_str() {
+        "email" => Some(RuleKind::Email),
+        "url" => Some(RuleKind::Url),
+        "uuid" => Some(RuleKind::Uuid),
+        "ulid" => Some(RuleKind::Ulid),
+        "ipv4" => Some(RuleKind::Ipv4),
+        "ipv6" => Some(RuleKind::Ipv6),
+        "isodate" | "iso_date" => Some(RuleKind::IsoDate),
+        "alphanumeric" | "alnum" => Some(RuleKind::Alphanumeric),
+        "trim" => Some(RuleKind::Trim),
+        "lower" | "lowercase" => Some(RuleKind::LowerCase),
+        "upper" | "uppercase" => Some(RuleKind::UpperCase),
+        "min_len" | "minlen" => Some(RuleKind::MinLen(value?.parse().ok()?)),
+        "max_len" | "maxlen" => Some(RuleKind::MaxLen(value?.parse().ok()?)),
+        "min" => Some(RuleKind::Min(value?.parse().ok()?)),
+        "max" => Some(RuleKind::Max(value?.parse().ok()?)),
+        "regex" => Some(RuleKind::Regex(Cow::Borrowed(value?))),
+        _ => None,
+    }
+}
 
 /// A single bound parameter of a query function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,7 +600,6 @@ fn parse_param_validation<'a>(line: &'a str) -> Option<(Cow<'a, str>, Vec<Valida
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::RuleKind;
 
     #[test]
     fn parses_fn_signature_with_many_return() {

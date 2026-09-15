@@ -2,9 +2,9 @@
 
 use std::fmt::Write;
 
-use crate::catalog::{ColumnSchema, RuleKind, TableCatalog, TableSchema, ValidationRule};
+use crate::catalog::{TableCatalog, TableSchema};
 use crate::codegen::util;
-use crate::query::{QueryCatalog, QueryDefinition, QueryReturnType};
+use crate::query::{QueryCatalog, QueryDefinition, QueryReturnType, RuleKind, ValidationRule};
 
 pub(crate) const REGEX_MATCHER: &str = r#"fn regex_is_match(pattern: &str, text: &str) -> bool {
     enum Atom {
@@ -299,9 +299,9 @@ pub fn generate_rust(catalog: &TableCatalog, queries: &QueryCatalog) -> String {
         emit_query(&mut out, catalog, query);
     }
 
-    emit_preset_helpers(&mut out, catalog, queries);
+    emit_preset_helpers(&mut out, queries);
 
-    if regex_used(catalog, queries) {
+    if regex_used(queries) {
         out.push('\n');
         out.push_str(REGEX_MATCHER);
         out.push('\n');
@@ -331,80 +331,10 @@ fn emit_table(out: &mut String, table: &TableSchema) {
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    let has_validations = table.columns.iter().any(|column| {
-        !column.rules.is_empty()
-            || util::rust_transform_chain(column).is_some()
-    });
-    if has_validations {
-        out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
-        for column in &table.columns {
-            emit_column_validation(out, column);
-        }
-        out.push_str("        if errors.is_empty() {\n");
-        out.push_str("            Ok(())\n");
-        out.push_str("        } else {\n");
-        out.push_str("            Err(errors)\n");
-        out.push_str("        }\n");
-    } else {
-        out.push_str("        let _ = self;\n");
-        out.push_str("        Ok(())\n");
-    }
+    out.push_str("        let _ = self;\n");
+    out.push_str("        Ok(())\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
-}
-
-fn emit_column_validation(out: &mut String, column: &ColumnSchema) {
-    let field = util::rust_field_name(&column.name);
-    let transforms = util::rust_transform_chain(column);
-    let validations: Vec<&ValidationRule> = column
-        .rules
-        .iter()
-        .filter(|rule| !util::is_transform(&rule.kind))
-        .collect();
-
-    if transforms.is_none() && validations.is_empty() {
-        return;
-    }
-
-    let base_indent = if column.nullable { "            " } else { "        " };
-    let push_indent = format!("{base_indent}    ");
-
-    let value_expr: String;
-    if column.nullable {
-        let _ = writeln!(out, "        if let Some(value) = &self.{field} {{");
-        match &transforms {
-            Some(chain) => {
-                let _ = writeln!(out, "{base_indent}let {field} = value{chain};");
-                value_expr = field.clone();
-            }
-            None => {
-                value_expr = "value".to_string();
-            }
-        }
-    } else if let Some(chain) = &transforms {
-        let _ = writeln!(out, "{base_indent}let {field} = self.{field}{chain};");
-        value_expr = field.clone();
-    } else {
-        value_expr = format!("self.{field}");
-    }
-
-    for rule in validations {
-        let condition = rust_condition(&rule.kind, &value_expr, column.nullable);
-        let message = util::escape_rust(&util::rule_message(rule));
-        let _ = writeln!(out, "{base_indent}if {condition} {{");
-        let _ = writeln!(out, "{push_indent}errors.push(ValidationError {{");
-        let _ = writeln!(
-            out,
-            "{push_indent}    path: \"{field}\".to_string(),"
-        );
-        let _ = writeln!(out, "{push_indent}    message: \"{message}\".to_string(),");
-        let _ = writeln!(out, "{push_indent}}});");
-        let _ = writeln!(out, "{base_indent}}}");
-    }
-
-    if column.nullable {
-        out.push_str("        }\n");
-    }
 }
 
 fn rust_condition(kind: &RuleKind, value: &str, nullable: bool) -> String {
@@ -435,8 +365,8 @@ fn rust_condition(kind: &RuleKind, value: &str, nullable: bool) -> String {
     }
 }
 
-fn emit_preset_helpers(out: &mut String, catalog: &TableCatalog, queries: &QueryCatalog) {
-    let used = used_presets(catalog, queries);
+fn emit_preset_helpers(out: &mut String, queries: &QueryCatalog) {
+    let used = used_presets(queries);
 
     if used.contains(&"email") {
         out.push_str(IS_EMAIL_HELPER);
@@ -472,7 +402,7 @@ fn emit_preset_helpers(out: &mut String, catalog: &TableCatalog, queries: &Query
     }
 }
 
-fn used_presets(catalog: &TableCatalog, queries: &QueryCatalog) -> Vec<&'static str> {
+fn used_presets(queries: &QueryCatalog) -> Vec<&'static str> {
     let mut used = Vec::new();
     let mut push = |kind: &RuleKind| {
         let name = match kind {
@@ -490,13 +420,6 @@ fn used_presets(catalog: &TableCatalog, queries: &QueryCatalog) -> Vec<&'static 
             used.push(name);
         }
     };
-    for table in &catalog.tables {
-        for column in &table.columns {
-            for rule in &column.rules {
-                push(&rule.kind);
-            }
-        }
-    }
     for query in &queries.queries {
         for rules in query.validations.values() {
             for rule in rules {
@@ -507,16 +430,7 @@ fn used_presets(catalog: &TableCatalog, queries: &QueryCatalog) -> Vec<&'static 
     used
 }
 
-fn regex_used(catalog: &TableCatalog, queries: &QueryCatalog) -> bool {
-    let in_table = catalog.tables.iter().any(|table| {
-        table
-            .columns
-            .iter()
-            .any(|column| column.rules.iter().any(|r| matches!(r.kind, RuleKind::Regex(_))))
-    });
-    if in_table {
-        return true;
-    }
+fn regex_used(queries: &QueryCatalog) -> bool {
     queries.queries.iter().any(|query| {
         query
             .validations
@@ -798,7 +712,7 @@ const IS_ALPHANUMERIC_HELPER: &str = r#"fn is_alphanumeric(value: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ColumnSchema, TableSchema, ValidationRule};
+    use crate::catalog::{ColumnSchema, TableSchema};
     use std::borrow::Cow;
 
     fn no_queries() -> QueryCatalog<'static> {
@@ -809,14 +723,12 @@ mod tests {
         name: &'static str,
         data_type: &'static str,
         nullable: bool,
-        rules: Vec<ValidationRule<'static>>,
     ) -> ColumnSchema<'static> {
         ColumnSchema {
             name: Cow::Borrowed(name),
             data_type: Cow::Borrowed(data_type),
             nullable,
             primary_key: false,
-            rules,
         }
     }
 
@@ -838,7 +750,7 @@ mod tests {
     fn emits_struct_with_serde_derive() {
         let t = table(
             "users",
-            vec![col("email", "VARCHAR(255)", false, vec![]), col("id", "BIGSERIAL", false, vec![])],
+            vec![col("email", "VARCHAR(255)", false), col("id", "BIGSERIAL", false)],
         );
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
         assert!(out.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
@@ -848,107 +760,58 @@ mod tests {
     }
 
     #[test]
-    fn emits_validate_method_with_preset_and_message() {
-        let t = table(
-            "users",
-            vec![col(
-                "email",
-                "VARCHAR(255)",
-                false,
-                vec![rule(RuleKind::Email, Some("Bad Email"))],
-            )],
-        );
+    fn emits_trivial_validate_without_annotations() {
+        let t = table("users", vec![col("email", "VARCHAR(255)", false)]);
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
         assert!(out.contains("pub fn validate(&self) -> Result<(), Vec<ValidationError>>"));
-        assert!(out.contains("if !is_email(&self.email) {"));
-        assert!(out.contains("message: \"Bad Email\".to_string()"));
-        assert!(out.contains("fn is_email(value: &str) -> bool {"));
+        assert!(out.contains("let _ = self;"));
+        assert!(!out.contains("fn is_email"));
+        assert!(!out.contains("errors.push"));
     }
 
     #[test]
-    fn emits_transforms_before_validation() {
-        let t = table(
-            "users",
-            vec![col(
-                "username",
-                "VARCHAR(32)",
-                false,
-                vec![
-                    rule(RuleKind::Trim, None),
-                    rule(RuleKind::LowerCase, None),
-                    rule(RuleKind::Alphanumeric, None),
-                ],
-            )],
-        );
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
-        assert!(out.contains("let username = self.username.trim().to_lowercase();"));
-        assert!(out.contains("if !is_alphanumeric(&username) {"));
-    }
-
-    #[test]
-    fn emits_length_and_numeric_bounds() {
-        let t = table(
-            "accounts",
-            vec![
-                col("name", "VARCHAR", false, vec![rule(RuleKind::MinLen(3), None)]),
-                col("age", "INT", false, vec![rule(RuleKind::Min(18), None)]),
-                col("score", "INT", true, vec![rule(RuleKind::Max(100), None)]),
-            ],
-        );
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
-        assert!(out.contains("self.name.chars().count() < 3"));
-        assert!(out.contains("self.age < 18"));
-        assert!(out.contains("*value > 100"));
-    }
-
-    #[test]
-    fn nullable_fields_use_if_let() {
-        let t = table(
-            "sessions",
-            vec![col(
-                "external_id",
-                "UUID",
-                true,
-                vec![rule(RuleKind::Uuid, None)],
-            )],
-        );
+    fn nullable_fields_use_option() {
+        let t = table("sessions", vec![col("external_id", "UUID", true)]);
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
         assert!(out.contains("pub external_id: Option<String>,"));
-        assert!(out.contains("if let Some(value) = &self.external_id {"));
-        assert!(out.contains("if !is_uuid(&value) {"));
+        assert!(!out.contains("if let Some(value)"));
+        assert!(!out.contains("fn is_uuid"));
     }
 
     #[test]
-    fn emits_regex_matcher_only_when_regex_rules_exist() {
-        let plain = table("plain", vec![col("email", "VARCHAR", false, vec![rule(RuleKind::Email, None)])]);
+    fn emits_regex_matcher_only_when_query_uses_regex() {
+        let plain = table("plain", vec![col("email", "VARCHAR", false)]);
         let out = generate_rust(&TableCatalog { tables: vec![plain] }, &no_queries());
         assert!(!out.contains("fn regex_is_match"));
 
-        let regex = table(
-            "slugged",
-            vec![col(
-                "slug",
-                "VARCHAR",
-                false,
+        let q = QueryDefinition {
+            name: Cow::Borrowed("find_slug"),
+            sql: "SELECT id FROM accounts WHERE slug = $1".to_string(),
+            params: vec![crate::query::QueryParam {
+                name: Cow::Borrowed("slug"),
+                param_type: Cow::Borrowed("String"),
+            }],
+            return_type: QueryReturnType::Exec,
+            validations: [(
+                Cow::Borrowed("slug"),
                 vec![rule(RuleKind::Regex(Cow::Borrowed("^[a-z0-9-]+$")), None)],
-            )],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let out = generate_rust(
+            &TableCatalog::default(),
+            &QueryCatalog { queries: vec![q] },
         );
-        let out = generate_rust(&TableCatalog { tables: vec![regex] }, &no_queries());
         assert!(out.contains("fn regex_is_match"));
         assert!(out.contains("!regex_is_match(\"^[a-z0-9-]+$\", &self.slug)"));
     }
 
     #[test]
     fn only_emits_used_preset_helpers() {
-        let t = table(
-            "users",
-            vec![
-                col("email", "VARCHAR", false, vec![rule(RuleKind::Email, None)]),
-                col("id", "BIGSERIAL", false, vec![]),
-            ],
-        );
+        let t = table("users", vec![col("email", "VARCHAR", false)]);
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
-        assert!(out.contains("fn is_email"));
+        assert!(!out.contains("fn is_email"));
         assert!(!out.contains("fn is_ipv6"));
         assert!(!out.contains("fn is_ulid"));
     }
@@ -1056,7 +919,7 @@ mod tests {
 
     #[test]
     fn lowercase_return_type_resolves_to_table_type() {
-        let t = table("users", vec![col("id", "BIGSERIAL", false, vec![])]);
+        let t = table("users", vec![col("id", "BIGSERIAL", false)]);
         let q = QueryDefinition {
             name: Cow::Borrowed("get_user"),
             sql: "SELECT id FROM users WHERE id = $1".to_string(),

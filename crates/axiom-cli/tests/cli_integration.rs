@@ -9,11 +9,8 @@ use std::process::{Command, Output};
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
-    -- @validate email[msg="Bad Email"], min_len=3[msg="Too short"], trim, lower
     email VARCHAR(255) NOT NULL,
-    -- @validate uuid
     external_id UUID,
-    -- @validate trim, lower, alphanumeric
     username VARCHAR(32)
 );
 "#;
@@ -100,10 +97,10 @@ fn generates_typescript_and_rust_outputs() {
 
     let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
     assert!(ts.contains("export interface Users {"));
-    assert!(ts.contains("EMAIL_RE.test(email)"));
-    assert!(ts.contains("errors.push({ path: \"email\", message: \"Bad Email\" });"));
-    assert!(ts.contains("const username = input.username.trim().toLowerCase();"));
-    assert!(ts.contains("UUID_RE.test(input.externalId)"));
+    assert!(ts.contains("export function validateUsers(input: Users): ValidationError[] {"));
+    assert!(!ts.contains("Bad Email"), "column annotations were removed from schema");
+    assert!(!ts.contains("input.username"), "column transforms no longer emitted");
+    assert!(!ts.contains("UUID_RE"), "column uuid rule no longer emitted");
     assert!(!ts.contains("const IPV6_RE ="), "unused preset should not be emitted");
 
     assert!(ts.contains("import type { Sql } from 'postgres';"));
@@ -125,10 +122,11 @@ fn generates_typescript_and_rust_outputs() {
     let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
     assert!(rs.contains("pub struct Users {"));
     assert!(rs.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
-    assert!(rs.contains("if !is_email(&email) {"));
-    assert!(rs.contains("message: \"Bad Email\".to_string()"));
-    assert!(rs.contains("if let Some(value) = &self.external_id {"));
-    assert!(rs.contains("fn is_uuid(value: &str) -> bool {"));
+    assert!(rs.contains("pub fn validate(&self) -> Result<(), Vec<ValidationError>>"));
+    assert!(rs.contains("let _ = self;"));
+    assert!(!rs.contains("Bad Email"), "column annotations were removed from schema");
+    assert!(!rs.contains("if let Some(value)"), "nullable column rules no longer emitted");
+    assert!(!rs.contains("fn is_uuid"), "column uuid rule no longer emitted");
 
     assert!(rs.contains("pub struct GetUserParams {"));
     assert!(rs.contains("pub email: String,"));

@@ -407,7 +407,6 @@ mod tests {
                     data_type: c.data_type.to_string().into(),
                     nullable: c.nullable,
                     primary_key: c.primary_key,
-                    rules: Vec::new(),
                 })
                 .collect();
             tables.push(TableSchema {

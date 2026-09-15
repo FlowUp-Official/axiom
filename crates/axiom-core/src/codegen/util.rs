@@ -2,7 +2,8 @@
 
 use std::borrow::Cow;
 
-use crate::catalog::{ColumnSchema, RuleKind, TableCatalog, TableSchema};
+use crate::catalog::{TableCatalog, TableSchema};
+use crate::query::RuleKind;
 
 /// Convert a table name such as `public.users` into a PascalCase type name,
 /// e.g. `Users`.
@@ -179,46 +180,6 @@ pub fn is_transform(kind: &RuleKind<'_>) -> bool {
     matches!(kind, RuleKind::Trim | RuleKind::LowerCase | RuleKind::UpperCase)
 }
 
-/// Return the TypeScript transform chain (e.g. `.trim().toLowerCase()`) for a
-/// column, preserving annotation order, or `None` if there are no transforms.
-pub fn ts_transform_chain(column: &ColumnSchema<'_>) -> Option<String> {
-    let mut chain = String::new();
-    for rule in &column.rules {
-        let op = match &rule.kind {
-            RuleKind::Trim => ".trim()",
-            RuleKind::LowerCase => ".toLowerCase()",
-            RuleKind::UpperCase => ".toUpperCase()",
-            _ => continue,
-        };
-        chain.push_str(op);
-    }
-    if chain.is_empty() {
-        None
-    } else {
-        Some(chain)
-    }
-}
-
-/// Return the Rust transform chain (e.g. `.trim().to_lowercase()`) for a
-/// column, preserving annotation order, or `None` if there are no transforms.
-pub fn rust_transform_chain(column: &ColumnSchema<'_>) -> Option<String> {
-    let mut chain = String::new();
-    for rule in &column.rules {
-        let op = match &rule.kind {
-            RuleKind::Trim => ".trim()",
-            RuleKind::LowerCase => ".to_lowercase()",
-            RuleKind::UpperCase => ".to_uppercase()",
-            _ => continue,
-        };
-        chain.push_str(op);
-    }
-    if chain.is_empty() {
-        None
-    } else {
-        Some(chain)
-    }
-}
-
 /// Default human-readable message for a rule kind.
 pub fn default_message(kind: &RuleKind<'_>) -> String {
     match kind {
@@ -240,7 +201,7 @@ pub fn default_message(kind: &RuleKind<'_>) -> String {
 }
 
 /// Resolve the message for a rule: its custom message or the default.
-pub fn rule_message(rule: &crate::catalog::ValidationRule<'_>) -> String {
+pub fn rule_message(rule: &crate::query::ValidationRule<'_>) -> String {
     match &rule.custom_message {
         Some(m) => m.to_string(),
         None => default_message(&rule.kind),

@@ -589,7 +589,6 @@ fn own_catalog(catalog: &TableCatalog) -> TableCatalog<'static> {
                     data_type: c.data_type.to_string().into(),
                     nullable: c.nullable,
                     primary_key: c.primary_key,
-                    rules: Vec::new(),
                 })
                 .collect(),
         })
@@ -624,7 +623,7 @@ fn own_query_catalog(catalog: &QueryCatalog) -> QueryCatalog<'static> {
                 .map(|(k, v)| {
                     let owned: Vec<_> = v
                         .iter()
-                        .map(|rule| axiom_core::catalog::ValidationRule {
+                        .map(|rule| axiom_core::query::ValidationRule {
                             kind: own_rule_kind(&rule.kind),
                             custom_message: rule
                                 .custom_message
@@ -640,8 +639,8 @@ fn own_query_catalog(catalog: &QueryCatalog) -> QueryCatalog<'static> {
     QueryCatalog { queries }
 }
 
-fn own_rule_kind(kind: &axiom_core::catalog::RuleKind) -> axiom_core::catalog::RuleKind<'static> {
-    use axiom_core::catalog::RuleKind;
+fn own_rule_kind(kind: &axiom_core::query::RuleKind) -> axiom_core::query::RuleKind<'static> {
+    use axiom_core::query::RuleKind;
     match kind {
         RuleKind::Regex(p) => RuleKind::Regex(std::borrow::Cow::Owned(p.to_string())),
         RuleKind::MinLen(n) => RuleKind::MinLen(*n),

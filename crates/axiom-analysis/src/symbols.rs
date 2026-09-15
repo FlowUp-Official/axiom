@@ -324,7 +324,6 @@ mod tests {
                 data_type: (*ty).to_string().into(),
                 nullable: *nullable,
                 primary_key: false,
-                rules: Vec::new(),
             });
         }
         TableCatalog {
