@@ -342,8 +342,8 @@ fn check_regexes(files: &[(PathBuf, String)]) -> Vec<Diagnostic> {
         };
         for model in &file.models {
             for field in &model.fields {
-                for rule in &field.validations {
-                    let axiom_core::axm::ast::Rule::Regex(pattern) = rule else {
+                for rule in &field.ty.rules {
+                    let axiom_core::axm::ast::Rule::Regex(pattern, _) = rule else {
                         continue;
                     };
                     if let Err(err) = regex::Regex::new(pattern) {
@@ -422,11 +422,16 @@ pub fn collect_referenced_models(
             continue;
         };
         for import in &file.imports {
-            referenced.extend(import.names.clone());
+            for name in &import.names {
+                referenced.insert(name.name.clone());
+                if let Some(alias) = &name.alias {
+                    referenced.insert(alias.clone());
+                }
+            }
         }
         for model in &file.models {
             for field in &model.fields {
-                collect_type_names(&field.ty, &mut referenced);
+                collect_type_names(&field.ty.base, &mut referenced);
             }
         }
     }
@@ -439,6 +444,7 @@ fn collect_type_names(ty: &TypeRef, out: &mut std::collections::BTreeSet<String>
             out.insert(name.clone());
         }
         TypeRef::Array(inner) => collect_type_names(inner, out),
+        TypeRef::Nullable(inner) => collect_type_names(inner, out),
         _ => {}
     }
 }

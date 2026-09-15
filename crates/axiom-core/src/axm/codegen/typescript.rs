@@ -1,42 +1,68 @@
-//! TypeScript code generation for `.axm` models.
+//! TypeScript code generation for `.axm` models, type aliases, and queries.
 //!
-//! Emits interfaces, reusable validation helpers, and per-model `coerce`
-//! functions that compose recursively. Every model exposes `safeParse()` and
+//! Emits interfaces, reusable validation helpers, per-model `coerce` functions
+//! that compose recursively, `coerce` functions for type aliases that carry
+//! methods, and query wrappers. Every model exposes `safeParse()` and
 //! `parse()`. The output has zero runtime dependencies: only the standard
-//! TypeScript runtime is used.
+//! TypeScript runtime is used, plus a `Sql` tag for query execution that the
+//! surrounding project provides.
 //!
 //! Error paths are built as `Seg` arrays (`['f', name]` / `['i', index]`) and
 //! only rendered to strings inside `fail()`, at the point of reporting.
 
 use std::fmt::Write;
+use std::path::Path;
 
-use crate::axm::ast::{FieldDecl, Literal, ModelDecl, Rule, Transform, TypeRef};
-use crate::axm::codegen::{collect_uses, model_name, Uses};
+use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, Transform, TypeRef};
+use crate::axm::codegen::{
+    canonical_name, collect_uses, effective_fields, inline_annotated, model_name, named_kind,
+    NamedKind, Uses,
+};
 use crate::axm::resolver::ModelRegistry;
+use crate::catalog::TableCatalog;
 use crate::codegen::util;
 
 const EMAIL_RE: &str = r#"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"#;
 const URL_RE: &str = r#"^(https?://)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*/?$"#;
 const UUID_RE: &str = r#"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#;
+const ULID_RE: &str = r#"^[0-9A-HJKMNP-TV-Z]{26}$"#;
+const IPV4_RE: &str = r#"^(\d{1,3}\.){3}\d{1,3}$"#;
+const IPV6_RE: &str = r#"^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$"#;
+const DATE_RE: &str = r#"^\d{4}-\d{2}-\d{2}$"#;
 const TIMESTAMP_RE: &str = r#"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$"#;
+const ALPHANUMERIC_RE: &str = r#"^[a-zA-Z0-9]+$"#;
 
-/// Generate the TypeScript module body for a set of models. Assumes the
-/// surrounding output already defines `ValidationError` (which the SQL
-/// generator always does), so it is reused rather than redefined.
-pub fn generate_typescript_models(registry: &ModelRegistry) -> String {
+/// Generate the TypeScript module body for a registry. Assumes the surrounding
+/// output already defines `ValidationError` (which the SQL generator always
+/// does), so it is reused rather than redefined.
+pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatalog) -> String {
     if registry.is_empty() {
         return String::new();
     }
 
-    let uses = collect_uses(registry);
+    let uses = collect_uses(registry, catalog);
     let mut out = String::new();
     out.push_str("\n// ---------------------------------------------------------------------------\n");
     out.push_str("// .axm models\n");
     out.push_str("// ---------------------------------------------------------------------------\n\n");
 
     emit_helpers(&mut out, &uses);
+
+    for resolved in &registry.types {
+        emit_type_alias_for(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+    }
+
     for resolved in &registry.models {
-        emit_model(&mut out, &resolved.model);
+        let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
+        emit_model(&mut out, registry, &resolved.path, &resolved.model, &fields);
+    }
+
+    for resolved in &registry.types {
+        emit_alias_coerce(&mut out, registry, &resolved.path, &resolved.ty.name, &resolved.ty.ty);
+    }
+
+    for resolved in &registry.queries {
+        emit_query(&mut out, registry, &resolved.path, &resolved.query);
     }
 
     out
@@ -69,6 +95,14 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
             " || !Number.isInteger(value)",
         );
     }
+    if uses.bigint {
+        out.push_str("function coerceBigInt(value: unknown, path: Seg[], errors: ValidationError[]): bigint {\n");
+        out.push_str("  if (typeof value === 'bigint') return value;\n");
+        out.push_str("  if (typeof value === 'number' && Number.isInteger(value)) return BigInt(value);\n");
+        out.push_str("  fail(errors, path, 'expected a big integer');\n");
+        out.push_str("  return 0n;\n");
+        out.push_str("}\n\n");
+    }
     if uses.float {
         emit_coerce_helper(
             out,
@@ -97,13 +131,18 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         out.push_str("  return null;\n");
         out.push_str("}\n\n");
     }
-
-    if uses.timestamp {
-        out.push_str("function coerceTimestamp(value: unknown, path: Seg[], errors: ValidationError[]): string {\n");
-        out.push_str("  if (typeof value === 'string' && ");
-        out.push_str(&format!("{}.test(value)) return value;\n", util::ts_regex_literal(TIMESTAMP_RE, "")));
-        out.push_str("  fail(errors, path, 'expected an ISO 8601 timestamp');\n");
-        out.push_str("  return '';\n");
+    if uses.date {
+        emit_regex_coerce_helper(out, "coerceDate", DATE_RE, "", "expected an ISO 8601 date");
+    }
+    if uses.datetime {
+        emit_regex_coerce_helper(out, "coerceDateTime", TIMESTAMP_RE, "", "expected an ISO 8601 timestamp");
+    }
+    if uses.bytes {
+        out.push_str("function coerceBytes(value: unknown, path: Seg[], errors: ValidationError[]): Uint8Array {\n");
+        out.push_str("  if (value instanceof Uint8Array) return value;\n");
+        out.push_str("  if (Array.isArray(value) && value.every((v) => typeof v === 'number')) return new Uint8Array(value);\n");
+        out.push_str("  fail(errors, path, 'expected a byte sequence');\n");
+        out.push_str("  return new Uint8Array();\n");
         out.push_str("}\n\n");
     }
 
@@ -115,37 +154,36 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     }
 
     if uses.email {
-        out.push_str("function checkEmail(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str(&format!(
-            "  if (!{}.test(value)) return fail(errors, path, 'must be a valid email address');\n",
-            util::ts_regex_literal(EMAIL_RE, "i")
-        ));
-        out.push_str("  return true;\n");
-        out.push_str("}\n\n");
+        emit_regex_check_helper(out, "checkEmail", EMAIL_RE, "i", "must be a valid email address");
     }
     if uses.url {
-        out.push_str("function checkUrl(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str(&format!(
-            "  if (!{}.test(value)) return fail(errors, path, 'must be a valid URL');\n",
-            util::ts_regex_literal(URL_RE, "i")
-        ));
-        out.push_str("  return true;\n");
-        out.push_str("}\n\n");
+        emit_regex_check_helper(out, "checkUrl", URL_RE, "i", "must be a valid URL");
     }
     if uses.uuid {
-        out.push_str("function checkUuid(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str(&format!(
-            "  if (!{}.test(value)) return fail(errors, path, 'must be a valid UUID');\n",
-            util::ts_regex_literal(UUID_RE, "")
-        ));
+        emit_regex_check_helper(out, "checkUuid", UUID_RE, "", "must be a valid UUID");
+    }
+    if uses.ulid {
+        emit_regex_check_helper(out, "checkUlid", ULID_RE, "", "must be a valid ULID");
+    }
+    if uses.ipv4 {
+        out.push_str("function checkIpv4(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
+        out.push_str("  if (!IPV4.test(value) || value.split('.').some((oct) => Number(oct) > 255)) return fail(errors, path, 'must be a valid IPv4 address');\n");
         out.push_str("  return true;\n");
         out.push_str("}\n\n");
+        let _ = writeln!(
+            out,
+            "const IPV4 = {};",
+            util::ts_regex_literal(IPV4_RE, "")
+        );
+    }
+    if uses.ipv6 {
+        emit_regex_check_helper(out, "checkIpv6", IPV6_RE, "", "must be a valid IPv6 address");
+    }
+    if uses.isodate {
+        emit_regex_check_helper(out, "checkIsoDate", DATE_RE, "", "must be a valid ISO 8601 date");
     }
     if uses.alphanumeric {
-        out.push_str("function checkAlphanumeric(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str("  if (!/^[a-zA-Z0-9]+$/.test(value)) return fail(errors, path, 'must be alphanumeric');\n");
-        out.push_str("  return true;\n");
-        out.push_str("}\n\n");
+        emit_regex_check_helper(out, "checkAlphanumeric", ALPHANUMERIC_RE, "", "must be alphanumeric");
     }
     if uses.nonempty {
         out.push_str("function checkNonEmpty(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
@@ -199,6 +237,35 @@ fn emit_coerce_helper(
     let _ = writeln!(out, "}}\n");
 }
 
+fn emit_regex_coerce_helper(out: &mut String, name: &str, pattern: &str, flags: &str, message: &str) {
+    let _ = writeln!(
+        out,
+        "function {name}(value: unknown, path: Seg[], errors: ValidationError[]): string {{"
+    );
+    let _ = writeln!(
+        out,
+        "  if (typeof value === 'string' && {}.test(value)) return value;",
+        util::ts_regex_literal(pattern, flags)
+    );
+    let _ = writeln!(out, "  fail(errors, path, '{message}');");
+    let _ = writeln!(out, "  return '';");
+    let _ = writeln!(out, "}}\n");
+}
+
+fn emit_regex_check_helper(out: &mut String, name: &str, pattern: &str, flags: &str, message: &str) {
+    let _ = writeln!(
+        out,
+        "function {name}(value: string, path: Seg[], errors: ValidationError[]): boolean {{"
+    );
+    let _ = writeln!(
+        out,
+        "  if (!{}.test(value)) return fail(errors, path, '{message}');",
+        util::ts_regex_literal(pattern, flags)
+    );
+    let _ = writeln!(out, "  return true;");
+    let _ = writeln!(out, "}}\n");
+}
+
 fn emit_bounded_helper(out: &mut String, name: &str, condition: &str, prefix: &str) {
     let _ = writeln!(out, "function {name}(value: number, bound: number, path: Seg[], errors: ValidationError[]): boolean {{");
     let _ = writeln!(out, "  if ({condition}) return fail(errors, path, `{prefix}${{bound}}`);");
@@ -206,12 +273,62 @@ fn emit_bounded_helper(out: &mut String, name: &str, condition: &str, prefix: &s
     let _ = writeln!(out, "}}\n");
 }
 
-fn emit_model(out: &mut String, model: &ModelDecl) {
+fn emit_type_alias_for(out: &mut String, registry: &ModelRegistry, path: &Path, declared: &str, ann: &AnnotatedType) {
+    let ty = ts_named_type(registry, path, &ann.base);
+    let _ = writeln!(out, "export type {} = {};", canonical_name(registry, path, declared), ty);
+}
+
+fn emit_alias_coerce(out: &mut String, registry: &ModelRegistry, path: &Path, declared: &str, ann: &AnnotatedType) {
+    let inlined = inline_annotated(registry, path, ann);
+    if inlined.transforms.is_empty() && inlined.rules.is_empty() {
+        return;
+    }
+    let name = canonical_name(registry, path, declared);
+    let result_ty = ts_named_type(registry, path, &inlined.base);
+    emit_annotated_fn(out, registry, path, &name, &result_ty, &inlined, "anchor", 0);
+}
+
+/// Emit a standalone `coerce{Name}` function that validates `anchor` with the
+/// given (already inlined) annotation.
+fn emit_annotated_fn(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    name: &str,
+    result_ty: &str,
+    ann: &AnnotatedType,
+    value_param: &str,
+    indent: usize,
+) {
+    let pad = " ".repeat(indent);
+    let _ = writeln!(
+        out,
+        "function coerce{name}({value_param}: unknown, path: Seg[], errors: ValidationError[]): {result_ty} {{"
+    );
+    emit_annotated_value(out, registry, path, ann, value_param, indent + 2);
+    let _ = writeln!(out, "{pad}  return value;");
+    let _ = writeln!(out, "{pad}}}\n");
+}
+
+fn emit_model(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    model: &crate::axm::ast::ModelDecl,
+    fields: &[crate::axm::codegen::EffectiveField],
+) {
     let type_name = model_name(model);
 
     let _ = writeln!(out, "export interface {type_name} {{");
-    for field in &model.fields {
-        let _ = writeln!(out, "  {}: {};", field.name, ts_type(&field.ty));
+    for field in fields {
+        let optional = if field.optional { "?" } else { "" };
+        let _ = writeln!(
+            out,
+            "  {}{}: {};",
+            util::escape_ts(&field.emitted_name),
+            optional,
+            ts_named_type(registry, path, &field.annotated.base)
+        );
     }
     let _ = writeln!(out, "}}\n");
 
@@ -228,8 +345,8 @@ fn emit_model(out: &mut String, model: &ModelDecl) {
     let _ = writeln!(out, "    return out;");
     let _ = writeln!(out, "  }}");
     let _ = writeln!(out, "  const record = value as Record<string, unknown>;");
-    for field in &model.fields {
-        emit_field(out, field);
+    for field in fields {
+        emit_field(out, registry, path, field);
     }
     let _ = writeln!(out, "  return out;");
     let _ = writeln!(out, "}}\n");
@@ -254,53 +371,154 @@ fn emit_model(out: &mut String, model: &ModelDecl) {
     let _ = writeln!(out, "}}\n");
 }
 
-fn emit_field(out: &mut String, field: &FieldDecl) {
+fn emit_field(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    field: &crate::axm::codegen::EffectiveField,
+) {
+    let key = util::escape_ts(&field.emitted_name);
     let _ = writeln!(out, "  {{");
-    let _ = writeln!(out, "    const key = '{}';", util::escape_ts(&field.name));
+    let _ = writeln!(out, "    const key = '{key}';");
     let _ = writeln!(out, "    const fieldPath: Seg[] = [...path, ['f', key]];");
     let _ = writeln!(out, "    let raw = record[key];");
 
     match &field.default {
         Some(literal) => {
             let _ = writeln!(out, "    if (raw === undefined) raw = {};", ts_literal(literal));
-            emit_field_body(out, field, 4);
+            emit_field_assign(out, registry, path, field, 4);
         }
         None if field.optional => {
             let _ = writeln!(out, "    if (raw !== undefined) {{");
-            emit_field_body(out, field, 6);
+            emit_field_assign(out, registry, path, field, 6);
             let _ = writeln!(out, "    }}");
         }
         None => {
             let _ = writeln!(out, "    if (raw === undefined) {{");
             let _ = writeln!(out, "      fail(errors, fieldPath, 'field is required');");
             let _ = writeln!(out, "    }} else {{");
-            emit_field_body(out, field, 6);
+            emit_field_assign(out, registry, path, field, 6);
             let _ = writeln!(out, "    }}");
         }
     }
     let _ = writeln!(out, "  }}");
 }
 
-fn emit_field_body(out: &mut String, field: &FieldDecl, indent: usize) {
+/// Emit the statements that validate `raw` and write `out.{name} = value;`.
+fn emit_field_assign(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    field: &crate::axm::codegen::EffectiveField,
+    indent: usize,
+) {
     let pad = " ".repeat(indent);
-    let body = " ".repeat(indent + 2);
-    let coerced = ts_coerce_value_expr(&field.ty, "raw", "fieldPath", "errors");
-    let _ = writeln!(out, "{pad}const base = {coerced};");
-    if field.transformations.is_empty() {
-        let _ = writeln!(out, "{pad}let value = base;");
-    } else {
-        let chain: String = field
-            .transformations
-            .iter()
-            .map(ts_transform_op)
-            .collect();
-        let _ = writeln!(out, "{pad}let value = base{chain};");
+    emit_annotated_value(out, registry, path, &field.annotated, "raw", indent);
+    let _ = writeln!(out, "{pad}out.{} = value;", util::escape_ts(&field.emitted_name));
+}
+
+/// Emit statements that bind `value` from the expression `raw`, applying the
+/// annotation's transforms and rules. The caller assigns `out.{key} = value`.
+fn emit_annotated_value(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    ann: &AnnotatedType,
+    raw: &str,
+    indent: usize,
+) {
+    let pad = " ".repeat(indent);
+    match &ann.base {
+        TypeRef::Nullable(inner) => {
+            let _ = writeln!(out, "{pad}if ({raw} === null) {{");
+            let _ = writeln!(out, "{}value = null;", " ".repeat(indent + 2));
+            let _ = writeln!(out, "{pad}}} else {{");
+            let nested = AnnotatedType {
+                base: (**inner).clone(),
+                transforms: ann.transforms.clone(),
+                rules: ann.rules.clone(),
+            };
+            emit_annotated_value(out, registry, path, &nested, raw, indent + 2);
+            let _ = writeln!(out, "{pad}}}");
+        }
+        _ => {
+            let expr = coerce_value_expr(registry, path, &ann.base, raw, "fieldPath", "errors");
+            let _ = writeln!(out, "{pad}const base = {expr};");
+            if ann.transforms.is_empty() {
+                let _ = writeln!(out, "{pad}let value = base;");
+            } else {
+                let chain: String = ann.transforms.iter().map(ts_transform_op).collect();
+                let _ = writeln!(out, "{pad}let value = base{chain};");
+            }
+            for rule in &ann.rules {
+                let call = ts_rule_call(rule, "value");
+                let _ = writeln!(out, "{pad}{call};");
+            }
+        }
     }
-    for rule in &field.validations {
-        let call = ts_rule_call(rule, "value");
-        let _ = writeln!(out, "{pad}{call};");
+}
+
+/// An expression that coerces `value` to the annotation base's runtime type.
+fn coerce_value_expr(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+    value: &str,
+    path_expr: &str,
+    errors: &str,
+) -> String {
+    match ty {
+        TypeRef::String => format!("coerceString({value}, {path_expr}, {errors})"),
+        TypeRef::Uuid => format!("coerceString({value}, {path_expr}, {errors})"),
+        TypeRef::Int => format!("coerceInt({value}, {path_expr}, {errors})"),
+        TypeRef::BigInt => format!("coerceBigInt({value}, {path_expr}, {errors})"),
+        TypeRef::Float => format!("coerceFloat({value}, {path_expr}, {errors})"),
+        TypeRef::Boolean => format!("coerceBoolean({value}, {path_expr}, {errors})"),
+        TypeRef::Json => format!("coerceJson({value}, {path_expr}, {errors})"),
+        TypeRef::Date => format!("coerceDate({value}, {path_expr}, {errors})"),
+        TypeRef::DateTime => format!("coerceDateTime({value}, {path_expr}, {errors})"),
+        TypeRef::Bytes => format!("coerceBytes({value}, {path_expr}, {errors})"),
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+                format!("coerce{}({value}, {path_expr}, {errors})", util::pascal_case(&name))
+            }
+            NamedKind::Pure(base) => coerce_value_expr(registry, path, &base, value, path_expr, errors),
+        },
+        TypeRef::Array(inner) => {
+            let item_path = format!("[...{path_expr}, ['i', index]]");
+            let item = coerce_value_expr(registry, path, inner, "entry", &item_path, errors);
+            format!(
+                "coerceArray({value}, {path_expr}, {errors}).map((entry, index) => {item})"
+            )
+        }
+        TypeRef::Nullable(inner) => {
+            let inner = coerce_value_expr(registry, path, inner, value, path_expr, errors);
+            format!("{value} === null ? null : {inner}")
+        }
     }
-    let _ = writeln!(out, "{body}out.{} = value;", util::escape_ts(&field.name));
+}
+
+/// The emitted TypeScript type for a reference, with Named references
+/// canonicalized and pure aliases folded into their base type.
+fn ts_named_type(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::String => "string".to_string(),
+        TypeRef::Uuid => "string".to_string(),
+        TypeRef::Int | TypeRef::Float => "number".to_string(),
+        TypeRef::BigInt => "bigint".to_string(),
+        TypeRef::Boolean => "boolean".to_string(),
+        TypeRef::Json => "unknown".to_string(),
+        TypeRef::Date | TypeRef::DateTime => "string".to_string(),
+        TypeRef::Bytes => "Uint8Array".to_string(),
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+                util::pascal_case(&name)
+            }
+            NamedKind::Pure(base) => ts_named_type(registry, path, &base),
+        },
+        TypeRef::Array(inner) => format!("{}[]", ts_named_type(registry, path, inner)),
+        TypeRef::Nullable(inner) => format!("{} | null", ts_named_type(registry, path, inner)),
+    }
 }
 
 fn ts_transform_op(transform: &Transform) -> &'static str {
@@ -313,16 +531,20 @@ fn ts_transform_op(transform: &Transform) -> &'static str {
 
 fn ts_rule_call(rule: &Rule, value: &str) -> String {
     match rule {
-        Rule::Email => format!("checkEmail({value}, fieldPath, errors)"),
-        Rule::Url => format!("checkUrl({value}, fieldPath, errors)"),
-        Rule::Uuid => format!("checkUuid({value}, fieldPath, errors)"),
-        Rule::Alphanumeric => format!("checkAlphanumeric({value}, fieldPath, errors)"),
-        Rule::NonEmpty => format!("checkNonEmpty({value}, fieldPath, errors)"),
-        Rule::Min(n) => format!("checkMin({value}, {n}, fieldPath, errors)"),
-        Rule::Max(n) => format!("checkMax({value}, {n}, fieldPath, errors)"),
-        Rule::MinLen(n) => format!("checkMinLen({value}, {n}, fieldPath, errors)"),
-        Rule::MaxLen(n) => format!("checkMaxLen({value}, {n}, fieldPath, errors)"),
-        Rule::Regex(pattern) => format!(
+        Rule::Email(_) => format!("checkEmail({value}, fieldPath, errors)"),
+        Rule::Url(_) => format!("checkUrl({value}, fieldPath, errors)"),
+        Rule::Uuid(_) => format!("checkUuid({value}, fieldPath, errors)"),
+        Rule::Ulid(_) => format!("checkUlid({value}, fieldPath, errors)"),
+        Rule::Ipv4(_) => format!("checkIpv4({value}, fieldPath, errors)"),
+        Rule::Ipv6(_) => format!("checkIpv6({value}, fieldPath, errors)"),
+        Rule::IsoDate(_) => format!("checkIsoDate({value}, fieldPath, errors)"),
+        Rule::Alphanumeric(_) => format!("checkAlphanumeric({value}, fieldPath, errors)"),
+        Rule::NonEmpty(_) => format!("checkNonEmpty({value}, fieldPath, errors)"),
+        Rule::Min(n, _) => format!("checkMin({value}, {n}, fieldPath, errors)"),
+        Rule::Max(n, _) => format!("checkMax({value}, {n}, fieldPath, errors)"),
+        Rule::MinLength(n, _) => format!("checkMinLen({value}, {n}, fieldPath, errors)"),
+        Rule::MaxLength(n, _) => format!("checkMaxLen({value}, {n}, fieldPath, errors)"),
+        Rule::Regex(pattern, _) => format!(
             "checkRegex({value}, {}, fieldPath, errors)",
             util::ts_regex_literal(pattern, "")
         ),
@@ -338,62 +560,185 @@ fn ts_literal(literal: &Literal) -> String {
     }
 }
 
-fn ts_type(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::String | TypeRef::Timestamp => "string".to_string(),
-        TypeRef::Int | TypeRef::Float => "number".to_string(),
-        TypeRef::Boolean => "boolean".to_string(),
-        TypeRef::Json => "unknown".to_string(),
-        TypeRef::Named(name) => util::pascal_case(name),
-        TypeRef::Array(inner) => format!("{}[]", ts_type(inner)),
+/// Rewrite `$1`, `$name`, and `$input.field` placeholders into template
+/// interpolations of `params.`.
+fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
+    let escaped = util::escape_ts_template(sql);
+    let mut out = String::new();
+    let mut rest = escaped.as_str();
+    while let Some(pos) = rest.find('$') {
+        let after = &rest[pos + 1..];
+        let token: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if token.is_empty() {
+            out.push_str(&rest[..=pos]);
+            rest = after;
+            continue;
+        }
+        let path = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<String>();
+        let fields: Vec<&str> = path.split('.').collect();
+
+        let binding: Option<String> = if fields.len() > 1 && fields[0] == "input" {
+            if params.iter().any(|p| p.name == "input") {
+                let sub = fields[1..].join(".");
+                Some(format!("params.input.{}", util::ts_field_name(&sub)))
+            } else {
+                None
+            }
+        } else if token.bytes().all(|b| b.is_ascii_digit()) {
+            let n: usize = token.parse().unwrap_or(0);
+            if n >= 1 && n <= params.len() {
+                Some(format!("params.{}", util::ts_field_name(&params[n - 1].name)))
+            } else {
+                None
+            }
+        } else {
+            params
+                .iter()
+                .find(|p| p.name == token)
+                .map(|p| format!("params.{}", util::ts_field_name(&p.name)))
+        };
+
+        match binding {
+            Some(binding) => {
+                let _ = write!(out, "${{{binding}}}");
+                if fields.len() > 1 && fields[0] == "input" {
+                    rest = &after[path.len()..];
+                } else {
+                    rest = &after[token.len()..];
+                }
+            }
+            None => {
+                out.push('$');
+                out.push_str(&token);
+                rest = &after[token.len()..];
+            }
+        }
     }
+    out.push_str(rest);
+    out
 }
 
-fn ts_coerce_value_expr(ty: &TypeRef, value: &str, path: &str, errors: &str) -> String {
-    match ty {
-        TypeRef::String => format!("coerceString({value}, {path}, {errors})"),
-        TypeRef::Int => format!("coerceInt({value}, {path}, {errors})"),
-        TypeRef::Float => format!("coerceFloat({value}, {path}, {errors})"),
-        TypeRef::Boolean => format!("coerceBoolean({value}, {path}, {errors})"),
-        TypeRef::Json => format!("coerceJson({value}, {path}, {errors})"),
-        TypeRef::Timestamp => format!("coerceTimestamp({value}, {path}, {errors})"),
-        TypeRef::Named(name) => {
-            format!("coerce{}({value}, {path}, {errors})", util::pascal_case(name))
-        }
-        TypeRef::Array(inner) => {
-            let item_path = format!("[...{path}, ['i', index]]");
-            let item = ts_coerce_value_expr(inner, "entry", &item_path, errors);
-            format!("coerceArray({value}, {path}, {errors}).map((entry, index) => {item})")
-        }
+fn emit_query(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    query: &crate::axm::ast::QueryDecl,
+) {
+    let pascal = util::pascal_case(&query.name);
+    let params_type = format!("{pascal}Params");
+    let fn_name = util::ts_field_name(&query.name);
+
+    let _ = writeln!(out, "export interface {params_type} {{");
+    for param in &query.params {
+        let field = util::ts_field_name(&param.name);
+        let ty = ts_named_type(registry, path, &param.ty);
+        let _ = writeln!(out, "  {field}: {ty};");
     }
+    out.push_str("}\n\n");
+
+    let _ = writeln!(
+        out,
+        "export function validate{pascal}Params(params: {params_type}): ValidationError[] {{"
+    );
+    out.push_str("  const errors: ValidationError[] = [];\n");
+    for param in &query.params {
+        emit_param_validation(out, registry, path, param);
+
+    }
+    out.push_str("  return errors;\n");
+    out.push_str("}\n\n");
+
+    let bound_sql = bind_sql(&query.sql, &query.params);
+    let (promise_ty, body) = match &query.return_type {
+        QueryReturn::Exec => (
+            "Promise<void>".to_string(),
+            format!("await sql`\n{bound_sql}\n`;"),
+        ),
+        QueryReturn::Single(ty_ref) => {
+            let ty = ts_named_type(registry, path, ty_ref);
+            (
+                format!("Promise<{ty}>"),
+                format!(
+                    "const rows = await sql<{ty}[]>`\n{bound_sql}\n`;\n  const row = rows[0];\n  if (row === undefined) throw new Error('{pascal} returned no rows');\n  return row;"
+                ),
+            )
+        }
+        QueryReturn::Optional(ty_ref) => {
+            let ty = ts_named_type(registry, path, ty_ref);
+            (
+                format!("Promise<{ty} | null>"),
+                format!(
+                    "const rows = await sql<{ty}[]>`\n{bound_sql}\n`;\n  return rows[0] ?? null;"
+                ),
+            )
+        }
+        QueryReturn::Many(ty_ref) => {
+            let ty = ts_named_type(registry, path, ty_ref);
+            (
+                format!("Promise<{ty}[]>"),
+                format!("return await sql<{ty}[]>`\n{bound_sql}\n`;"),
+            )
+        }
+    };
+
+    let _ = writeln!(out, "export async function {fn_name}(");
+    let _ = writeln!(out, "  sql: Sql,");
+    let _ = writeln!(out, "  params: {params_type}");
+    let _ = writeln!(out, "): {promise_ty} {{");
+    let _ = writeln!(out, "  const errors = validate{pascal}Params(params);");
+    out.push_str(
+        "  if (errors.length > 0) throw new Error(`Validation failed: ${JSON.stringify(errors)}`);\n",
+    );
+    let _ = writeln!(out, "  {body}");
+    out.push_str("}\n\n");
+}
+
+fn emit_param_validation(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    param: &crate::axm::ast::ParamDecl,
+) {
+    let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
+    if inlined.rules.is_empty() && inlined.transforms.is_empty() {
+        return;
+    }
+    let field = util::ts_field_name(&param.name);
+    let _ = writeln!(out, "  {{");
+    let _ = writeln!(out, "    const fieldPath: Seg[] = [['f', '{field}']];");
+    emit_annotated_value(out, registry, path, &inlined, &format!("params.{field}"), 4);
+    let _ = writeln!(out, "  }}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::axm::parser::parse_axm_file;
+    use crate::axm::resolver::{resolve_models, ModelRegistry};
+    use crate::catalog::{ColumnSchema, TableCatalog, TableSchema};
 
     fn registry(src: &str) -> ModelRegistry {
-        let file = parse_axm_file(src).expect("parse");
-        ModelRegistry {
-            models: vec![crate::axm::resolver::ResolvedModel {
-                path: std::path::PathBuf::from("models/test.axm"),
-                model: file.models[0].clone(),
-            }],
-            index: [(
-                file.models[0].name.clone(),
-                0usize,
-            )]
-            .into_iter()
-            .collect(),
-        }
+        resolve_models(&[(
+            std::path::PathBuf::from("models/test.axm"),
+            src.to_string(),
+        )])
+        .expect("resolve")
+    }
+
+    fn no_catalog() -> TableCatalog<'static> {
+        TableCatalog { tables: Vec::new() }
     }
 
     #[test]
     fn emits_interface_and_helpers() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  email: string .email()\n  age: int\n}",
-        ));
+            "model User {\n  email: String .email()\n  age: Int\n}",
+        ), &no_catalog());
         assert!(out.contains("export interface User {"));
         assert!(out.contains("  email: string;"));
         assert!(out.contains("  age: number;"));
@@ -406,8 +751,8 @@ mod tests {
     #[test]
     fn emits_safe_parse_and_parse() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  email: string\n}",
-        ));
+            "model User {\n  email: String\n}",
+        ), &no_catalog());
         assert!(out.contains("export type UserResult = { ok: true; value: User } | { ok: false; errors: ValidationError[] };"));
         assert!(out.contains("export function safeParseUser(input: unknown): UserResult {"));
         assert!(out.contains("export function parseUser(input: unknown): User {"));
@@ -417,8 +762,8 @@ mod tests {
     #[test]
     fn emits_transforms_before_validation() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  email: string .trim() .lowercase() .email()\n}",
-        ));
+            "model User {\n  email: String .trim() .lowercase() .email()\n}",
+        ), &no_catalog());
         assert!(out.contains("let value = base.trim().toLowerCase();"));
         assert!(out.contains("checkEmail(value, fieldPath, errors);"));
     }
@@ -426,8 +771,8 @@ mod tests {
     #[test]
     fn defaults_apply_when_missing() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  country: string = \"US\"\n  age?: int\n}",
-        ));
+            "model User {\n  country: String = \"US\"\n  age?: Int\n}",
+        ), &no_catalog());
         assert!(out.contains("if (raw === undefined) raw = \"US\";"));
         assert!(out.contains("if (raw !== undefined) {"));
     }
@@ -435,16 +780,16 @@ mod tests {
     #[test]
     fn required_fields_fail_when_missing() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  email: string\n}",
-        ));
+            "model User {\n  email: String\n}",
+        ), &no_catalog());
         assert!(out.contains("fail(errors, fieldPath, 'field is required');"));
     }
 
     #[test]
-    fn recursive_array_validation_compiles() {
-        let out = generate_typescript_models(&registry(
-            "export model User {\n  history: Address[]\n}",
-        ));
+    fn recursive_array_validation() {
+let out = generate_typescript_models(&registry(
+            "type Address = String .nonempty()\nmodel User {\n  history: Address[]\n}",
+        ), &no_catalog());
         assert!(out.contains("history: Address[];"));
         assert!(out.contains(
             "coerceArray(raw, fieldPath, errors).map((entry, index) => coerceAddress(entry, [...fieldPath, ['i', index]], errors))"
@@ -454,42 +799,104 @@ mod tests {
     #[test]
     fn unused_helpers_are_not_emitted() {
         let out = generate_typescript_models(&registry(
-            "export model User {\n  name: string .nonempty()\n}",
-        ));
+            "model User {\n  name: String .nonempty()\n}",
+        ), &no_catalog());
         assert!(out.contains("function checkNonEmpty("));
         assert!(!out.contains("function checkUuid("));
-        assert!(!out.contains("function coerceTimestamp("));
+        assert!(!out.contains("function coerceDateTime("));
+        assert!(!out.contains("function coerceBigInt("));
     }
 
     #[test]
     fn empty_registry_generates_nothing() {
-        assert_eq!(generate_typescript_models(&ModelRegistry::default()), "");
+        assert_eq!(generate_typescript_models(&ModelRegistry::default(), &no_catalog()), "");
     }
 
     #[test]
-    fn parse_helpers_exist_for_every_model() {
-        let src = r#"
-export model Address { street: string }
-model User { billing: Address }
-"#;
-        let file = parse_axm_file(src).unwrap();
-        let models: Vec<_> = file.models.into_iter().collect();
-        let registry = ModelRegistry {
-            models: models
-                .iter()
-                .map(|m| crate::axm::resolver::ResolvedModel {
-                    path: std::path::PathBuf::from("models/test.axm"),
-                    model: m.clone(),
-                })
-                .collect(),
-            index: models
-                .iter()
-                .enumerate()
-                .map(|(i, m)| (m.name.clone(), i))
-                .collect(),
+    fn type_aliases_fold_and_emit() {
+        let src = "type Email = String .email() .max_length(320)\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export type Email = string;"));
+        assert!(out.contains("export type UserId = bigint;"));
+        assert!(out.contains("function coerceEmail("));
+        assert!(out.contains("checkEmail(value, fieldPath, errors);"));
+        assert!(out.contains("id: bigint;"));
+        assert!(!out.contains("function coerceUserId("));
+    }
+
+    #[test]
+    fn nullable_fields_emit_union_types() {
+        let out = generate_typescript_models(&registry(
+            "model User {\n  bio: String?\n}",
+        ), &no_catalog());
+        assert!(out.contains("  bio: string | null;"));
+        assert!(out.contains("if (raw === null) {"));
+        assert!(out.contains("value = null;"));
+    }
+
+    #[test]
+    fn database_backed_models_merge_columns() {
+        let catalog = TableCatalog {
+            tables: vec![TableSchema {
+                name: "users".into(),
+                columns: vec![
+                    ColumnSchema {
+                        name: "id".into(),
+                        data_type: "BIGSERIAL".into(),
+                        nullable: false,
+                        primary_key: true,
+                        rules: vec![],
+                    },
+                    ColumnSchema {
+                        name: "display_name".into(),
+                        data_type: "VARCHAR(255)".into(),
+                        nullable: true,
+                        primary_key: false,
+                        rules: vec![],
+                    },
+                ],
+            }],
         };
-        let out = generate_typescript_models(&registry);
-        assert!(out.contains("export function parseAddress("));
-        assert!(out.contains("export function parseUser("));
+        let src = "model User extends select<users> {\n  displayName: String .nonempty()\n}\n";
+        let out = generate_typescript_models(&registry(src), &catalog);
+        assert!(out.contains("  id: bigint;"));
+        assert!(out.contains("  displayName?: string | null;"));
+        assert!(out.contains("checkNonEmpty(value, fieldPath, errors);"));
+        assert!(out.contains("export interface User {"));
+    }
+
+    #[test]
+    fn queries_emit_params_binding_and_return_types() {
+        let src = r#"
+model User { id: UUID }
+query GetUser($id: UUID) -> User? {
+  SELECT * FROM users WHERE id = $id;
+}
+query GetActiveUsers() -> User[] {
+  SELECT * FROM users WHERE active = true;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface GetUserParams {"));
+        assert!(out.contains("export async function getUser(\n  sql: Sql,\n  params: GetUserParams"));
+        assert!(out.contains("): Promise<User | null> {"));
+        assert!(out.contains("${params.id}"));
+        assert!(out.contains("const rows = await sql<User[]>`"));
+        assert!(out.contains("return rows[0] ?? null;"));
+        assert!(out.contains("Promise<User[]>"));
+        assert!(out.contains("export async function getActiveUsers("));
+    }
+
+    #[test]
+    fn structured_input_params_bind_dotted_fields() {
+        let src = r#"
+model CreateUserInput { email: String .email() }
+query CreateUser($input: CreateUserInput) {
+  INSERT INTO users (email) VALUES ($input.email);
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("${params.input.email}"));
+        assert!(out.contains("checkEmail(value, fieldPath, errors);"));
     }
 }

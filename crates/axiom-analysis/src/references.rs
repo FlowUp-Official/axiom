@@ -226,7 +226,7 @@ pub fn resolve_axm_refs(
 
     for model in &axm.models {
         for field in &model.fields {
-            if let Some(name) = named_type(&field.ty) {
+            if let Some(name) = named_type(&field.ty.base) {
                 // Locate the field's name span via the symbol table so we know
                 // where its type starts.
                 let field_start = symbols
@@ -250,17 +250,21 @@ pub fn resolve_axm_refs(
 
     for import in &axm.imports {
         for name in &import.names {
+            let written = name.alias.as_deref().unwrap_or(&name.name);
             let span = tokens
                 .iter()
-                .find(|t| t.is_word() && t.ident_value() == name)
+                .find(|t| t.is_word() && t.ident_value() == written)
                 .map(|t| Span::new(t.start, t.end))
-                .or_else(|| index.find_word_any(name).map(|t| Span::new(t.start, t.end)));
+                .or_else(|| index.find_word_any(written).map(|t| Span::new(t.start, t.end)));
             if let Some(span) = span {
                 refs.push(AxmRef {
-                    name: name.clone(),
+                    name: written.to_string(),
                     file: file.to_path_buf(),
                     span,
-                    resolved_file: symbols.model(name).map(|m| m.file.clone()),
+                    resolved_file: symbols
+                        .model(written)
+                        .or_else(|| symbols.model(&name.name))
+                        .map(|m| m.file.clone()),
                     is_import: true,
                 });
             }

@@ -4,7 +4,10 @@
 //! AST, so it cannot mangle syntax it does not understand. Invalid input is
 //! returned as an error and left untouched by callers.
 
-use axiom_core::axm::ast::{FieldDecl, ImportStmt, Literal, ModelDecl, Rule, Transform, TypeRef};
+use axiom_core::axm::ast::{
+    AnnotatedType, FieldDecl, ImportedName, ImportStmt, Literal, ModelDecl, ParamDecl, QueryDecl,
+    QueryReturn, Rule, Transform, TypeDecl, TypeRef,
+};
 use axiom_core::axm::parser::parse_axm_file;
 
 use crate::printer::{fits_inline, indent, Lines, MAX_INLINE_WIDTH};
@@ -17,18 +20,20 @@ pub fn format_axm(src: &str) -> Result<String, String> {
     let mut lines = Lines::new();
 
     let mut first_item = true;
-    for import in &file.imports {
+    for item in file
+        .imports
+        .iter()
+        .map(|i| vec![format_import(i)])
+        .chain(file.types.iter().map(|t| vec![format_type_decl(t)]))
+        .chain(file.models.iter().map(format_model))
+        .chain(file.queries.iter().map(format_query))
+    {
         if !first_item {
             lines.push_blank();
         }
-        lines.push(format_import(import));
-        first_item = false;
-    }
-    for model in &file.models {
-        if !first_item {
-            lines.push_blank();
+        for line in item {
+            lines.push(line);
         }
-        format_model(model, &mut lines);
         first_item = false;
     }
 
@@ -38,33 +43,71 @@ pub fn format_axm(src: &str) -> Result<String, String> {
 fn format_import(import: &ImportStmt) -> String {
     format!(
         "import {{ {} }} from \"{}\"",
-        import.names.join(", "),
+        import.names.iter().map(format_imported_name).collect::<Vec<_>>().join(", "),
         import.source
     )
 }
 
-fn format_model(model: &ModelDecl, lines: &mut Lines) {
-    let export = if model.exported { "export " } else { "" };
-    lines.push(format!("{export}model {} {{", model.name));
-    for field in &model.fields {
-        lines.push(format!("{}{}", indent(1), format_field(field)));
+fn format_imported_name(name: &ImportedName) -> String {
+    match &name.alias {
+        Some(alias) => format!("{} as {alias}", name.name),
+        None => name.name.clone(),
     }
-    lines.push("}");
+}
+
+fn format_type_decl(decl: &TypeDecl) -> String {
+    format!("type {} = {};", decl.name, format_annotated(&decl.ty))
+}
+
+/// Render a full top-level model including its `extends select<...>` source.
+fn format_model(model: &ModelDecl) -> Vec<String> {
+    let source = model
+        .source
+        .as_ref()
+        .map(|s| format!(" extends select<{}>", s.relation))
+        .unwrap_or_default();
+    let mut out = vec![format!("model {}{source} {{", model.name)];
+    for field in &model.fields {
+        out.push(format!("{}{}", indent(1), format_field(field)));
+    }
+    out.push("}".to_string());
+    out
+}
+
+/// Render a full query declaration.
+fn format_query(query: &QueryDecl) -> Vec<String> {
+    let params = query
+        .params
+        .iter()
+        .map(format_param)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &query.return_type {
+        QueryReturn::Exec => String::new(),
+        QueryReturn::Single(ty) => format!(" -> {}", format_type(ty)),
+        QueryReturn::Optional(ty) => format!(" -> {}?", format_type(ty)),
+        QueryReturn::Many(ty) => format!(" -> {}[]", format_type(ty)),
+    };
+    let mut out = vec![format!("query {}({params}){ret} {{", query.name)];
+    for body_line in query.sql.lines() {
+        out.push(format!("  {body_line}"));
+    }
+    out.push("}".to_string());
+    out
+}
+
+fn format_param(param: &ParamDecl) -> String {
+    format!("${}: {}", param.name, format_type(&param.ty))
 }
 
 /// Render a field, breaking long rule chains onto continuation lines.
 fn format_field(field: &FieldDecl) -> String {
-    let header = format!("{}: {}", field_name(field), format_type(&field.ty));
-    let calls = format_calls(field);
-
-    let inline = if calls.is_empty() {
-        header.clone()
-    } else {
-        format!("{header}{}", calls.join(""))
-    };
+    let base = format!("{}: {}", field_name(field), format_type(&field.ty.base));
+    let calls = format_calls(&field.ty);
+    let inline_full = format!("{}{}", base, calls.join(""));
     let inline = match &field.default {
-        Some(lit) => format!("{inline} = {}", format_literal(lit)),
-        None => inline,
+        Some(lit) => format!("{inline_full} = {}", format_literal(lit)),
+        None => inline_full.clone(),
     };
 
     if calls.len() <= 3 && fits_inline(&inline, MAX_INLINE_WIDTH) {
@@ -73,7 +116,7 @@ fn format_field(field: &FieldDecl) -> String {
 
     // Break the chain: one rule per continuation line, indented one level past
     // the field. The default (if any) rides on the final continuation line.
-    let mut out = header;
+    let mut out = base;
     for (i, call) in calls.iter().enumerate() {
         out.push('\n');
         let last = i == calls.len() - 1;
@@ -99,27 +142,38 @@ fn field_name(field: &FieldDecl) -> String {
 
 /// The `.transform().rule()` chain, transformations first (matching codegen's
 /// transform-before-validation order), each call fully rendered.
-fn format_calls(field: &FieldDecl) -> Vec<String> {
+fn format_calls(ty: &AnnotatedType) -> Vec<String> {
     let mut calls = Vec::new();
-    for t in &field.transformations {
+    for t in &ty.transforms {
         calls.push(format_transform(t));
     }
-    for r in &field.validations {
+    for r in &ty.rules {
         calls.push(format_rule(r));
     }
     calls
 }
 
+/// The base type with its method chain, e.g. `String.email().min(3)`.
+fn format_annotated(ty: &AnnotatedType) -> String {
+    let calls = format_calls(ty);
+    format!("{}{}", format_type(&ty.base), calls.join(""))
+}
+
 fn format_type(ty: &TypeRef) -> String {
     match ty {
-        TypeRef::String => "string".to_string(),
-        TypeRef::Int => "int".to_string(),
-        TypeRef::Float => "float".to_string(),
-        TypeRef::Boolean => "boolean".to_string(),
-        TypeRef::Json => "json".to_string(),
-        TypeRef::Timestamp => "timestamp".to_string(),
+        TypeRef::String => "String".to_string(),
+        TypeRef::Int => "Int".to_string(),
+        TypeRef::BigInt => "BigInt".to_string(),
+        TypeRef::Float => "Float".to_string(),
+        TypeRef::Boolean => "Boolean".to_string(),
+        TypeRef::Uuid => "UUID".to_string(),
+        TypeRef::Date => "Date".to_string(),
+        TypeRef::DateTime => "DateTime".to_string(),
+        TypeRef::Json => "Json".to_string(),
+        TypeRef::Bytes => "Bytes".to_string(),
         TypeRef::Named(name) => name.clone(),
         TypeRef::Array(inner) => format!("{}[]", format_type(inner)),
+        TypeRef::Nullable(inner) => format!("{}?", format_type(inner)),
     }
 }
 
@@ -133,16 +187,39 @@ fn format_transform(transform: &Transform) -> String {
 
 fn format_rule(rule: &Rule) -> String {
     match rule {
-        Rule::Min(n) => format!(".min({n})"),
-        Rule::Max(n) => format!(".max({n})"),
-        Rule::MinLen(n) => format!(".min_len({n})"),
-        Rule::MaxLen(n) => format!(".max_len({n})"),
-        Rule::Regex(pattern) => format!(".regex({})", format_literal(&Literal::String(pattern.clone()))),
-        Rule::Email => ".email()".to_string(),
-        Rule::Url => ".url()".to_string(),
-        Rule::Uuid => ".uuid()".to_string(),
-        Rule::Alphanumeric => ".alphanumeric()".to_string(),
-        Rule::NonEmpty => ".nonempty()".to_string(),
+        Rule::Min(n, m) => format_message_call("min", &[n.to_string()], m),
+        Rule::Max(n, m) => format_message_call("max", &[n.to_string()], m),
+        Rule::MinLength(n, m) => format_message_call("min_length", &[n.to_string()], m),
+        Rule::MaxLength(n, m) => format_message_call("max_length", &[n.to_string()], m),
+        Rule::Regex(pattern, m) => format_message_call(
+            "regex",
+            &[format_literal(&Literal::String(pattern.clone()))],
+            m,
+        ),
+        Rule::Email(m) => format_message_call("email", &[], m),
+        Rule::Url(m) => format_message_call("url", &[], m),
+        Rule::Uuid(m) => format_message_call("uuid", &[], m),
+        Rule::Ulid(m) => format_message_call("ulid", &[], m),
+        Rule::Ipv4(m) => format_message_call("ipv4", &[], m),
+        Rule::Ipv6(m) => format_message_call("ipv6", &[], m),
+        Rule::IsoDate(m) => format_message_call("isodate", &[], m),
+        Rule::Alphanumeric(m) => format_message_call("alphanumeric", &[], m),
+        Rule::NonEmpty(m) => format_message_call("nonempty", &[], m),
+    }
+}
+
+/// Render `.name(args, "msg")` from a rule's argument list and optional message.
+fn format_message_call(name: &str, args: &[String], message: &Option<String>) -> String {
+    let head = args.join(", ");
+    match message {
+        Some(m) => format!(
+            ".{name}({}{}{})",
+            head,
+            if head.is_empty() { "" } else { ", " },
+            format_literal(&Literal::String(m.clone()))
+        ),
+        None if head.is_empty() => format!(".{name}()"),
+        None => format!(".{name}({head})"),
     }
 }
 
@@ -191,80 +268,138 @@ mod tests {
     fn formats_simple_model_with_import() {
         let src = r#"
 import { Address } from   "address";
-export model User {
-      name : string
-      age: int .min(18)
+model User {
+      name : String
+      age: Int .min(18)
 }
 "#;
         assert_eq!(
             fmt(src),
             "import { Address } from \"address\"\n\
-             \nexport model User {\n\
-             \x20 name: string\n\
-             \x20 age: int.min(18)\n\
+             \nmodel User {\n\
+             \x20 name: String\n\
+             \x20 age: Int.min(18)\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn formats_extends_select_and_aliased_imports() {
+        let src = r#"import { User as DbUser } from "users"
+model UserView extends select<public.users> {
+  id: UUID
+  email: Email
+}"#;
+        assert_eq!(
+            fmt(src),
+            "import { User as DbUser } from \"users\"\n\
+             \nmodel UserView extends select<public.users> {\n\
+             \x20 id: UUID\n\
+             \x20 email: Email\n\
              }\n"
         );
     }
 
     #[test]
     fn breaks_long_rule_chains() {
-        let src = "model User {\n  username: string .alphanumeric() .min(3) .max(20) .nonempty()\n}";
+        let src = "model User {\n  username: String .alphanumeric() .min(3) .max(20) .nonempty()\n}";
         assert_eq!(
             fmt(src),
-            "model User {\n  username: string\n    .alphanumeric()\n    .min(3)\n    .max(20)\n    .nonempty()\n}\n"
+            "model User {\n  username: String\n    .alphanumeric()\n    .min(3)\n    .max(20)\n    .nonempty()\n}\n"
         );
     }
 
     #[test]
     fn keeps_short_chains_inline() {
-        let src = "model User {\n  email: string .trim() .lowercase() .email()\n}";
+        let src = "model User {\n  email: String .trim() .lowercase() .email()\n}";
         assert_eq!(
             fmt(src),
-            "model User {\n  email: string.trim().lowercase().email()\n}\n"
+            "model User {\n  email: String.trim().lowercase().email()\n}\n"
         );
     }
 
     #[test]
     fn formats_defaults_and_optional_fields() {
-        let src = "model User { country : string = \"US\"\n  age?: int.min(18) }";
+        let src = "model User { country : String = \"US\"\n  age?: Int.min(18) }";
         assert_eq!(
             fmt(src),
-            "model User {\n  country: string = \"US\"\n  age?: int.min(18)\n}\n"
+            "model User {\n  country: String = \"US\"\n  age?: Int.min(18)\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_type_aliases() {
+        let src = "type Email = String.email();\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "type Email = String.email();\n\
+             \ntype UserId = BigInt;\n\
+             \nmodel User {\n\
+             \x20 email: Email\n\
+             \x20 id: UserId\n\
+             }\n"
         );
     }
 
     #[test]
     fn transforms_precede_validations() {
-        let src = "model User {\n  email: string .email() .trim() .lowercase()\n}";
+        let src = "model User {\n  email: String .email() .trim() .lowercase()\n}";
         let out = fmt(src);
-        assert!(out.contains("email: string.trim().lowercase().email()"), "{out}");
+        assert!(out.contains("email: String.trim().lowercase().email()"), "{out}");
+    }
+
+    #[test]
+    fn formats_query_declarations() {
+        let src = r#"query GetUser($id: UUID) -> User? {
+  SELECT * FROM users WHERE id = $id;
+}
+query CreateUser($input: NewUser) {
+  INSERT INTO users (email) VALUES ($input.email);
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("query GetUser($id: UUID) -> User? {"), "{out}");
+        assert!(out.contains("query CreateUser($input: NewUser) {"), "{out}");
     }
 
     #[test]
     fn escaping_round_trips_string_literals() {
-        let src = r#"model User { slug: string .regex("^[a-z0-9-\"\\n]+$") }"#;
+        let src = r#"model User { slug: String .regex("^[a-z0-9-\"\\n]+$") }"#;
         let out = fmt(src);
         assert!(out.contains(".regex(\"^[a-z0-9-\\\"\\\\n]+$\")"), "{out}");
     }
 
     #[test]
     fn floats_keep_fractional_marker() {
-        let src = "model M { ratio: float = 0.5\n  whole: float = 2.0 }";
+        let src = "model M { ratio: Float = 0.5\n  whole: Float = 2.0 }";
         let out = fmt(src);
-        assert!(out.contains("whole: float = 2.0"), "{out}");
+        assert!(out.contains("whole: Float = 2.0"), "{out}");
+    }
+
+    #[test]
+    fn rules_with_messages_round_trip() {
+        let src = "model User {\n  username: String .nonempty(\"required\") .min_length(3, \"too short\")\n}";
+        let out = fmt(src);
+        assert!(out.contains(".nonempty(\"required\")"), "{out}");
+        assert!(out.contains(".min_length(3, \"too short\")"), "{out}");
     }
 
     #[test]
     fn output_is_idempotent() {
         let messy = r#"
 import {A,B} from "geo";
+type Email = String .email() .max_length(320)
 model User {
-  email : string .trim() .email()
+  email : String .trim() .email()
   address: Address[]
-  tags: string[] .nonempty()
-  username: string .alphanumeric() .min(3) .max(20) .lowercase()
-  created: timestamp = "2024-01-01T00:00:00Z"
-  private: boolean
+  tags: String[] .nonempty()
+  username: String .alphanumeric() .min(3) .max(20) .lowercase()
+  created: DateTime = "2024-01-01T00:00:00Z"
+  private: Boolean
+  bio: String?
+}
+query ListUsers($limit: Int) -> User[] {
+  SELECT * FROM users ORDER BY id LIMIT $limit;
 }
 "#;
         let once = fmt(messy);
@@ -273,7 +408,7 @@ model User {
 
     #[test]
     fn empty_models_format_to_brace_pair() {
-        assert_eq!(fmt("export model Empty { }"), "export model Empty {\n}\n");
+        assert_eq!(fmt("model Empty { }"), "model Empty {\n}\n");
     }
 
     #[test]

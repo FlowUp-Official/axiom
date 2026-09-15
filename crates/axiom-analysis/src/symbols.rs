@@ -71,7 +71,6 @@ pub struct ModelSym {
     pub file: PathBuf,
     /// Span of the model name in its `.axm` file.
     pub span: Span,
-    pub exported: bool,
     pub fields: Vec<FieldSym>,
 }
 
@@ -261,21 +260,25 @@ fn model_symbol(file: &Path, model: &ModelDecl, index: &PositionIndex) -> ModelS
     let fields = model
         .fields
         .iter()
-        .map(|field| field_symbol(file, field, index))
+        .map(|field| field_symbol(file, field, index, span.end))
         .collect();
 
     ModelSym {
         name: model.name.clone(),
         file: file.to_path_buf(),
         span,
-        exported: model.exported,
         fields,
     }
 }
 
-fn field_symbol(file: &Path, field: &FieldDecl, index: &PositionIndex) -> FieldSym {
+fn field_symbol(
+    file: &Path,
+    field: &FieldDecl,
+    index: &PositionIndex,
+    from: usize,
+) -> FieldSym {
     let span = index
-        .find_word_any(&field.name)
+        .find_word(&field.name, from)
         .map(|t| Span::new(t.start, t.end))
         .unwrap_or_else(|| Span::new(0, 0));
     FieldSym {
@@ -346,17 +349,16 @@ mod tests {
 
     #[test]
     fn builds_model_symbols_with_spans() {
-        let src = "export model User {\n  email: string.email().trim()\n  address: Address\n}";
+        let src = "import { Email } from \"./shared.axm\"\n\nmodel User {\n  email: Email.trim()\n  address: Address\n}";
         let axm = parse_axm_file(src).unwrap();
         let index = PositionIndex::new_axm(src);
         let models = build_model_symbols(Path::new("models/user.axm"), &axm, &index);
         assert_eq!(models.len(), 1);
         let model = &models[0];
         assert_eq!(&src[model.span.start..model.span.end], "User");
-        assert!(model.exported);
         assert_eq!(model.fields.len(), 2);
         assert_eq!(&src[model.fields[0].span.start..model.fields[0].span.end], "email");
-        assert_eq!(model.fields[0].type_name, "string");
+        assert_eq!(model.fields[0].type_name, "Email");
         assert_eq!(model.fields[1].type_name, "Address");
     }
 

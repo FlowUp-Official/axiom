@@ -274,14 +274,14 @@ async fn run_generate(
             OutputConfig::TypeScript(_) => {
                 let mut code = generate_typescript(&catalog, &query_catalog);
                 if let Some(registry) = &model_registry {
-                    code.push_str(&generate_typescript_models(registry));
+                    code.push_str(&generate_typescript_models(registry, &catalog));
                 }
                 (name.clone(), code)
             }
             OutputConfig::Rust(_) => {
                 let mut code = generate_rust(&catalog, &query_catalog);
                 if let Some(registry) = &model_registry {
-                    code.push_str(&generate_rust_models(registry));
+                    code.push_str(&generate_rust_models(registry, &catalog));
                 }
                 (name.clone(), code)
             }

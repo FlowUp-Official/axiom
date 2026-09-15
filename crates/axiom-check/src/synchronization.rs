@@ -114,14 +114,14 @@ fn render_output(
         OutputConfig::TypeScript(_) => {
             let mut code = generate_typescript(catalog, query_catalog);
             if let Some(registry) = registry {
-                code.push_str(&generate_typescript_models(registry));
+                code.push_str(&generate_typescript_models(registry, catalog));
             }
             code
         }
         OutputConfig::Rust(_) => {
             let mut code = generate_rust(catalog, query_catalog);
             if let Some(registry) = registry {
-                code.push_str(&generate_rust_models(registry));
+                code.push_str(&generate_rust_models(registry, catalog));
             }
             code
         }

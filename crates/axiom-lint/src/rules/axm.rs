@@ -1,12 +1,13 @@
 //! Lint rules over `.axm` domain-model files.
 
-use axiom_core::axm::ast::{AxmFile, FieldDecl, ImportStmt, ModelDecl, Rule, TypeRef};
+use axiom_core::axm::ast::{AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, Rule, TypeRef};
 use axiom_diagnostics::{Diagnostic, Span};
 
 use crate::runner::{word_span, LintContext, LintRule};
 
 /// Flags `import { X } from "..."` statements whose names are never used as a
-/// field type in the importing file.
+/// field type in the importing file. Aliased imports are matched by the written
+/// (aliased) name.
 #[derive(Debug)]
 pub struct UnusedImport;
 
@@ -24,17 +25,18 @@ impl LintRule for UnusedImport {
         let mut out = Vec::new();
         for import in &file.imports {
             for name in &import.names {
-                if used.contains(name) {
+                let written = name.alias.as_deref().unwrap_or(&name.name);
+                if used.iter().any(|u| u == written) {
                     continue;
                 }
-                let span = import_name_span(ctx.source, import, name);
+                let span = import_name_span(ctx.source, import, written);
                 let mut diag = Diagnostic::warning(
                     ctx.file,
                     "lint.unused-import",
-                    format!("imported model `{name}` is never used"),
+                    format!("imported model `{written}` is never used"),
                 )
                 .with_help(format!(
-                    "remove `{name}` from the import from \"{}\"",
+                    "remove `{written}` from the import from \"{}\"",
                     import.source
                 ));
                 if let Some(span) = span {
@@ -47,7 +49,8 @@ impl LintRule for UnusedImport {
     }
 }
 
-/// Flags non-exported models that no other model references or imports.
+/// Flags models that no other model references or imports anywhere in the
+/// workspace (including within their own file).
 #[derive(Debug)]
 pub struct DeadModel;
 
@@ -63,7 +66,7 @@ impl LintRule for DeadModel {
 
         let mut out = Vec::new();
         for model in &file.models {
-            if model.exported || ctx.workspace.referenced_models.contains(&model.name) {
+            if ctx.workspace.referenced_models.contains(&model.name) {
                 continue;
             }
             let span = model_name_span(ctx.source, &model.name);
@@ -72,7 +75,7 @@ impl LintRule for DeadModel {
                 "lint.dead-model",
                 format!("model `{}` is never referenced", model.name),
             )
-            .with_help("export it or reference it from another model to remove this warning");
+            .with_help("reference it from another model to remove this warning");
             if let Some(span) = span {
                 diag = diag.with_span(span);
             }
@@ -122,23 +125,23 @@ impl RedundantValidator {
         let mut max_len: Option<usize> = None;
         let mut seen: Vec<String> = Vec::new();
 
-        for rule in &field.validations {
-            let text = rule_text(rule);
-            let redundant = seen.contains(&text)
+        for rule in &field.ty.rules {
+            let canonical = rule_text(rule);
+            let redundant = seen.contains(&canonical)
                 || match rule {
-                    Rule::Min(n) => min.is_some_and(|cur| *n <= cur),
-                    Rule::Max(n) => max.is_some_and(|cur| *n >= cur),
-                    Rule::MinLen(n) => min_len.is_some_and(|cur| *n <= cur),
-                    Rule::MaxLen(n) => max_len.is_some_and(|cur| *n >= cur),
+                    Rule::Min(n, _) => min.is_some_and(|cur| *n <= cur),
+                    Rule::Max(n, _) => max.is_some_and(|cur| *n >= cur),
+                    Rule::MinLength(n, _) => min_len.is_some_and(|cur| *n <= cur),
+                    Rule::MaxLength(n, _) => max_len.is_some_and(|cur| *n >= cur),
                     _ => false,
                 };
             if redundant {
-                let span = rule_span(ctx.source, &field.name, &text);
+                let span = rule_span(ctx.source, &field.name, &canonical);
                 let mut diag = Diagnostic::warning(
                     ctx.file,
                     "lint.redundant-validator",
                     format!(
-                        "`{text}` is redundant on field `{}` of model `{}`",
+                        "`{canonical}` is redundant on field `{}` of model `{}`",
                         field.name, model.name
                     ),
                 );
@@ -148,49 +151,76 @@ impl RedundantValidator {
                 out.push(diag);
                 continue;
             }
-            seen.push(text);
+            seen.push(canonical);
             match rule {
-                Rule::Min(n) => min = Some(min.map_or(*n, |cur| cur.max(*n))),
-                Rule::Max(n) => max = Some(max.map_or(*n, |cur| cur.min(*n))),
-                Rule::MinLen(n) => min_len = Some(min_len.map_or(*n, |cur| cur.max(*n))),
-                Rule::MaxLen(n) => max_len = Some(max_len.map_or(*n, |cur| cur.min(*n))),
+                Rule::Min(n, _) => min = Some(min.map_or(*n, |cur| cur.max(*n))),
+                Rule::Max(n, _) => max = Some(max.map_or(*n, |cur| cur.min(*n))),
+                Rule::MinLength(n, _) => min_len = Some(min_len.map_or(*n, |cur| cur.max(*n))),
+                Rule::MaxLength(n, _) => max_len = Some(max_len.map_or(*n, |cur| cur.min(*n))),
                 _ => {}
             }
         }
     }
 }
 
-/// Every model name referenced as a field type anywhere in the file.
+/// Every named type reference anywhere in the file: model/type fields, type
+/// alias bases, and query parameters and return types.
 fn collect_named_types(file: &AxmFile) -> Vec<String> {
     let mut names = Vec::new();
+    for ty in &file.types {
+        collect_annotated(&ty.ty, &mut names);
+    }
     for model in &file.models {
         for field in &model.fields {
-            collect_type_refs(&field.ty, &mut names);
+            collect_annotated(&field.ty, &mut names);
+        }
+    }
+    for query in &file.queries {
+        for param in &query.params {
+            collect_type_refs(&param.ty, &mut names);
+        }
+        use axiom_core::axm::ast::QueryReturn;
+        match &query.return_type {
+            QueryReturn::Exec => {}
+            QueryReturn::Single(ty)
+            | QueryReturn::Optional(ty)
+            | QueryReturn::Many(ty) => collect_type_refs(ty, &mut names),
         }
     }
     names
+}
+
+fn collect_annotated(ty: &AnnotatedType, out: &mut Vec<String>) {
+    collect_type_refs(&ty.base, out);
 }
 
 fn collect_type_refs(ty: &TypeRef, out: &mut Vec<String>) {
     match ty {
         TypeRef::Named(name) => out.push(name.clone()),
         TypeRef::Array(inner) => collect_type_refs(inner, out),
+        TypeRef::Nullable(inner) => collect_type_refs(inner, out),
         _ => {}
     }
 }
 
+/// The canonical spelling of a rule, e.g. `.min(5)` — without any custom
+/// message, so duplicate rules with different messages are still detected.
 fn rule_text(rule: &Rule) -> String {
     match rule {
-        Rule::Min(n) => format!(".min({n})"),
-        Rule::Max(n) => format!(".max({n})"),
-        Rule::MinLen(n) => format!(".min_len({n})"),
-        Rule::MaxLen(n) => format!(".max_len({n})"),
-        Rule::Regex(p) => format!(".regex(\"{p}\")"),
-        Rule::Email => ".email()".to_string(),
-        Rule::Url => ".url()".to_string(),
-        Rule::Uuid => ".uuid()".to_string(),
-        Rule::Alphanumeric => ".alphanumeric()".to_string(),
-        Rule::NonEmpty => ".nonempty()".to_string(),
+        Rule::Min(n, _) => format!(".min({n})"),
+        Rule::Max(n, _) => format!(".max({n})"),
+        Rule::MinLength(n, _) => format!(".min_length({n})"),
+        Rule::MaxLength(n, _) => format!(".max_length({n})"),
+        Rule::Regex(_, _) => ".regex".to_string(),
+        Rule::Email(_) => ".email()".to_string(),
+        Rule::Url(_) => ".url()".to_string(),
+        Rule::Uuid(_) => ".uuid()".to_string(),
+        Rule::Ulid(_) => ".ulid()".to_string(),
+        Rule::Ipv4(_) => ".ipv4()".to_string(),
+        Rule::Ipv6(_) => ".ipv6()".to_string(),
+        Rule::IsoDate(_) => ".isodate()".to_string(),
+        Rule::Alphanumeric(_) => ".alphanumeric()".to_string(),
+        Rule::NonEmpty(_) => ".nonempty()".to_string(),
     }
 }
 
@@ -232,11 +262,7 @@ fn model_name_span(source: &str, name: &str) -> Option<Span> {
     let mut offset = 0;
     for line in source.lines() {
         let trimmed = line.trim_start();
-        let Some(rest) = trimmed
-            .strip_prefix("export model")
-            .or_else(|| trimmed.strip_prefix("model"))
-            .map(str::trim_start)
-        else {
+        let Some(rest) = trimmed.strip_prefix("model").map(str::trim_start) else {
             offset += line.len() + 1;
             continue;
         };
@@ -287,7 +313,8 @@ mod tests {
 
     #[test]
     fn unused_import_is_reported() {
-        let source = "import { Address, ZipCode } from \"geo\"\nexport model User {\n  name: string\n}";
+        let source =
+            "import { Address, ZipCode } from \"geo\"\nmodel User {\n  name: String\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         let diags = UnusedImport.check(&c);
@@ -298,7 +325,16 @@ mod tests {
 
     #[test]
     fn used_import_is_not_reported() {
-        let source = "import { Address } from \"geo\"\nexport model User {\n  billing: Address\n}";
+        let source = "import { Address } from \"geo\"\nmodel User {\n  billing: Address\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert!(UnusedImport.check(&c).is_empty());
+    }
+
+    #[test]
+    fn aliased_import_matches_written_name() {
+        let source =
+            "import { Address as Home } from \"geo\"\nmodel User {\n  billing: Home\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         assert!(UnusedImport.check(&c).is_empty());
@@ -306,8 +342,9 @@ mod tests {
 
     #[test]
     fn dead_model_is_reported() {
-        let source = "model Internal {\n  x: string\n}\nexport model Api {\n  y: string\n}";
-        let ws = WorkspaceView::empty();
+        let source = "model Internal {\n  x: String\n}\nmodel Api {\n  y: String\n}";
+        let mut ws = WorkspaceView::empty();
+        ws.referenced_models.insert("Api".to_string());
         let c = ctx(source, &ws);
         let diags = DeadModel.check(&c);
         assert_eq!(diags.len(), 1, "{diags:?}");
@@ -315,17 +352,18 @@ mod tests {
     }
 
     #[test]
-    fn exported_and_referenced_models_are_not_dead() {
-        let source = "export model Address {\n  street: string\n}\nmodel User {\n  billing: Address\n}";
+    fn referenced_models_are_not_dead() {
+        let source = "model Address {\n  street: String\n}\nmodel User {\n  billing: Address\n}";
         let mut ws = WorkspaceView::empty();
         ws.referenced_models.insert("User".to_string());
+        ws.referenced_models.insert("Address".to_string());
         let c = ctx(source, &ws);
         assert!(DeadModel.check(&c).is_empty());
     }
 
     #[test]
     fn redundant_min_is_reported() {
-        let source = "model T {\n  x: int .min(10) .min(5)\n}";
+        let source = "model T {\n  x: Int .min(10) .min(5)\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         let diags = RedundantValidator.check(&c);
@@ -336,15 +374,16 @@ mod tests {
 
     #[test]
     fn stricter_bounds_are_not_redundant() {
-        let source = "model T {\n  x: int .min(5) .min(10)\n  y: string .max_len(20) .max_len(10)\n}";
+        let source =
+            "model T {\n  x: Int .min(5) .min(10)\n  y: String .max_length(20) .max_length(10)\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
-        assert!(RedundantValidator.check(&c).is_empty(), "{:?}", RedundantValidator.check(&c));
+        assert!(RedundantValidator.check(&c).is_empty());
     }
 
     #[test]
     fn duplicate_validator_is_reported() {
-        let source = "model T {\n  email: string .email() .email()\n}";
+        let source = "model T {\n  email: String .email() .email()\n}";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         let diags = RedundantValidator.check(&c);

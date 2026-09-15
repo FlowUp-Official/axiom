@@ -99,10 +99,11 @@ impl AnalysisDatabase {
                 let field_index = index.find_word_any(&f.name)?;
                 (field_index.start == token.start).then(|| {
                     let rules: Vec<String> = f
-                        .validations
+                        .ty
+                        .rules
                         .iter()
                         .map(rule_label)
-                        .chain(f.transformations.iter().map(transform_label))
+                        .chain(f.ty.transforms.iter().map(transform_label))
                         .collect();
                     (f.name.as_str(), format!("{:?}", f.ty), rules)
                 })
@@ -166,10 +167,7 @@ fn table_hover(table: &crate::symbols::TableSym, span: Span) -> HoverInfo {
 }
 
 fn model_hover(model: &crate::symbols::ModelSym, span: Span) -> HoverInfo {
-    let mut lines = vec![
-        format!("{} field(s)", model.fields.len()),
-        format!("exported: {}", model.exported),
-    ];
+    let mut lines = vec![format!("{} field(s)", model.fields.len())];
     for field in &model.fields {
         lines.push(format!("  {}: {}", field.name, field.type_name));
     }
@@ -181,17 +179,18 @@ fn model_hover(model: &crate::symbols::ModelSym, span: Span) -> HoverInfo {
 }
 
 fn rule_label(rule: &Rule) -> String {
-    match rule {
-        Rule::Email => "email validation".to_string(),
-        Rule::Url => "url validation".to_string(),
-        Rule::Uuid => "uuid validation".to_string(),
-        Rule::Alphanumeric => "alphanumeric validation".to_string(),
-        Rule::NonEmpty => "nonempty validation".to_string(),
-        Rule::Min(n) => format!("min {n} validation"),
-        Rule::Max(n) => format!("max {n} validation"),
-        Rule::MinLen(n) => format!("min length {n} validation"),
-        Rule::MaxLen(n) => format!("max length {n} validation"),
-        Rule::Regex(p) => format!("regex validation ({p})"),
+    use axiom_core::axm::ast::Rule as R;
+    let base = match rule {
+        R::Min(n, _) => format!("min {n}"),
+        R::Max(n, _) => format!("max {n}"),
+        R::MinLength(n, _) => format!("min length {n}"),
+        R::MaxLength(n, _) => format!("max length {n}"),
+        R::Regex(p, _) => format!("regex ({p})"),
+        _ => rule.name().to_string(),
+    };
+    match rule.message() {
+        Some(m) => format!("{base} ({m})"),
+        None => format!("{base} validation"),
     }
 }
 

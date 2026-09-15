@@ -138,8 +138,8 @@ fn positional_placeholder_beyond_declared_is_reported() {
 #[test]
 fn model_duplicates_are_reported() {
     let files = vec![
-        file("models/a.axm", "export model User { a: string }"),
-        file("models/b.axm", "export model User { b: string }"),
+        file("models/a.axm", "model User { a: String }"),
+        file("models/b.axm", "model User { b: String }"),
     ];
     let (_, diags) = check_models(None, &files);
     assert!(codes(&diags).contains(&"check.duplicate-model"), "{diags:?}");
@@ -149,7 +149,7 @@ fn model_duplicates_are_reported() {
 fn broken_import_is_reported() {
     let files = vec![file(
         "models/user.axm",
-        "import { Missing } from \"nowhere\"\nexport model User { x: Missing }",
+        "import { Missing } from \"nowhere\"\nmodel User { x: Missing }",
     )];
     let (_, diags) = check_models(None, &files);
     assert!(
@@ -162,7 +162,7 @@ fn broken_import_is_reported() {
 fn invalid_regex_is_reported() {
     let files = vec![file(
         "models/user.axm",
-        "export model User { slug: string .regex(\"[unclosed\") }",
+        "model User { slug: String.regex(\"[unclosed\") }",
     )];
     let (_, diags) = check_models(None, &files);
     assert!(codes(&diags).contains(&"check.regex-invalid"), "{diags:?}");
@@ -199,7 +199,7 @@ fn query_results_are_cached_by_content() {
 fn referenced_models_include_field_types_and_imports() {
     let files = vec![file(
         "models/user.axm",
-        "import { Address } from \"address\"\nexport model User {\n  billing: Address\n}",
+        "import { Address } from \"./address.axm\"\nmodel User {\n  billing: Address\n}",
     )];
     let referenced = collect_referenced_models(&files);
     assert!(referenced.contains("Address"));
