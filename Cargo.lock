@@ -178,6 +178,7 @@ dependencies = [
  "axiom-diagnostics",
  "axiom-format",
  "axiom-lint",
+ "axiom-lsp",
  "clap",
  "dotenvy",
  "miette",

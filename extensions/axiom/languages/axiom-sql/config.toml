@@ -1,8 +1,0 @@
-name = "Axiom SQL"
-grammar = "sql"
-path_suffixes = ["sql"]
-line_comments = ["--"]
-tab_size = 2
-
-[overrides.string]
-completion_query_characters = ["."]

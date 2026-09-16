@@ -45,6 +45,8 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Start the LSP language server over stdin/stdout (used by Zed, VS Code, etc.).
+    Lsp,
     /// Generate typed output from the configured inputs.
     Generate(GenerateArgs),
     /// Push generated output to a target database.
@@ -144,6 +146,10 @@ async fn run() -> Result<i32, AxiomError> {
             );
             return Ok(0);
         }
+        Commands::Lsp => {
+            axiom_lsp::run_stdio_server().await;
+            return Ok(0);
+        }
         _ => {}
     }
 
@@ -179,7 +185,7 @@ async fn run() -> Result<i32, AxiomError> {
         Commands::Check(args) => commands::check::run(args, &config, &config_path),
         Commands::Format(args) => commands::format::run(args, &config, &config_path),
         Commands::Lint(args) => commands::lint::run(args, &config, &config_path),
-        Commands::Schema | Commands::Init { .. } => {
+        Commands::Schema | Commands::Init { .. } | Commands::Lsp => {
             unreachable!("handled before config loading")
         }
     }

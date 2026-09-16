@@ -1,8 +1,0 @@
-name = "Axiom Model"
-grammar = "axiom-model"
-path_suffixes = ["axm"]
-line_comments = ["//"]
-tab_size = 2
-
-[overrides.string]
-completion_query_characters = [".", ":"]
