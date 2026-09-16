@@ -14,6 +14,10 @@ const order = [
   'axm.md',
   'query-functions.md',
   'codegen.md',
+  'check.md',
+  'format.md',
+  'lint.md',
+  'lsp.md',
   'database-sync.md',
   'performance.md',
   'monorepos.md',
@@ -23,7 +27,7 @@ const order = [
 const markdown = ref(
   `# Axiom Documentation
 
-Axiom is a high-performance code generator for SQL schemas and annotated query files, built for large monorepos.
+Axiom is a high-performance code generator for SQL schemas and `.axm` model/query contracts, built for large monorepos.
 
 ${order
   .map((file) => modules[`../../../guide/${file}`])

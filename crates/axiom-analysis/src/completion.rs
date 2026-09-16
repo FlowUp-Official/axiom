@@ -2,26 +2,11 @@
 
 use std::path::Path;
 
+use axiom_core::axm::ast::{Rule, Transform, TypeRef};
+
 use crate::database::{AnalysisDatabase, Lang};
 use crate::token::TokenKind;
 use crate::{CompletionItem, CompletionKind};
-
-/// All `.axm` validator and transform callables.
-const AXM_CALLABLES: &[&str] = &[
-    "email()",
-    "url()",
-    "uuid()",
-    "min()",
-    "max()",
-    "minLen()",
-    "maxLen()",
-    "regex()",
-    "alphanumeric()",
-    "nonempty()",
-    "trim()",
-    "lowercase()",
-    "uppercase()",
-];
 
 impl AnalysisDatabase {
     pub fn completion(&mut self, path: &Path, offset: usize) -> Vec<CompletionItem> {
@@ -192,12 +177,22 @@ impl AnalysisDatabase {
                     insert_text: f.name.clone(),
                 }));
             }
-            items.extend(AXM_CALLABLES.iter().map(|c| CompletionItem {
-                label: (*c).to_string(),
-                detail: "validator".to_string(),
-                kind: CompletionKind::Method,
-                insert_text: (*c).to_string(),
-            }));
+            for call in Rule::CALLS {
+                items.push(CompletionItem {
+                    label: format!("{call}()"),
+                    detail: "validator".to_string(),
+                    kind: CompletionKind::Method,
+                    insert_text: format!("{call}()"),
+                });
+            }
+            for call in Transform::CALLS {
+                items.push(CompletionItem {
+                    label: format!("{call}()"),
+                    detail: "transform".to_string(),
+                    kind: CompletionKind::Method,
+                    insert_text: format!("{call}()"),
+                });
+            }
             return items;
         }
 
@@ -218,17 +213,16 @@ impl AnalysisDatabase {
             .find(|t| t.kind != TokenKind::Comment && t.end <= word_start)
             .is_some_and(|t| t.kind == TokenKind::Punct && t.text == ":")
         {
-            let mut items: Vec<CompletionItem> =
-                ["string", "int", "float", "boolean", "json", "timestamp"]
-                    .iter()
-                    .filter(|p| p.starts_with(&prefix.to_lowercase()))
-                    .map(|p| CompletionItem {
-                        label: (*p).to_string(),
-                        detail: "primitive".to_string(),
-                        kind: CompletionKind::Type,
-                        insert_text: (*p).to_string(),
-                    })
-                    .collect();
+            let mut items: Vec<CompletionItem> = TypeRef::PRIMITIVES
+                .iter()
+                .filter(|p| p.to_lowercase().starts_with(&prefix.to_lowercase()))
+                .map(|p| CompletionItem {
+                    label: (*p).to_string(),
+                    detail: "primitive".to_string(),
+                    kind: CompletionKind::Type,
+                    insert_text: (*p).to_string(),
+                })
+                .collect();
             items.extend(self.model_completions(&prefix));
             return items;
         }
@@ -258,5 +252,58 @@ impl AnalysisDatabase {
                 insert_text: name.to_string(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db_from(src: &str) -> AnalysisDatabase {
+        let mut db = AnalysisDatabase::new();
+        db.open(Path::new("models/a.axm"), src.to_string());
+        db
+    }
+
+    fn labels(items: Vec<CompletionItem>) -> Vec<String> {
+        items.into_iter().map(|i| i.label).collect()
+    }
+
+    #[test]
+    fn suggests_canonical_primitives_at_type_position() {
+        let src = "model User { email: X }";
+        let offset = src.find('X').unwrap();
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        for p in TypeRef::PRIMITIVES {
+            assert!(
+                labels.iter().any(|l| l == p),
+                "missing canonical primitive {p}"
+            );
+        }
+        for stale in ["string", "int", "timestamp"] {
+            assert!(
+                !labels.iter().any(|l| l == stale),
+                "stale primitive {stale} suggested"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_canonical_validators_at_dot_position() {
+        let src = "model User { email: String. }";
+        let offset = src.find('.').unwrap() + 1;
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        for call in Rule::CALLS {
+            assert!(
+                labels.iter().any(|l| l == &format!("{call}()")),
+                "missing canonical validator {call}()"
+            );
+        }
+        for stale in ["minLen()", "maxLen()", "min_len()", "max_len()"] {
+            assert!(
+                !labels.iter().any(|l| l == stale),
+                "stale validator {stale} suggested"
+            );
+        }
     }
 }

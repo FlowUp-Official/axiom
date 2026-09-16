@@ -392,7 +392,7 @@ fn emit_alias_coerce(
 }
 
 /// Emit a standalone `coerce{Name}` function that validates `anchor` with the
-/// given (already inlined) annotation.
+/// given (already inlined) annotated type.
 #[allow(clippy::too_many_arguments)]
 fn emit_annotated_fn(
     out: &mut String,
@@ -539,7 +539,7 @@ fn emit_field_assign(
 }
 
 /// Emit statements that bind `value` from the expression `raw`, applying the
-/// annotation's transforms and rules. The caller assigns `out.{key} = value`.
+/// annotated type's transforms and rules. The caller assigns `out.{key} = value`.
 fn emit_annotated_value(
     out: &mut String,
     registry: &ModelRegistry,
@@ -579,7 +579,7 @@ fn emit_annotated_value(
     }
 }
 
-/// An expression that coerces `value` to the annotation base's runtime type.
+/// An expression that coerces `value` to the annotated type base's runtime type.
 fn coerce_value_expr(
     registry: &ModelRegistry,
     path: &Path,

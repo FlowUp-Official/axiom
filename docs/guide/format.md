@@ -36,13 +36,13 @@ convention `cargo fmt --check` uses, so it drops straight into CI.
 
 ```text
 # before
-export model Address { street: string .nonempty() .trim() city: string .nonempty() .trim() state: string }
+model Address { street: String .nonempty() .trim() city: String .nonempty() .trim() state: String }
 
 # after
-export model Address {
-  street: string.nonempty().trim()
-  city: string.nonempty().trim()
-  state: string
+model Address {
+  street: String.trim().nonempty()
+  city: String.trim().nonempty()
+  state: String
 }
 ```
 

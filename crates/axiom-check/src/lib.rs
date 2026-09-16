@@ -3,7 +3,7 @@
 //!
 //! [`check_workspace`] is the entry point. It performs, per configured input:
 //!
-//! * syntax checking (SQL schemas, query files, `.axm` models),
+//! * syntax checking (SQL schemas and `.axm` sources),
 //! * reference checks (imports, duplicate models, unknown types, regexes),
 //! * query↔schema consistency (missing tables/columns, bad return types),
 //! * generated-output synchronization (missing / outdated / different files).

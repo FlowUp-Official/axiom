@@ -195,6 +195,19 @@ pub enum TypeRef {
 }
 
 impl TypeRef {
+    /// The canonical PascalCase primitive type names, in declaration order.
+    ///
+    /// The parser matches these exactly (case-sensitive): `string`, `uuid`,
+    /// `timestamp`, ... are ordinary identifiers, not primitives.
+    pub const PRIMITIVES: &'static [&'static str] = &[
+        "String", "Int", "BigInt", "Float", "Boolean", "UUID", "Date", "DateTime", "Json", "Bytes",
+    ];
+
+    /// Whether `name` is a canonical primitive type name.
+    pub fn is_primitive_name(name: &str) -> bool {
+        Self::PRIMITIVES.contains(&name)
+    }
+
     /// The primitive name of this type, if it is a primitive.
     pub fn primitive_name(&self) -> Option<&'static str> {
         match self {
@@ -257,6 +270,12 @@ pub enum Transform {
     Uppercase,
 }
 
+impl Transform {
+    /// The canonical transform call spellings (`.trim()`, `.lowercase()`,
+    /// `.uppercase()`).
+    pub const CALLS: &'static [&'static str] = &["trim", "lowercase", "uppercase"];
+}
+
 /// A strongly typed validation rule. Each variant carries its typed payload so
 /// generators can branch directly; the trailing `Option<String>` is an optional
 /// user-supplied message (e.g. `String.min_length(3, "too short")`).
@@ -293,6 +312,25 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// The canonical validator call spellings, one per variant, in the same
+    /// order as the enum definition.
+    pub const CALLS: &'static [&'static str] = &[
+        "email",
+        "url",
+        "uuid",
+        "ulid",
+        "ipv4",
+        "ipv6",
+        "isodate",
+        "alphanumeric",
+        "nonempty",
+        "min",
+        "max",
+        "min_length",
+        "max_length",
+        "regex",
+    ];
+
     /// The human-readable rule name (the `.call()` spelling).
     pub fn name(&self) -> &'static str {
         match self {
@@ -352,5 +390,54 @@ impl Rule {
             | Rule::NonEmpty(m) => *m = Some(message),
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_rules() -> Vec<Rule> {
+        vec![
+            Rule::Min(0, None),
+            Rule::Max(0, None),
+            Rule::MinLength(0, None),
+            Rule::MaxLength(0, None),
+            Rule::Regex(String::new(), None),
+            Rule::Email(None),
+            Rule::Url(None),
+            Rule::Uuid(None),
+            Rule::Ulid(None),
+            Rule::Ipv4(None),
+            Rule::Ipv6(None),
+            Rule::IsoDate(None),
+            Rule::Alphanumeric(None),
+            Rule::NonEmpty(None),
+        ]
+    }
+
+    #[test]
+    fn rule_calls_are_the_canonical_names() {
+        let mut canonical: Vec<&str> = all_rules().iter().map(Rule::name).collect();
+        let mut calls = Rule::CALLS.to_vec();
+        canonical.sort_unstable();
+        calls.sort_unstable();
+        assert_eq!(canonical, calls);
+    }
+
+    #[test]
+    fn transform_calls_are_the_canonical_names() {
+        assert_eq!(Transform::CALLS, &["trim", "lowercase", "uppercase"]);
+        assert_eq!(Transform::CALLS.len(), 3);
+    }
+
+    #[test]
+    fn primitives_are_case_sensitive_pascal_case() {
+        assert!(TypeRef::is_primitive_name("String"));
+        assert!(TypeRef::is_primitive_name("BigInt"));
+        assert!(TypeRef::is_primitive_name("DateTime"));
+        assert!(!TypeRef::is_primitive_name("string"));
+        assert!(!TypeRef::is_primitive_name("timestamp"));
+        assert!(!TypeRef::is_primitive_name("UUID?"));
     }
 }

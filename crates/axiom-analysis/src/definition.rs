@@ -81,7 +81,7 @@ impl AnalysisDatabase {
                     });
                 }
 
-                // Return-type references in annotations.
+                // Return-type references in `.axm` query declarations.
                 for r in self.return_type_refs(path) {
                     if r.span.start == token.start {
                         if let Some(model) = symbols.model(&r.name) {

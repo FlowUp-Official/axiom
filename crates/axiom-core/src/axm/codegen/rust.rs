@@ -644,7 +644,7 @@ fn emit_field_body(
 }
 
 /// Emit statements that bind `value` from the expression `raw` (a
-/// `&serde_json::Value`) applying the annotation's transforms and rules.
+/// `&serde_json::Value`) applying the annotated type's transforms and rules.
 fn emit_annotated_value(
     out: &mut String,
     registry: &ModelRegistry,

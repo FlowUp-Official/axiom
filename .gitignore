@@ -1,6 +1,7 @@
-/target
-/crates/axiom-cli/target
-/docs/node_modules
-/docs/.vitepress/dist
+/target/
+/crates/axiom-cli/target/
+/docs/node_modules/
+/docs/.vitepress/dist/
+/docs/.vitepress/cache/
 /schemas
 .directory

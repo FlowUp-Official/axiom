@@ -126,7 +126,7 @@ pub struct SqlRef {
     pub label: String,
 }
 
-/// AXM references discovered in a model or query file.
+/// AXM references discovered in an `.axm` file.
 #[derive(Debug, Clone)]
 pub struct AxmRef {
     pub name: String,

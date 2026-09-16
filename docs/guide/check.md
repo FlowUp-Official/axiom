@@ -14,9 +14,14 @@ axiom check --fix        # rewrite out-of-sync generated files, then verify
 | Phase | What is verified | Diagnostic codes |
 | ----- | ---------------- | ---------------- |
 | Schema parse | Every SQL schema input parses with the configured dialect | `check.sql-parse` |
-| `.axm` resolution | Imports resolve, no duplicate names, no import cycles, every query placeholder is declared | `check.model-*`, `check.query-placeholder` |
+| `.axm` resolution | Model/type files parse; imports resolve; no duplicate names; no import cycles; `.regex(...)` patterns compile; every query placeholder is declared | `check.axm-parse`, `check.model-resolution`, `check.duplicate-model`, `check.import-cycle`, `check.regex-invalid`, `check.query-placeholder`, `check.model` |
 | Query ↔ schema | Query bodies parse; referenced tables and columns exist; return types resolve to a table, model, or type alias; the SQL body honors the declared return contract | `check.query-sql`, `check.missing-table`, `check.missing-column`, `check.query-return-type`, `check.query-contract` |
-| Generated output | The output that `axiom generate` would write matches what is on disk | `check.output-outdated` |
+| Generated output | The output that `axiom generate` would write exists and matches what is on disk | `check.output-missing`, `check.output-outdated`, `check.output-unreadable` |
+
+`check.model` is the fallback code for model-file errors that don't map to a
+more specific variant; the specific codes above (`check.axm-parse`,
+`check.model-resolution`, `check.duplicate-model`, `check.import-cycle`,
+`check.regex-invalid`) are used whenever the cause is known.
 
 ## Generated-output synchronization
 

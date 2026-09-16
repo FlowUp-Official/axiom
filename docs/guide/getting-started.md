@@ -46,8 +46,8 @@ including a versioned `$schema` URL so your editor can autocomplete the file
 immediately. Rerunning `axiom init` refuses to overwrite an existing file unless
 you pass `--force`.
 
-From there, drop a `schema.sql` beside it, optionally add `.axm` model and
-query files, and run:
+From there, drop a `schema.sql` beside it, optionally add `.axm` files
+declaring models and queries, and run:
 
 ```sh
 axiom generate

@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_trivial_validate_without_annotations() {
+    fn emits_trivial_validate() {
         let t = table("users", vec![col("email", "VARCHAR(255)", false)]);
         let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
         assert!(out.contains("pub fn validate(&self) -> Result<(), Vec<ValidationError>>"));

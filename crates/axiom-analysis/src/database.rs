@@ -550,7 +550,7 @@ impl AnalysisDatabase {
         refs
     }
 
-    /// Return-type references (`: User`) found in a query file's annotations.
+    /// Return-type references (`: User`) found in `.axm` query declarations.
     pub fn return_type_refs(&mut self, path: &Path) -> Vec<AxmRef> {
         let Some((_hash, text, _index)) = self.file_data(path) else {
             return Vec::new();

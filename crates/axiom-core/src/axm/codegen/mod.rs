@@ -264,8 +264,8 @@ pub(crate) fn effective_fields(
 /// by the semantic verifier, so this only guards against pathological inputs.
 const MAX_ALIAS_DEPTH: usize = 32;
 
-/// Inline type-alias chains into an annotation: the emitted `base` is never a
-/// *pure* alias, and rules/transforms inherited from aliases are merged in
+/// Inline type-alias chains into an annotated type: the emitted `base` is never
+/// a *pure* alias, and rules/transforms inherited from aliases are merged in
 /// (alias rules apply before usage-site rules).
 pub(crate) fn inline_annotated(
     registry: &ModelRegistry,

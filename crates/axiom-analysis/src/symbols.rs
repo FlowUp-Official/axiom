@@ -154,10 +154,10 @@ impl SymbolTable {
     }
 }
 
-const AXM_PRIMITIVES: &[&str] = &["string", "int", "float", "boolean", "json", "timestamp"];
-
+/// Whether `name` is a canonical PascalCase Axiom primitive. The grammar is
+/// case-sensitive: `string`, `int`, `timestamp`, ... are ordinary identifiers.
 pub fn is_axm_primitive(name: &str) -> bool {
-    AXM_PRIMITIVES.iter().any(|p| p.eq_ignore_ascii_case(name))
+    axiom_core::axm::ast::TypeRef::is_primitive_name(name)
 }
 
 /// Build the SQL side of the symbol table from one schema file's owned
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn symbol_table_lookup_is_case_insensitive() {
+    fn sql_table_lookup_follows_postgresql_identifier_semantics() {
         let src = "CREATE TABLE users (id serial)";
         let index = PositionIndex::new_sql(src);
         let tables = build_table_symbols(

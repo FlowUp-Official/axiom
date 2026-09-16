@@ -250,7 +250,8 @@ fn query_change_invalidates_cache_and_regenerates() {
     let second = run_generate(&dir);
     assert!(stdout(&second).contains("Everything up to date (<0.5ms)"));
 
-    // Edit a query file: the BLAKE3 cache must miss and codegen reruns.
+    // Edit a query in the `.axm` source: the BLAKE3 cache must miss and codegen
+    // reruns.
     let queries = dir.join("models/models.axm");
     let contents = std::fs::read_to_string(&queries).unwrap();
     std::fs::write(&queries, contents.replace("LIMIT $1", "LIMIT $1::int")).unwrap();

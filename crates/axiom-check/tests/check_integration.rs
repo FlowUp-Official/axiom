@@ -271,7 +271,7 @@ fn referenced_models_include_field_types_and_imports() {
 
 #[test]
 fn workspace_resolution_requires_existing_files() {
-    let files = vec![file("models/a.axm", "export model A { x: String }")];
+    let files = vec![file("models/a.axm", "model A { x: String }")];
     let workspace = Workspace {
         schema_files: vec![],
         model_files: files,

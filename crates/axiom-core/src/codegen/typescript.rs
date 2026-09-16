@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_no_column_validation_without_annotations() {
+    fn emits_no_column_validation() {
         let out = generate_typescript(&catalog_with_one_table(), &no_queries());
         assert!(out.contains("export function validateUsers(input: Users): ValidationError[] {"));
         assert!(!out.contains("EMAIL_RE"));

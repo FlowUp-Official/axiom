@@ -27,7 +27,7 @@ Generate typed output from the configured inputs.
 | `--db-url`             | Database URL, used when generation needs a live database          |
 | `--env-file <FILE>`    | Load environment variables from a dotenv file before running       |
 
-Parses every configured schema, `.axm` model, and query file, then writes the
+Parses every configured schema source and `.axm` file, then writes the
 configured outputs. When nothing has changed since the last run, generation is
 skipped entirely and the run reports `Everything up to date` in under a
 millisecond.

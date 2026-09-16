@@ -3,12 +3,12 @@ name = "Axiom"
 description = "Axiom language support: SQL schema/query diagnostics, completion, hover, go-to-definition, rename and formatting via the axiom-lsp language server."
 version = "0.6.0"
 schema_version = 1
-authors = ["Axiom contributors"]
+authors = ["ahmed mbarek"]
 repository = "https://github.com/FlowUp-Official/axiom"
 
 [language_servers.axiom]
-name = "Axiom LSP"
-languages = ["Axiom SQL", "Axiom Model"]
+name = "Axiom"
+languages = ["Axiom"]
 
 # The Axiom Model grammar reuses the SQL grammar until a dedicated
 # tree-sitter grammar exists; language server features do not depend on it.
