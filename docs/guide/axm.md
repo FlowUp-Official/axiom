@@ -66,6 +66,10 @@ model User extends select<users> {
   application models.
 - Fields are `name: <type>` with optional `?` (`age?`) for absent values and an
   optional default (`country = "US"`), applied only when the field is missing.
+- Field names may be double-quoted. Quoted and bare names mix freely and are
+  equivalent — `"email"` and `email` name the same field. Quoting is also the
+  only way to spell a field name that is not a valid bare identifier, e.g.
+  `"first-name": String`.
 
 ## Field rules and transformations
 

@@ -138,11 +138,28 @@ fn format_field(field: &FieldDecl) -> String {
 }
 
 fn field_name(field: &FieldDecl) -> String {
-    if field.optional {
-        format!("{}?", field.name)
-    } else {
+    let base = if is_ident(&field.name) {
         field.name.clone()
+    } else {
+        format!("\"{}\"", escape_string(&field.name))
+    };
+    if field.optional {
+        format!("{base}?")
+    } else {
+        base
     }
+}
+
+/// Whether `s` is a valid bare `.axm` identifier (matching the parser's
+/// `ident` rule). Field names that are not — e.g. `"first-name"` — are
+/// formatted with quotes so the output still parses.
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The `.transform().rule()` chain, transformations first (matching codegen's
@@ -418,6 +435,21 @@ query ListUsers($limit: Int) -> User[] {
     #[test]
     fn empty_models_format_to_brace_pair() {
         assert_eq!(fmt("model Empty { }"), "model Empty {\n}\n");
+    }
+
+    #[test]
+    fn quoted_field_names_round_trip() {
+        // Non-identifier names keep their quotes; bare identifiers drop them.
+        let src = r#"model T {
+  "first-name": String
+  "x:y": String
+  id: String
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("\"first-name\": String"), "{out}");
+        assert!(out.contains("\"x:y\": String"), "{out}");
+        assert!(out.contains("id: String"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
     }
 
     #[test]

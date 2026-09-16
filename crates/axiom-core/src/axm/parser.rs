@@ -10,7 +10,7 @@
 //! name           := ident ("as" ident)?
 //! type_decl      := "type" ident "=" annotated_type [";"]
 //! model          := "model" ident ("extends" "select<" db_ident ">")? "{" field* "}"
-//! field          := ident "?"? ":" annotated_type ("=" literal)?
+//! field          := (ident | string) "?"? ":" annotated_type ("=" literal)?
 //! annotated_type := type_ref call*
 //! call           := "." ident "(" args? ")"
 //! query          := "query" ident "(" param* ")" ("->" type_ref)? "{" sql_body "}"
@@ -437,7 +437,7 @@ fn annotated_type(input: &mut &str) -> PResult<AnnotatedType> {
 
 fn field_decl(input: &mut &str) -> PResult<FieldDecl> {
     ws(input)?;
-    let name = ident.parse_next(input)?;
+    let name = alt((ident, string_literal)).parse_next(input)?;
     let optional = opt('?').parse_next(input)?.is_some();
     ws(input)?;
     ':'.parse_next(input)?;
@@ -771,6 +771,50 @@ model User extends select<users> {
                 relation: "public.users".into()
             })
         );
+    }
+
+    #[test]
+    fn parses_quoted_field_names_in_models() {
+        // A quoted field name is ordinary syntax: the quotes are stripped and
+        // the content is the field name. All three spellings mix freely.
+        let file = parse(
+            r#"
+model User extends select<users> {
+  id: UUID,
+  "email": String.email().max_length(320),
+  "username": String.nonempty().trim(),
+  age: Int.min(0).max(150),
+}
+"#,
+        );
+        let fields = &file.models[0].fields;
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "email", "username", "age"]);
+        assert_eq!(fields[1].ty.rules.len(), 2);
+        assert_eq!(fields[3].ty.rules.len(), 2);
+    }
+
+    #[test]
+    fn quoted_field_names_support_optional_and_default() {
+        let file = parse(
+            r#"model User {
+  "age"?: Int
+  "country": String = "US"
+}"#,
+        );
+        let fields = &file.models[0].fields;
+        assert_eq!(fields[0].name, "age");
+        assert!(fields[0].optional);
+        assert_eq!(fields[1].name, "country");
+        assert_eq!(fields[1].default, Some(Literal::String("US".into())));
+    }
+
+    #[test]
+    fn quoted_field_names_may_hold_non_identifiers() {
+        // Quoted names can carry characters that a bare identifier cannot.
+        let file = parse(r#"model T { "first-name": String "x:y": Int }"#);
+        assert_eq!(file.models[0].fields[0].name, "first-name");
+        assert_eq!(file.models[0].fields[1].name, "x:y");
     }
 
     #[test]
