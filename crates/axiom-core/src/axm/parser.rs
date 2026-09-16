@@ -6,9 +6,9 @@
 //! ```text
 //! file           := item*
 //! item           := import | type_decl | model_decl | query_decl
-//! import         := "import" "{" name ("," name)* "}" "from" string ";"
+//! import         := "import" "{" name ("," name)* "}" "from" string [";"]
 //! name           := ident ("as" ident)?
-//! type_decl      := "type" ident "=" annotated_type ";"
+//! type_decl      := "type" ident "=" annotated_type [";"]
 //! model          := "model" ident ("extends" "select<" db_ident ">")? "{" field* "}"
 //! field          := ident "?"? ":" annotated_type ("=" literal)?
 //! annotated_type := type_ref call*
@@ -19,6 +19,11 @@
 //! base           := "String" | "Int" | "BigInt" | "Float" | "Boolean"
 //!                  | "UUID" | "Date" | "DateTime" | "Json" | "Bytes" | ident
 //! ```
+//!
+//! Semicolons are **optional** on `import` and `type` declarations. A `;`
+//! after the closing `}` of a `model` or `query` block is never accepted.
+//! Inside `query {}` blocks, multiple SQL statements are separated by `;`
+//! (the trailing `;` on the last statement is optional).
 //!
 //! Rule and transformation calls are classified into strongly typed AST
 //! variants (`Rule` / `Transform`) at parse time rather than being stored as
@@ -999,6 +1004,113 @@ query CreateUser($id: BigInt, $tags: String[]) -> User {
             TypeRef::Array(Box::new(TypeRef::String))
         );
         assert!(matches!(create.return_type, QueryReturn::Single(_)));
+    }
+
+    #[test]
+    fn semicolons_on_imports_and_types_are_optional() {
+        let file = parse(
+            r#"
+import { User, Email as ContactEmail } from "./users"
+type Email = String.email().max_length(320)
+type NonEmptyString = String.nonempty().trim()
+import { Address } from "./geo";
+type UserId = BigInt;
+"#,
+        );
+        assert_eq!(file.imports.len(), 2);
+        assert_eq!(file.imports[0].source, "./users");
+        assert_eq!(file.imports[1].source, "./geo");
+        assert_eq!(file.types.len(), 3);
+        assert_eq!(file.types[0].name, "Email");
+        assert_eq!(file.types[1].name, "NonEmptyString");
+        assert_eq!(file.types[2].name, "UserId");
+    }
+
+    #[test]
+    fn semicolons_after_closing_braces_are_rejected() {
+        let err = parse_err(
+            r#"model User extends select<users> {
+    id: UUID,
+    email: String.email().max_length(320),
+    username: String.nonempty().trim(),
+    age: Int.min(0).max(150),
+};"#,
+        );
+        assert!(err.contains(';'), "{err}");
+
+        let err = parse_err(
+            r#"query ListUsers($limit: Int) -> User[] {
+    SELECT id, email FROM users ORDER BY id LIMIT $limit
+};"#,
+        );
+        assert!(err.contains(';'), "{err}");
+    }
+
+    #[test]
+    fn multiple_sql_statements_are_supported_in_query_body() {
+        let file = parse(
+            r#"
+query GetUser($id: UUID) -> User? {
+    SELECT id, email
+    FROM users
+    WHERE id = $id;
+    DELETE FROM users WHERE id = $id;
+}
+"#,
+        );
+        let q = &file.queries[0];
+        assert_eq!(q.params.len(), 1);
+        assert_eq!(
+            q.sql,
+            "SELECT id, email\n    FROM users\n    WHERE id = $id;\n    DELETE FROM users WHERE id = $id;"
+        );
+    }
+
+    #[test]
+    fn single_query_statement_makes_trailing_semicolon_optional() {
+        let file = parse(
+            r#"query ListUsers($limit: Int) -> User[] {
+    SELECT id, email FROM users ORDER BY id LIMIT $limit
+}"#,
+        );
+        assert!(file.queries[0].sql.contains("LIMIT $limit"));
+
+        let file = parse("query Q() { SELECT 1; }");
+        assert_eq!(file.queries[0].sql, "SELECT 1;");
+    }
+
+    #[test]
+    fn parses_full_user_spec_example() {
+        let file = parse(
+            r#"
+import { User, Email as ContactEmail } from "./users"
+type Email = String.email().max_length(320)
+type NonEmptyString = String.nonempty().trim()
+model User extends select<users> {
+    id: UUID,
+    email: String.email().max_length(320),
+    username: String.nonempty().trim(),
+    age: Int.min(0).max(150),
+}
+query GetUser($id: UUID) -> User? {
+    SELECT id, email
+    FROM users
+    WHERE id = $id;
+    DELETE FROM users WHERE id = $id;
+}
+query ListUsers($limit: Int) -> User[] {
+    SELECT id, email FROM users ORDER BY id LIMIT $limit
+}
+"#,
+        );
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.types.len(), 2);
+        assert_eq!(file.models.len(), 1);
+        assert_eq!(file.queries.len(), 2);
+        // Multi-statement query has two semicolons.
+        assert_eq!(file.queries[0].sql.matches(';').count(), 2);
+        // Single-statement query has none.
+        assert_eq!(file.queries[1].sql.matches(';').count(), 0);
     }
 
     #[test]

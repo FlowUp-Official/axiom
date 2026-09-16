@@ -18,6 +18,12 @@ Share models and types across files without polluting namespaces:
 import { User, Email as ContactEmail } from "./users"
 ```
 
+A trailing `;` is optional on import statements:
+
+```axm
+import { User } from "./users";
+```
+
 The `source` is a relative `.axm` file reference. Imported names must exist in
 the target file, and a bare import never collides with a locally declared name.
 Import cycles are reported by the resolver.
@@ -29,6 +35,12 @@ Reusable, named refinements of a primitive or existing type:
 ```axm
 type Email = String.email().max_length(320)
 type NonEmptyString = String.nonempty().trim()
+```
+
+As with imports, a trailing `;` is optional on type declarations:
+
+```axm
+type Email = String.email().max_length(320);
 ```
 
 ## Models
@@ -105,6 +117,25 @@ query GetUser($id: UUID) -> User? {
   SELECT id, email FROM users WHERE id = $id
 }
 ```
+
+A `query` block may contain multiple SQL statements separated by `;`:
+
+```axm
+query GetUser($id: UUID) -> User? {
+  SELECT id, email
+  FROM users
+  WHERE id = $id;
+  DELETE FROM users WHERE id = $id
+}
+```
+
+The trailing `;` on the last statement is optional. When there are multiple
+statements, the return contract applies to the last one (the result set a
+caller receives). Semicolons inside the SQL body (in string literals, comments,
+etc.) are preserved verbatim.
+
+A `;` is **not** allowed after the closing `}` of a `query` (or `model`)
+block.
 
 See [Query Functions](/guide/query-functions) for the full contract syntax,
 placeholder rules, and verification.

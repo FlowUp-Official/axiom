@@ -38,6 +38,9 @@ query <Name>($<param>: <Type>, ...) [-> <Return>] {
   marks the query as an execution**: no rows are returned, so `-> Exec` never
   needs to be spelled out.
 - **`<SQL body>`** — ordinary SQL, stored verbatim and passed to the driver.
+  Multiple statements can be separated by `;` (the trailing `;` on the last
+  statement is optional). Semicolons inside strings, comments, and
+  dollar-quoted blocks are not treated as separators.
 
 ### Return contracts
 
@@ -74,6 +77,28 @@ Parameters map to the natural type in each generated language (`String`, `Int`,
 `UUID`, ...), and can also reference a model or type alias. They become typed
 struct fields / interfaces validated before the query runs.
 
+### Multi-statement bodies
+
+A single `query` block can contain multiple SQL statements separated by `;`.
+This is useful when a single logical operation spans several statements:
+
+```axm
+query GetUser($id: UUID) -> User? {
+  SELECT id, email FROM users WHERE id = $id;
+  DELETE FROM users WHERE id = $id
+}
+```
+
+Rules:
+
+- Each statement is separated by `;` (a bare semicolon, not inside a string
+  or comment).
+- The trailing `;` on the last statement is **optional**.
+- The return contract (the `->` type) applies to the **last** statement's
+  result set — the rows a caller receives.
+- Semicolons inside single/double-quoted strings, dollar-quoted blocks, and
+  SQL comments are preserved verbatim and do **not** act as separators.
+
 ## Verification
 
 `axiom check` validates every declared query against the schema catalog:
@@ -88,7 +113,8 @@ struct fields / interfaces validated before the query runs.
   alias (`check.query-return-type`).
 - **Return contract** — a row-returning declaration needs a statement that
   produces rows (and vice versa), and the projected columns are fields of the
-  declared row type (`check.query-contract`).
+  declared row type (`check.query-contract`). For multi-statement bodies the
+  contract is evaluated against the **last** statement.
 
 Queries are cross-checked against the rest of the `.axm` file (every
 placeholder name unique, duplicate query names rejected, return types linkable)

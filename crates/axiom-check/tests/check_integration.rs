@@ -199,6 +199,33 @@ fn projected_column_must_be_a_return_field() {
 }
 
 #[test]
+fn multi_statement_contract_checks_the_last_statement() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+    )];
+    // Last statement is a row-returning SELECT; no contract error.
+    let models = vec![file(
+        "models/queries.axm",
+        "model User { id: Int, email: String }\n\nquery list_users() -> User {\n  DELETE FROM users;\n  SELECT id, email FROM users\n}",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&models);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    // Exec contract with a trailing SELECT: flagged as wrong contract.
+    let models = vec![file(
+        "models/queries.axm",
+        "query reset_users() {\n  DELETE FROM users;\n  SELECT id FROM users\n}",
+    )];
+    let registry = registry_from(&models);
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    assert!(codes(&diags).contains(&"check.query-contract"), "{diags:?}");
+}
+
+#[test]
 fn model_duplicates_are_reported() {
     let files = vec![
         file("models/a.axm", "model User { a: String }"),

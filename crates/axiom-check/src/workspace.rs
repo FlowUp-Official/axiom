@@ -324,7 +324,9 @@ fn check_return_contract(
     let Ok(statements) = Parser::parse_sql(&GenericDialect {}, &query.sql) else {
         return Vec::new(); // body parse errors are already reported
     };
-    let Some(statement) = statements.into_iter().next() else {
+    // For multi-statement query bodies the return contract describes the rows
+    // a caller receives, which is the result of the LAST statement.
+    let Some(statement) = statements.into_iter().next_back() else {
         return Vec::new();
     };
 
