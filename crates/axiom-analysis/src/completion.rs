@@ -1,4 +1,4 @@
-//! Text completion for SQL and `.axm` sources.
+//! Text completion for `.axm` sources.
 
 use std::path::Path;
 

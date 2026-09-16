@@ -8,15 +8,23 @@ so what you see in the editor is exactly what `axiom check` reports.
 Supported features:
 
 - **Diagnostics** — parse errors, unresolved tables/columns, missing models, and
-  every rule the shared checker reports, updated as you type.
-- **Go to definition** — jump from a table/column use in a query to its
-  `CREATE TABLE` declaration, or from a model type to its declaration.
-- **Hover** — column types, nullability, primary keys, and model fields.
-- **Completion** — tables after `FROM`/`JOIN`/`UPDATE`, columns after
-  `alias.`, model types and `.axm` validator chains.
-- **Rename** — rename a table, column, or model across every file that
+  every rule the shared checker reports for `.axm` files, updated as you type.
+- **Go to definition** — jump from a model type to its declaration, or from a
+  table reference inside a `.axm` query body to its `CREATE TABLE`.
+- **Hover** — model types, fields, and query return types.
+- **Completion** — model types at type position, fields after `<model>.`,
+  and `.axm` validator/transform chains.
+- **Rename** — rename a model or field across every `.axm` file that
   references it.
 - **Formatting** — format a buffer with the same engine as `axiom format`.
+
+> **Scope.** `axiom-lsp` is an editor for `.axm` files. Standalone `.sql`
+> editing — schema navigation, SQL completion, SQL formatting — is deliberately
+> left to dedicated SQL language servers. Axiom still parses and analyzes the
+> SQL sources configured in `axiom.json` (schema and query files) because that
+> analysis is required for `.axm` compiler checks, query validation, and code
+> generation; it just does not expose it as a general-purpose SQL editor
+> service.
 
 ## Installation
 
@@ -32,10 +40,9 @@ editor at the full path.
 ## Configuration
 
 The server discovers `axiom.json` from the workspace root on startup and loads
-every configured source (`schema`, `axm`), plus any SQL file you open in the
-editor as an ad-hoc query, so cross-file references resolve without opening
-each file. When no `axiom.json` is present the server still reports single-file
-parse errors for open buffers.
+every configured source (`schema`, `axm`) for cross-file resolution. When no
+`axiom.json` is present the server still reports single-file parse errors for
+open `.axm` buffers.
 
 The BLAKE3 `ToolCache` is reused: diagnostics are cached by content hash and
 only the file that changed is re-analyzed, keeping keystroke latency in the
@@ -50,15 +57,17 @@ An extension lives at `extensions/axiom/`. To use it while developing:
 2. In Zed, run `zed: install dev extension` and select the `extensions/axiom`
    directory.
 
-The extension maps `.sql` files to **Axiom SQL** and `.axm` files to
-**Axiom Model**, both served by `axiom-lsp`. It expects the binary on the
-worktree `$PATH` (extensions may not bundle language servers).
+The extension maps `.axm` files to **Axiom Model** and attaches `axiom-lsp`
+to that language only. `.sql` files ship with a local tree-sitter grammar for
+highlighting, but they are *not* served by `axiom-lsp` — configure a dedicated
+SQL language server for `.sql` editing. The binary is expected on the worktree
+`$PATH` (extensions may not bundle language servers).
 
 ## Standalone (any LSP client)
 
 Because `axiom-lsp` speaks plain LSP over stdio, it works with any client that
-supports LSP: configure it as a custom language server for `.sql` and `.axm`
-files with the command `axiom-lsp`.
+supports LSP: configure it as a custom language server for `.axm` files with the
+command `axiom-lsp`.
 
 ## Incremental performance
 
