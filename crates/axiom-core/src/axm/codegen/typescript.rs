@@ -51,6 +51,10 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
         "// ---------------------------------------------------------------------------\n\n",
     );
 
+    if !registry.queries.is_empty() {
+        out.push_str("import type { Sql } from 'postgres';\n\n");
+    }
+
     emit_helpers(&mut out, &uses);
 
     for resolved in &registry.types {
@@ -208,8 +212,8 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         emit_regex_check_helper(out, "checkUlid", ULID_RE, "", "must be a valid ULID");
     }
     if uses.ipv4 {
-        out.push_str("function checkIpv4(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str("  if (!IPV4.test(value) || value.split('.').some((oct) => Number(oct) > 255)) return fail(errors, path, 'must be a valid IPv4 address');\n");
+        out.push_str("function checkIpv4(value: string, path: Seg[], errors: ValidationError[], message?: string): boolean {\n");
+        out.push_str("  if (!IPV4.test(value) || value.split('.').some((oct) => Number(oct) > 255)) return fail(errors, path, message ?? 'must be a valid IPv4 address');\n");
         out.push_str("  return true;\n");
         out.push_str("}\n\n");
         let _ = writeln!(out, "const IPV4 = {};", util::ts_regex_literal(IPV4_RE, ""));
@@ -242,8 +246,8 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         );
     }
     if uses.nonempty {
-        out.push_str("function checkNonEmpty(value: string, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str("  if (value.length === 0) return fail(errors, path, 'must not be empty');\n");
+        out.push_str("function checkNonEmpty(value: string, path: Seg[], errors: ValidationError[], message?: string): boolean {\n");
+        out.push_str("  if (value.length === 0) return fail(errors, path, message ?? 'must not be empty');\n");
         out.push_str("  return true;\n");
         out.push_str("}\n\n");
     }
@@ -270,8 +274,8 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
         emit_bounded_helper(out, "checkMax", "value > bound", "must be <= ");
     }
     if uses.regex {
-        out.push_str("function checkRegex(value: string, pattern: RegExp, path: Seg[], errors: ValidationError[]): boolean {\n");
-        out.push_str("  if (!pattern.test(value)) return fail(errors, path, 'must match the expected pattern');\n");
+        out.push_str("function checkRegex(value: string, pattern: RegExp, path: Seg[], errors: ValidationError[], message?: string): boolean {\n");
+        out.push_str("  if (!pattern.test(value)) return fail(errors, path, message ?? 'must match the expected pattern');\n");
         out.push_str("  return true;\n");
         out.push_str("}\n\n");
     }
@@ -333,11 +337,11 @@ fn emit_regex_check_helper(
 ) {
     let _ = writeln!(
         out,
-        "function {name}(value: string, path: Seg[], errors: ValidationError[]): boolean {{"
+        "function {name}(value: string, path: Seg[], errors: ValidationError[], message?: string): boolean {{"
     );
     let _ = writeln!(
         out,
-        "  if (!{}.test(value)) return fail(errors, path, '{message}');",
+        "  if (!{}.test(value)) return fail(errors, path, message ?? '{message}');",
         util::ts_regex_literal(pattern, flags)
     );
     let _ = writeln!(out, "  return true;");
@@ -347,11 +351,11 @@ fn emit_regex_check_helper(
 fn emit_bounded_helper(out: &mut String, name: &str, condition: &str, prefix: &str) {
     let _ = writeln!(
         out,
-        "function {name}(value: number, bound: number, path: Seg[], errors: ValidationError[]): boolean {{"
+        "function {name}(value: number, bound: number, path: Seg[], errors: ValidationError[], message?: string): boolean {{"
     );
     let _ = writeln!(
         out,
-        "  if ({condition}) return fail(errors, path, `{prefix}${{bound}}`);"
+        "  if ({condition}) return fail(errors, path, message ?? `{prefix}${{bound}}`);"
     );
     let _ = writeln!(out, "  return true;");
     let _ = writeln!(out, "}}\n");
@@ -654,22 +658,28 @@ fn ts_transform_op(transform: &Transform) -> &'static str {
 }
 
 fn ts_rule_call(rule: &Rule, value: &str) -> String {
+    let message = match rule.message() {
+        Some(m) => format!(", \"{}\"", util::escape_ts(m)),
+        None => String::new(),
+    };
     match rule {
-        Rule::Email(_) => format!("checkEmail({value}, fieldPath, errors)"),
-        Rule::Url(_) => format!("checkUrl({value}, fieldPath, errors)"),
-        Rule::Uuid(_) => format!("checkUuid({value}, fieldPath, errors)"),
-        Rule::Ulid(_) => format!("checkUlid({value}, fieldPath, errors)"),
-        Rule::Ipv4(_) => format!("checkIpv4({value}, fieldPath, errors)"),
-        Rule::Ipv6(_) => format!("checkIpv6({value}, fieldPath, errors)"),
-        Rule::IsoDate(_) => format!("checkIsoDate({value}, fieldPath, errors)"),
-        Rule::Alphanumeric(_) => format!("checkAlphanumeric({value}, fieldPath, errors)"),
-        Rule::NonEmpty(_) => format!("checkNonEmpty({value}, fieldPath, errors)"),
-        Rule::Min(n, _) => format!("checkMin({value}, {n}, fieldPath, errors)"),
-        Rule::Max(n, _) => format!("checkMax({value}, {n}, fieldPath, errors)"),
-        Rule::MinLength(n, _) => format!("checkMinLen({value}, {n}, fieldPath, errors)"),
-        Rule::MaxLength(n, _) => format!("checkMaxLen({value}, {n}, fieldPath, errors)"),
+        Rule::Email(_) => format!("checkEmail({value}, fieldPath, errors{message})"),
+        Rule::Url(_) => format!("checkUrl({value}, fieldPath, errors{message})"),
+        Rule::Uuid(_) => format!("checkUuid({value}, fieldPath, errors{message})"),
+        Rule::Ulid(_) => format!("checkUlid({value}, fieldPath, errors{message})"),
+        Rule::Ipv4(_) => format!("checkIpv4({value}, fieldPath, errors{message})"),
+        Rule::Ipv6(_) => format!("checkIpv6({value}, fieldPath, errors{message})"),
+        Rule::IsoDate(_) => format!("checkIsoDate({value}, fieldPath, errors{message})"),
+        Rule::Alphanumeric(_) => {
+            format!("checkAlphanumeric({value}, fieldPath, errors{message})")
+        }
+        Rule::NonEmpty(_) => format!("checkNonEmpty({value}, fieldPath, errors{message})"),
+        Rule::Min(n, _) => format!("checkMin({value}, {n}, fieldPath, errors{message})"),
+        Rule::Max(n, _) => format!("checkMax({value}, {n}, fieldPath, errors{message})"),
+        Rule::MinLength(n, _) => format!("checkMinLen({value}, {n}, fieldPath, errors{message})"),
+        Rule::MaxLength(n, _) => format!("checkMaxLen({value}, {n}, fieldPath, errors{message})"),
         Rule::Regex(pattern, _) => format!(
-            "checkRegex({value}, {}, fieldPath, errors)",
+            "checkRegex({value}, {}, fieldPath, errors{message})",
             util::ts_regex_literal(pattern, "")
         ),
     }
@@ -685,69 +695,57 @@ fn ts_literal(literal: &Literal) -> String {
 }
 
 /// Rewrite `$1`, `$name`, and `$input.field` placeholders into template
-/// interpolations of `params.`.
+/// interpolations of `params.`. Markers are only substituted outside string
+/// literals, quoted identifiers, and comments (see
+/// [`scan_dotted_placeholders`]); literals keep their `$`.
 fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
-    let escaped = util::escape_ts_template(sql);
-    let mut out = String::new();
-    let mut rest = escaped.as_str();
-    while let Some(pos) = rest.find('$') {
-        let after = &rest[pos + 1..];
-        let token: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if token.is_empty() {
-            out.push_str(&rest[..=pos]);
-            rest = after;
-            continue;
+    let hits = crate::query::scan_dotted_placeholders(sql);
+    let mut out = String::with_capacity(sql.len());
+    let mut last = 0usize;
+    let emit_escaped = |out: &mut String, s: &str| {
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '`' => out.push_str("\\`"),
+                '\\' => out.push_str("\\\\"),
+                '$' if it.peek() == Some(&'{') => out.push_str("\\$"),
+                c => out.push(c),
+            }
         }
-        let path = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
-            .collect::<String>();
-        let fields: Vec<&str> = path.split('.').collect();
+    };
 
-        let binding: Option<String> = if fields.len() > 1 && fields[0] == "input" {
-            if params.iter().any(|p| p.name == "input") {
+    for (start, len, token) in hits {
+        emit_escaped(&mut out, &sql[last..start]);
+        last = start + len;
+        let fields: Vec<&str> = token.split('.').collect();
+
+        if fields.len() > 1 && fields[0] == "input" {
+            let bound = params.iter().any(|p| p.name == "input");
+            if bound {
                 let sub = fields[1..].join(".");
-                Some(format!("params.input.{}", util::ts_field_name(&sub)))
-            } else {
-                None
+                let _ = write!(out, "${{params.input.{}}}", util::ts_field_name(&sub));
+                continue;
             }
         } else if token.bytes().all(|b| b.is_ascii_digit()) {
             let n: usize = token.parse().unwrap_or(0);
             if n >= 1 && n <= params.len() {
-                Some(format!(
-                    "params.{}",
+                let _ = write!(
+                    out,
+                    "${{params.{}}}",
                     util::ts_field_name(&params[n - 1].name)
-                ))
-            } else {
-                None
+                );
+                continue;
             }
-        } else {
-            params
-                .iter()
-                .find(|p| p.name == token)
-                .map(|p| format!("params.{}", util::ts_field_name(&p.name)))
-        };
-
-        match binding {
-            Some(binding) => {
-                let _ = write!(out, "${{{binding}}}");
-                if fields.len() > 1 && fields[0] == "input" {
-                    rest = &after[path.len()..];
-                } else {
-                    rest = &after[token.len()..];
-                }
-            }
-            None => {
-                out.push('$');
-                out.push_str(&token);
-                rest = &after[token.len()..];
-            }
+        } else if fields.len() == 1
+            && let Some(param) = params.iter().find(|p| p.name == token)
+        {
+            let _ = write!(out, "${{params.{}}}", util::ts_field_name(&param.name));
+            continue;
         }
+
+        emit_escaped(&mut out, &sql[start..start + len]);
     }
-    out.push_str(rest);
+    emit_escaped(&mut out, &sql[last..]);
     out
 }
 
@@ -1032,5 +1030,34 @@ query CreateUser($input: CreateUserInput) {
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(out.contains("${params.input.email}"));
         assert!(out.contains("checkEmail(value, fieldPath, errors);"));
+    }
+
+    #[test]
+    fn custom_rule_messages_flow_into_check_calls() {
+        let src = "model User {\n  email: String .email(\"invalid email\")\n  age: Int .min(18, \"adults only\")\n}\n";
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("checkEmail(value, fieldPath, errors, \"invalid email\");"));
+        assert!(out.contains("checkMin(value, 18, fieldPath, errors, \"adults only\");"));
+        assert!(out.contains("function checkEmail(value: string, path: Seg[], errors: ValidationError[], message?: string): boolean"));
+        assert!(
+            out.contains("return fail(errors, path, message ?? 'must be a valid email address');")
+        );
+    }
+
+    #[test]
+    fn bind_sql_skips_placeholders_inside_literals() {
+        let params = vec![crate::axm::ast::ParamDecl {
+            name: "email".into(),
+            ty: TypeRef::String,
+        }];
+        let sql = "SELECT '<cost is $5>', email\n".to_string()
+            + "FROM users -- $email is a comment\n"
+            + "WHERE status = '$$draft$$' AND email = $email";
+        let out = bind_sql(&sql, &params);
+        assert!(out.contains("<cost is $5>"));
+        assert!(out.contains("-- $email is a comment"));
+        assert!(out.contains("$$draft$$"));
+        assert!(out.contains("${params.email}"));
+        assert_eq!(out.matches("${params.email}").count(), 1);
     }
 }

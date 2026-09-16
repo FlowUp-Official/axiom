@@ -622,6 +622,14 @@ fn emit_field_body(
             );
             let _ = writeln!(out, "{pad}    path.pop();");
             let _ = writeln!(out, "{pad}}}");
+            for rule in &field.annotated.rules {
+                let msg = util::escape_rust(&rule_message(rule));
+                let condition = rust_rule_condition(rule, "items", &field.annotated.base);
+                let _ = writeln!(
+                    out,
+                    "{pad}if {condition} {{ push_error(errors, path, \"{msg}\"); }}"
+                );
+            }
             let assign = if optional {
                 "Some(items)".to_string()
             } else {
@@ -692,6 +700,17 @@ fn rust_rule_condition(rule: &Rule, value: &str, ty: &TypeRef) -> String {
         }
     };
     match rule {
+        // Collection-level rules over arrays: `NonEmpty` / `MinLength` /
+        // `MaxLength` inspect the built vector.
+        Rule::NonEmpty(_) if matches!(ty, TypeRef::Array(_)) => {
+            format!("{value}.is_empty()")
+        }
+        Rule::MinLength(n, _) if matches!(ty, TypeRef::Array(_)) => {
+            format!("{value}.len() < {n}")
+        }
+        Rule::MaxLength(n, _) if matches!(ty, TypeRef::Array(_)) => {
+            format!("{value}.len() > {n}")
+        }
         Rule::Email(_) => format!("!check_email(&{value})"),
         Rule::Url(_) => format!("!check_url(&{value})"),
         Rule::Uuid(_) => format!("!check_uuid(&{value})"),
@@ -863,7 +882,8 @@ fn emit_query(
 
     let ret_ty = match &query.return_type {
         QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, ty_ref)),
-        QueryReturn::Single(ty_ref) | QueryReturn::Optional(ty_ref) => {
+        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, ty_ref),
+        QueryReturn::Optional(ty_ref) => {
             format!("Option<{}>", rust_named_type(registry, path, ty_ref))
         }
         QueryReturn::Exec => "()".to_string(),
@@ -910,7 +930,7 @@ fn emit_query(
                 out,
                 "    let row = rows.into_iter().next().ok_or_else(|| format!(\"{pascal} returned no rows\"))?;"
             );
-            let _ = writeln!(out, "    Ok(Some(row))");
+            let _ = writeln!(out, "    Ok(row)");
         }
         QueryReturn::Exec => {
             let _ = writeln!(out, "    sqlx::query(");
@@ -958,75 +978,54 @@ fn emit_param_validation(
 }
 
 /// Rewrite SQL placeholders into numbered `$n` placeholders (in bind order) and
-/// produce the matching bind expressions.
+/// produce the matching bind expressions. Markers are only substituted outside
+/// string literals, quoted identifiers, and comments (see
+/// [`scan_dotted_placeholders`]).
 fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<String>) {
-    let mut out = String::new();
+    let hits = crate::query::scan_dotted_placeholders(sql);
+    let mut out = String::with_capacity(sql.len());
     let mut binds = Vec::new();
     let mut next = 1usize;
-    let mut rest = sql;
-    while let Some(pos) = rest.find('$') {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + 1..];
-        let token: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if token.is_empty() {
-            out.push('$');
-            rest = after;
-            continue;
-        }
-        let path_token: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
-            .collect();
-        let fields: Vec<&str> = path_token.split('.').collect();
+    let mut last = 0usize;
+    for (start, len, token) in hits {
+        out.push_str(&sql[last..start]);
+        last = start + len;
+        let fields: Vec<&str> = token.split('.').collect();
 
-        if token.bytes().all(|b| b.is_ascii_digit()) {
-            let n: usize = token.parse().unwrap_or(1).max(1);
-            out.push('$');
-            out.push_str(&n.to_string());
-            if let Some(param) = params.get(n - 1) {
-                binds.push(format!("params.{}", util::rust_field_name(&param.name)));
-            }
-            next = next.max(n + 1);
-            rest = &after[token.len()..];
-            continue;
-        }
-
-        let bind = if fields.len() > 1 && fields[0] == "input" {
-            if let Some(input) = params.iter().find(|p| p.name == "input") {
+        let mut bound = || -> Option<String> {
+            if fields.len() > 1 && fields[0] == "input" {
+                let input = params.iter().find(|p| p.name == "input")?;
                 let sub = fields[1..].join(".");
-                Some(format!(
-                    "params.{}.{}",
-                    util::rust_field_name(&input.name),
-                    util::rust_field_name(&sub)
-                ))
-            } else {
-                None
+                let mut field = util::rust_field_name(&input.name);
+                field.push('.');
+                field.push_str(&util::rust_field_name(&sub));
+                return Some(format!("params.{field}"));
             }
-        } else {
-            params
-                .iter()
-                .find(|p| p.name == token)
-                .map(|p| format!("params.{}", util::rust_field_name(&p.name)))
+            if token.bytes().all(|b| b.is_ascii_digit()) {
+                let n: usize = token.parse().unwrap_or(1).max(1);
+                let param = params.get(n - 1)?;
+                next = next.max(n + 1);
+                return Some(format!("params.{}", util::rust_field_name(&param.name)));
+            }
+            if fields.len() == 1 {
+                let param = params.iter().find(|p| p.name == token)?;
+                return Some(format!("params.{}", util::rust_field_name(&param.name)));
+            }
+            None
         };
 
-        match bind {
+        match bound() {
             Some(bind) => {
                 let _ = write!(out, "${next}");
                 binds.push(bind);
                 next += 1;
-                rest = &after[path_token.len()..];
             }
             None => {
-                out.push('$');
-                out.push_str(&token);
-                rest = &after[token.len()..];
+                out.push_str(&sql[start..start + len]);
             }
         }
     }
-    out.push_str(rest);
+    out.push_str(&sql[last..]);
     (out, binds)
 }
 
@@ -1216,5 +1215,63 @@ query CreateUser($input: CreateUserInput) {
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(out.contains(".bind(params.input.email)") || out.contains("params.input.email,"));
         assert!(out.contains("VALUES ($1)"));
+    }
+
+    #[test]
+    fn driver_sql_skips_placeholders_inside_literals() {
+        use crate::axm::ast::ParamDecl;
+        let params = vec![ParamDecl {
+            name: "email".into(),
+            ty: TypeRef::String,
+        }];
+        let sql = "SELECT '<cost is $5>', email\n".to_string()
+            + "FROM users -- $email is a comment\n"
+            + "WHERE status = '$$draft$$' AND email = $email";
+        let (out, binds) = driver_sql(&sql, &params);
+        assert!(out.contains("<cost is $5>"));
+        assert!(out.contains("-- $email is a comment"));
+        assert!(out.contains("$$draft$$"));
+        assert!(out.contains("email = $1"));
+        assert_eq!(binds, vec!["params.email"]);
+        assert_eq!(out.matches("$1").count(), 1);
+    }
+
+    #[test]
+    fn uuid_only_model_emits_string_coercion_helper() {
+        let src = "model User {\n  id: UUID\n}\n";
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("fn coerce_string("));
+        assert!(out.contains("coerce_string("));
+        assert!(out.contains("id: String"));
+    }
+
+    #[test]
+    fn uuid_only_model_emits_string_coercion_helper_ts() {
+        let src = "model User {\n  id: UUID\n}\n";
+        let out = crate::axm::codegen::generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("function coerceString("));
+    }
+
+    #[test]
+    fn array_fields_emit_collection_rules() {
+        let src = "model User {\n  history: String[] .nonempty(\"need items\") .min_length(1) .max_length(3)\n}\n";
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("if items.is_empty() { push_error(errors, path, \"need items\"); }"));
+        assert!(out.contains("if items.len() < 1 {"));
+        assert!(out.contains("if items.len() > 3 {"));
+    }
+
+    #[test]
+    fn single_query_returns_bare_row_and_errors_on_empty() {
+        let src = r#"
+model User { id: UUID }
+query GetUser($id: UUID) -> User {
+  SELECT * FROM users WHERE id = $id;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("-> Result<User, Box<dyn std::error::Error>>"));
+        assert!(out.contains("GetUser returned no rows"));
+        assert!(out.contains("Ok(row)"));
     }
 }

@@ -156,6 +156,29 @@ impl AnalysisDatabase {
                         parent: None,
                     });
                 }
+                // Return-type references in `query` declarations.
+                for r in self.return_type_refs(path) {
+                    if r.span.start == token.start {
+                        if let Some(model) = symbols.model(&r.name) {
+                            return Some(SymbolRef {
+                                kind: SymbolKind::Model,
+                                name: model.name.clone(),
+                                file: model.file.clone(),
+                                span: model.span,
+                                parent: None,
+                            });
+                        }
+                        if let Some(table) = symbols.table(&r.name) {
+                            return Some(SymbolRef {
+                                kind: SymbolKind::Table,
+                                name: table.name.clone(),
+                                file: table.file.clone(),
+                                span: table.span,
+                                parent: None,
+                            });
+                        }
+                    }
+                }
             }
         }
         None

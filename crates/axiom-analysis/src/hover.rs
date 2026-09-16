@@ -87,6 +87,17 @@ impl AnalysisDatabase {
         {
             return Some(model_hover(model, span));
         }
+        // Return-type reference in a `query` declaration.
+        for r in self.return_type_refs(path) {
+            if r.span.start == token.start {
+                if let Some(model) = symbols.model(&r.name) {
+                    return Some(model_hover(model, span));
+                }
+                if let Some(table) = symbols.table(&r.name) {
+                    return Some(table_hover(table, span));
+                }
+            }
+        }
 
         // Field name: pull rules from the parsed AST.
         let axm = self.axm_file(path)?;

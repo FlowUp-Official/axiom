@@ -6,7 +6,8 @@ use axiom_core::cache::ToolCache;
 
 use axiom_check::workspace::aggregate_hash;
 use axiom_check::{
-    Workspace, check_models, check_queries, check_schemas, collect_referenced_models,
+    Workspace, check_model_sources, check_models, check_queries, check_schemas,
+    collect_referenced_models,
 };
 
 fn file(path: &str, src: &str) -> (PathBuf, String) {
@@ -277,4 +278,104 @@ fn workspace_resolution_requires_existing_files() {
         model_files: files,
     };
     assert_eq!(workspace.model_files.len(), 1);
+}
+
+#[test]
+fn model_source_must_match_a_table() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE public.users (id INT PRIMARY KEY, email TEXT NOT NULL);",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&[file(
+        "models/user.axm",
+        "model User extends select<users> {\n  email: String .email()\n}\n",
+    )]);
+    let diags = check_model_sources(
+        &catalog,
+        &registry,
+        &[file(
+            "models/user.axm",
+            "model User extends select<users> {\n  email: String .email()\n}\n",
+        )],
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn model_source_rejects_missing_or_miscased_relation() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE public.users (id INT PRIMARY KEY, email TEXT NOT NULL);",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    for relation in ["Users", "orders", "public.none"] {
+        let src = format!("model User extends select<{relation}> {{\n  email: String\n}}\n");
+        let files = &[file("models/user.axm", &src)];
+        let registry = registry_from(files);
+        let diags = check_model_sources(&catalog, &registry, files);
+        assert!(
+            codes(&diags).contains(&"check.model-source"),
+            "{relation} => {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn rule_base_mismatches_are_reported() {
+    let files = vec![file(
+        "models/user.axm",
+        "model User {\n  id: Int .email()\n  name: String .min(3)\n  tags: String[] .email()\n  count: Int .trim()\n}\n",
+    )];
+    let (_, diags) = check_models(None, &files);
+    let codes = codes(&diags);
+    assert_eq!(
+        codes.iter().filter(|c| **c == "check.rule-base").count(),
+        4,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn valid_rule_base_combinations_pass() {
+    let files = vec![file(
+        "models/user.axm",
+        "model User {\n  id: Int .min(1) .max(99)\n  email: String .email() .min_length(3)\n  tags: String[] .nonempty()\n  alias: UUID\n}\n",
+    )];
+    let (registry, diags) = check_models(None, &files);
+    assert!(registry.is_some());
+    assert!(codes(&diags).is_empty(), "{diags:?}");
+}
+
+#[test]
+fn dotted_model_placeholders_check_model_fields() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT NOT NULL);",
+    )];
+    let models = vec![file(
+        "models/queries.axm",
+        "model User {\n  email: String\n}\nquery find_by_email($input: User) -> User? {\n  SELECT * FROM users WHERE email = $input.email\n}\n",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&models);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    assert!(diags.is_empty(), "{diags:?}");
+    let bad = vec![file(
+        "models/bad.axm",
+        "model User {\n  email: String\n}\nquery find_by_email($input: User) -> User? {\n  SELECT * FROM users WHERE email = $input.email_address\n}\n",
+    )];
+    let registry = registry_from(&bad);
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &bad);
+    assert!(
+        codes(&diags).contains(&"check.query-placeholder"),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("has no field `email_address`")),
+        "{diags:?}"
+    );
 }

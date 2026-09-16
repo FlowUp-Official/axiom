@@ -7,17 +7,18 @@ use sqlparser::ast::{Expr, ObjectName, Select, SelectItem, SetExpr, Statement, V
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use axiom_core::axm::ast::{QueryDecl, QueryReturn, TypeRef};
+use axiom_core::axm::ast::{AnnotatedType, QueryDecl, QueryReturn, Rule, Transform, TypeRef};
+use axiom_core::axm::codegen::resolve_relation;
 use axiom_core::axm::parser::parse_axm_file;
 use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
 use axiom_core::cache::{ToolCache, compute_content_hash};
 use axiom_core::catalog::{TableCatalog, parse_sql_catalog};
 use axiom_core::config::{AxiomConfig, resolve_glob_paths};
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{Placeholder, QueryCatalog, scan_placeholders};
-use axiom_diagnostics::Diagnostic;
+use axiom_core::query::{Placeholder, QueryCatalog, scan_dotted_placeholders, scan_placeholders};
+use axiom_diagnostics::{Diagnostic, Span};
 
-use crate::diagnostics::{line_of_offset, parse_error};
+use crate::diagnostics::{find_span, line_of_offset, parse_error};
 
 /// All resolved input sources, with their file contents.
 pub struct Workspace {
@@ -114,6 +115,69 @@ pub fn check_queries(
     (query_catalog, diags)
 }
 
+/// Validate every `model ... extends select<relation>` source against the
+/// schema catalog. The relation is a database identifier: it must match a
+/// declared table exactly (for qualified names) or by its last segment (for
+/// unqualified names), always case-sensitively.
+pub fn check_model_sources(
+    catalog: &TableCatalog<'_>,
+    registry: &ModelRegistry,
+    model_files: &[(PathBuf, String)],
+) -> Vec<Diagnostic> {
+    let src_by_path: BTreeMap<PathBuf, String> = model_files
+        .iter()
+        .map(|(p, s)| (p.clone(), s.clone()))
+        .collect();
+    let mut diags = Vec::new();
+    for resolved in &registry.models {
+        let Some(source) = &resolved.model.source else {
+            continue;
+        };
+        let relation = &source.relation;
+        if resolve_relation(catalog, relation).is_some() {
+            continue;
+        }
+        let src = src_by_path
+            .get(&resolved.path)
+            .map(String::as_str)
+            .unwrap_or("");
+        let span = model_source_relation_span(src, relation);
+        diags.push(
+            Diagnostic::error(
+                &resolved.path,
+                "check.model-source",
+                format!(
+                    "model `{}` extends select<{relation}>, which does not match any table in the schema",
+                    resolved.model.name
+                ),
+            )
+            .with_help(
+                "select<...> names a database relation; use the exact (case-sensitive) table \
+                 name from a schema file, or the unqualified name to match the last segment \
+                 of a qualified table",
+            )
+            .with_span(span),
+        );
+    }
+    diags
+}
+
+/// Prefer a span covering the relation text inside `select<...>`; falls back
+/// to the start of the declaring line.
+fn model_source_relation_span(src: &str, relation: &str) -> Span {
+    let rel_pos = find_span(src, "select<", 0).map(|s| s.end).unwrap_or(0);
+    if let Some(rel_end) = src[rel_pos..].find('>')
+        && src[rel_pos..rel_pos + rel_end].trim() == relation
+    {
+        let raw = &src[rel_pos..rel_pos + rel_end];
+        let trimmed = raw.trim();
+        let start = rel_pos + raw.len() - trimmed.len();
+        Span::new(start, start + trimmed.len())
+    } else {
+        line_of_offset(src, rel_pos)
+    }
+}
+
 /// Validate a single `query` declaration: placeholders must resolve to a
 /// declared parameter, the return type must refer to a known table, model, or
 /// type alias, and the SQL body must match the declared return contract.
@@ -161,6 +225,50 @@ fn check_declared_query(
                 );
             }
             _ => {}
+        }
+    }
+
+    for (start, _, dotted) in scan_dotted_placeholders(&query.sql) {
+        let span = line_of_offset(src, body_start + start);
+        let Some((base, field)) = dotted.split_once('.') else {
+            continue;
+        };
+        let Some(param) = query.params.iter().find(|p| p.name == base) else {
+            // An undeclared base parameter is already reported above.
+            continue;
+        };
+        let TypeRef::Named(model_name) = &param.ty else {
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.query-placeholder",
+                    format!(
+                        "query `{}` uses placeholder `${dotted}` to address fields of `${base}`, but `${base}` is not a model parameter (its type is `{}`)",
+                        query.name,
+                        axiom_core::axm::type_ref_name(&param.ty),
+                    ),
+                )
+                .with_help("only parameters typed with a model can be accessed with `$param.field`")
+                .with_span(span),
+            );
+            continue;
+        };
+        let Some(model) = registry.model_by_name(model_name) else {
+            continue;
+        };
+        if !model.model.fields.iter().any(|f| f.name == field) {
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.query-placeholder",
+                    format!(
+                        "query `{}` uses placeholder `${dotted}`, but model `{model_name}` has no field `{field}`",
+                        query.name
+                    ),
+                )
+                .with_help("add the field to the model or fix the placeholder")
+                .with_span(span),
+            );
         }
     }
 
@@ -479,7 +587,188 @@ pub fn check_models(
         None
     };
 
+    if let Some(registry) = &registry {
+        diags.extend(check_rule_base_compat(registry, files));
+    }
+
     (registry, diags)
+}
+
+/// The broad base-class of a type, after expanding named aliases.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BaseClass {
+    Str,
+    Num,
+    Collection,
+    Other,
+}
+
+fn base_class(registry: &ModelRegistry, ty: &TypeRef, depth: usize) -> BaseClass {
+    if depth > 16 {
+        return BaseClass::Other;
+    }
+    match ty {
+        TypeRef::String | TypeRef::Uuid => BaseClass::Str,
+        TypeRef::Int | TypeRef::BigInt | TypeRef::Float => BaseClass::Num,
+        TypeRef::Array(_) => BaseClass::Collection,
+        TypeRef::Nullable(inner) => base_class(registry, inner, depth + 1),
+        TypeRef::Named(name) => match registry.type_index.get(name) {
+            Some(&i) => base_class(registry, &registry.types[i].ty.ty.base, depth + 1),
+            None => BaseClass::Other,
+        },
+        _ => BaseClass::Other,
+    }
+}
+
+/// The canonical spelling of a transform for diagnostics.
+fn transform_call_name(transform: &Transform) -> &'static str {
+    match transform {
+        Transform::Trim => "trim",
+        Transform::Lowercase => "lowercase",
+        Transform::Uppercase => "uppercase",
+    }
+}
+
+/// The canonical spelling of a rule for diagnostics, e.g. `.min_length(3)`.
+fn rule_call_name(rule: &Rule) -> String {
+    match rule {
+        Rule::Min(_, _) => ".min(...)".to_string(),
+        Rule::Max(_, _) => ".max(...)".to_string(),
+        Rule::MinLength(_, _) => ".min_length(...)".to_string(),
+        Rule::MaxLength(_, _) => ".max_length(...)".to_string(),
+        Rule::Regex(_, _) => ".regex(...)".to_string(),
+        Rule::Email(_) => ".email()".to_string(),
+        Rule::Url(_) => ".url()".to_string(),
+        Rule::Uuid(_) => ".uuid()".to_string(),
+        Rule::Ulid(_) => ".ulid()".to_string(),
+        Rule::Ipv4(_) => ".ipv4()".to_string(),
+        Rule::Ipv6(_) => ".ipv6()".to_string(),
+        Rule::IsoDate(_) => ".isodate()".to_string(),
+        Rule::Alphanumeric(_) => ".alphanumeric()".to_string(),
+        Rule::NonEmpty(_) => ".nonempty()".to_string(),
+    }
+}
+
+/// Whether `rule` may be applied to a value of the given base class, per the
+/// rule/base table: numeric rules on numbers, string rules on strings,
+/// collection rules on strings and arrays. Everything else is rejected.
+fn rule_class_compatible(class: BaseClass, rule: &Rule) -> bool {
+    match rule {
+        Rule::Min(..) | Rule::Max(..) => class == BaseClass::Num,
+        Rule::Email(_)
+        | Rule::Url(_)
+        | Rule::Uuid(_)
+        | Rule::Ulid(_)
+        | Rule::Ipv4(_)
+        | Rule::Ipv6(_)
+        | Rule::IsoDate(_)
+        | Rule::Alphanumeric(_)
+        | Rule::Regex(..) => class == BaseClass::Str,
+        Rule::NonEmpty(_) | Rule::MinLength(..) | Rule::MaxLength(..) => {
+            matches!(class, BaseClass::Str | BaseClass::Collection)
+        }
+    }
+}
+
+/// Validate the rule/base compatibility table over every model field and type
+/// alias (transforms only on strings; rules matched by base class).
+fn check_rule_base_compat(
+    registry: &ModelRegistry,
+    files: &[(PathBuf, String)],
+) -> Vec<Diagnostic> {
+    let src_by_path: BTreeMap<PathBuf, String> = files.iter().cloned().collect();
+    let mut diags = Vec::new();
+    for resolved in &registry.models {
+        let src = src_by_path
+            .get(&resolved.path)
+            .map(String::as_str)
+            .unwrap_or("");
+        for field in &resolved.model.fields {
+            check_type_rules(
+                &mut diags,
+                &resolved.path,
+                src,
+                &resolved.model.name,
+                &field.name,
+                &field.ty,
+                registry,
+            );
+        }
+    }
+    for resolved in &registry.types {
+        let src = src_by_path
+            .get(&resolved.path)
+            .map(String::as_str)
+            .unwrap_or("");
+        check_type_rules(
+            &mut diags,
+            &resolved.path,
+            src,
+            &resolved.ty.name,
+            &resolved.ty.name,
+            &resolved.ty.ty,
+            registry,
+        );
+    }
+    diags
+}
+
+fn check_type_rules(
+    diags: &mut Vec<Diagnostic>,
+    path: &Path,
+    src: &str,
+    owner: &str,
+    field: &str,
+    ty: &AnnotatedType,
+    registry: &ModelRegistry,
+) {
+    let class = base_class(registry, &ty.base, 0);
+    for transform in &ty.transforms {
+        if class != BaseClass::Str {
+            let span = line_of_offset(src, find_span(src, field, 0).map(|s| s.start).unwrap_or(0));
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.rule-base",
+                    format!(
+                        "field `{field}` of model `{owner}` applies `.{}`, which is only valid on `String` fields",
+                        transform_call_name(transform),
+                    ),
+                )
+                .with_help("move the transform to a `String`-typed field or remove it")
+                .with_span(span),
+            );
+        }
+    }
+    for rule in &ty.rules {
+        if rule_class_compatible(class, rule) {
+            continue;
+        }
+        let span = line_of_offset(src, find_span(src, field, 0).map(|s| s.start).unwrap_or(0));
+        let allowed = if matches!(rule, Rule::Min(..) | Rule::Max(..)) {
+            "`Int`, `BigInt`, or `Float`"
+        } else if matches!(
+            rule,
+            Rule::NonEmpty(_) | Rule::MinLength(..) | Rule::MaxLength(..)
+        ) {
+            "`String` fields or arrays (`T[]`)"
+        } else {
+            "`String` (or a string-based type alias)"
+        };
+        diags.push(
+            Diagnostic::error(
+                path,
+                "check.rule-base",
+                format!(
+                    "field `{field}` of model `{owner}` applies {}, which is only valid on {}",
+                    rule_call_name(rule),
+                    allowed,
+                ),
+            )
+            .with_help("choose a rule valid for this field's type, or change the field's type")
+            .with_span(span),
+        );
+    }
 }
 
 /// Validate every `.regex("...")` pattern in every model file.

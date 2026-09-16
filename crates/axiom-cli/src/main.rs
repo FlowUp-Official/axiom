@@ -249,31 +249,27 @@ async fn run_generate(
     }
 
     // Query definitions come from `query` declarations in `.axm` model files.
+    // They are emitted by the model generators below, so the SQL-side
+    // generators receive an empty catalog to avoid emitting each query twice.
     let model_registry = if model_sources.is_empty() {
         None
     } else {
         Some(resolve_models(&model_sources)?)
     };
-    let mut query_catalog = QueryCatalog::default();
-    if let Some(registry) = &model_registry {
-        query_catalog
-            .queries
-            .extend(axiom_core::axm::query_catalog(registry).queries);
-    }
 
     let generated: Vec<(String, String)> = config
         .outputs
         .iter()
         .map(|(name, output)| match output {
             OutputConfig::TypeScript(_) => {
-                let mut code = generate_typescript(&catalog, &query_catalog);
+                let mut code = generate_typescript(&catalog, &QueryCatalog::default());
                 if let Some(registry) = &model_registry {
                     code.push_str(&generate_typescript_models(registry, &catalog));
                 }
                 (name.clone(), code)
             }
             OutputConfig::Rust(_) => {
-                let mut code = generate_rust(&catalog, &query_catalog);
+                let mut code = generate_rust(&catalog, &QueryCatalog::default());
                 if let Some(registry) = &model_registry {
                     code.push_str(&generate_rust_models(registry, &catalog));
                 }
@@ -300,7 +296,7 @@ async fn run_generate(
 
     write_cache_atomically(&cache_path, config_hash, file_hashes)?;
 
-    let query_count = query_catalog.queries.len();
+    let query_count = model_registry.as_ref().map_or(0, |r| r.queries.len());
     let query_part = if query_count == 0 {
         String::new()
     } else {

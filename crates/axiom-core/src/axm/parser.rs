@@ -22,9 +22,9 @@
 //!
 //! Rule and transformation calls are classified into strongly typed AST
 //! variants (`Rule` / `Transform`) at parse time rather than being stored as
-//! raw strings. Rule names are lowercase; the aliases `min_len` / `max_len`
-//! are accepted for `min_length` / `max_length`. Axiom identifiers are never
-//! case-canonicalized here.
+//! raw strings. Rule names are lowercase and canonical: `min_length` /
+//! `max_length` (the `min_len` / `max_len` aliases are rejected). Axiom
+//! identifiers are never case-canonicalized here.
 
 use std::fmt;
 
@@ -370,14 +370,14 @@ fn classify_call(name: &str, args: &[Literal]) -> Result<Call, RuleError> {
             let (v, m) = int_arg(false)?;
             Ok(Call::Rule(Rule::Max(v.unwrap_or(0), m)))
         }
-        "min_length" | "min_len" => {
+        "min_length" => {
             let (v, m) = int_arg(true)?;
             Ok(Call::Rule(Rule::MinLength(
                 v.unwrap_or(0).max(0) as usize,
                 m,
             )))
         }
-        "max_length" | "max_len" => {
+        "max_length" => {
             let (v, m) = int_arg(true)?;
             Ok(Call::Rule(Rule::MaxLength(
                 v.unwrap_or(0).max(0) as usize,
@@ -869,11 +869,11 @@ type Username = String
     }
 
     #[test]
-    fn rules_accept_aliases_and_messages() {
+    fn rules_accept_messages() {
         let file = parse(
             r#"model T {
   a: String.email("Invalid email address")
-  b: String.min_len(3, "Too short")
+  b: String.min_length(3, "Too short")
   c: String.regex("^[a-z]+$", "lowercase only")
   d: Int.min(0)
   e: String.min_length(3)
@@ -897,6 +897,12 @@ type Username = String
         );
         assert_eq!(fields[3].ty.rules, vec![Rule::Min(0, None)]);
         assert_eq!(fields[4].ty.rules, vec![Rule::MinLength(3, None)]);
+    }
+
+    #[test]
+    fn length_rule_aliases_are_rejected() {
+        let err = parse_err("model T {\n  b: String.min_len(3)\n}");
+        assert!(err.contains("unknown rule `.min_len()`"), "{err}");
     }
 
     #[test]

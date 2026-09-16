@@ -46,7 +46,12 @@ model User extends select<users> {
 ```
 
 - `extends select<users>` binds the model to the `users` table in the SQL
-  catalog. Bare models with no source remain valid as pure application models.
+  catalog. The relation is a database identifier, resolved case-sensitively: a
+  fully qualified name (`select<public.users>`) matches that table exactly,
+  while an unqualified name (`select<users>`) also matches the last segment of
+  a qualified table. An unmatched relation is reported by `axiom check` as
+  `error[check.model-source]`. Bare models with no source remain valid as pure
+  application models.
 - Fields are `name: <type>` with optional `?` (`age?`) for absent values and an
   optional default (`country = "US"`), applied only when the field is missing.
 
@@ -71,6 +76,14 @@ custom failure message as a second argument, e.g. `Int.min(0, "must be ≥ 0")`.
 | `min` | `Int.min(0)` | Minimum numeric value |
 | `max` | `Int.max(100)` | Maximum numeric value |
 | `regex` | `String.regex("^[a-z]+$")` | Must match the custom regular expression |
+
+The compiler enforces a rule/base compatibility table: `min`/`max` apply to
+`Int`/`BigInt`/`Float`; `email`, `url`, `uuid`, `ulid`, `ipv4`, `ipv6`,
+`isodate`, `alphanumeric`, and `regex` apply to `String` (and string-based type
+aliases); `nonempty`/`min_length`/`max_length` apply to `String` or to a
+collection (`T[]`, on the array itself). `trim`/`lowercase`/`uppercase` apply
+only to `String`. Violations are reported by `axiom check` as
+`error[check.rule-base]`.
 
 Transformations run before validation and are also chained:
 

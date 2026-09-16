@@ -38,6 +38,7 @@ declaration in a `.axm` file:
 | `unused-import` | warning | An `import` that is never referenced by any model |
 | `dead-model` | warning | A model that is neither exported nor referenced by another model |
 | `redundant-validator` | warning | A `.nonempty()` / `.min(..)`-style validator that is already implied by the type |
+| `naming-convention` | warning | Models, type aliases, and queries that are not PascalCase, or fields/parameters that are not camelCase |
 
 ## Example
 

@@ -124,7 +124,7 @@ fn generates_typescript_and_rust_outputs() {
     assert!(ts.contains("export async function getUser("));
     assert!(ts.contains("  sql: Sql,"));
     assert!(ts.contains("  params: GetUserParams"));
-    assert!(ts.contains("): Promise<Users | null> {"));
+    assert!(ts.contains("): Promise<Users> {"));
     assert!(ts.contains("SELECT id, email FROM users WHERE email = ${params.email}"));
     assert!(ts.contains("export async function getUsers("));
     assert!(ts.contains("): Promise<Users[]> {"));
@@ -153,12 +153,12 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("pub email: String,"));
     assert!(rs.contains("pub async fn get_user("));
     assert!(rs.contains("pool: &sqlx::PgPool,"));
-    assert!(rs.contains(") -> Result<Option<Users>, Box<dyn std::error::Error>> {"));
+    assert!(rs.contains(") -> Result<Users, Box<dyn std::error::Error>> {"));
     assert!(rs.contains(
         "params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"
     ));
     assert!(rs.contains("sqlx::query_as!("));
-    assert!(rs.contains(".fetch_optional(pool)"));
+    assert!(rs.contains(".fetch_all(pool)"));
     assert!(rs.contains("pub async fn get_users("));
     assert!(rs.contains(") -> Result<Vec<Users>, Box<dyn std::error::Error>> {"));
     assert!(rs.contains(".fetch_all(pool)"));
@@ -166,6 +166,45 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("sqlx::query("));
     assert!(rs.contains(".bind(params.id)"));
     assert!(rs.contains(".execute(pool)"));
+}
+
+#[test]
+fn query_declarations_are_emitted_exactly_once() {
+    let dir = fixture_dir("run_single_emission");
+    write_fixture(&dir, SCHEMA_SQL);
+
+    let output = run_generate(&dir);
+    assert!(
+        output.status.success(),
+        "generate failed: {}",
+        stdout(&output)
+    );
+
+    let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
+    for symbol in [
+        "export async function getUser(",
+        "export async function getUsers(",
+        "export async function deleteUser(",
+    ] {
+        assert_eq!(
+            ts.matches(symbol).count(),
+            1,
+            "`{symbol}` must appear exactly once in api.ts"
+        );
+    }
+
+    let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
+    for symbol in [
+        "pub async fn get_user(",
+        "pub async fn get_users(",
+        "pub async fn delete_user(",
+    ] {
+        assert_eq!(
+            rs.matches(symbol).count(),
+            1,
+            "`{symbol}` must appear exactly once in core.rs"
+        );
+    }
 }
 
 #[test]

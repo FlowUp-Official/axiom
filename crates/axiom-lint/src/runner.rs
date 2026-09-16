@@ -17,7 +17,7 @@ use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::rules::axm::{DeadModel, RedundantValidator, UnusedImport};
+use crate::rules::axm::{DeadModel, NamingConvention, RedundantValidator, UnusedImport};
 use crate::rules::sql::{MissingWhereClause, SelectStar, UnindexedForeignKey};
 
 /// Cross-file information that rules may need.
@@ -73,6 +73,7 @@ impl LintRunner {
                 Box::new(UnusedImport),
                 Box::new(DeadModel),
                 Box::new(RedundantValidator),
+                Box::new(NamingConvention),
                 Box::new(MissingWhereClause),
                 Box::new(SelectStar),
                 Box::new(UnindexedForeignKey),

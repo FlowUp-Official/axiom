@@ -107,19 +107,22 @@ pub fn write_fixed_outputs(
 fn render_output(
     output: &OutputConfig,
     catalog: &TableCatalog<'_>,
-    query_catalog: &QueryCatalog<'_>,
+    _query_catalog: &QueryCatalog<'_>,
     registry: Option<&ModelRegistry>,
 ) -> String {
     match output {
+        // `.axm` queries are emitted by the model generators below; passing
+        // an empty catalog to the SQL-side generators keeps each query from
+        // being emitted twice and matches `axiom generate`.
         OutputConfig::TypeScript(_) => {
-            let mut code = generate_typescript(catalog, query_catalog);
+            let mut code = generate_typescript(catalog, &QueryCatalog::default());
             if let Some(registry) = registry {
                 code.push_str(&generate_typescript_models(registry, catalog));
             }
             code
         }
         OutputConfig::Rust(_) => {
-            let mut code = generate_rust(catalog, query_catalog);
+            let mut code = generate_rust(catalog, &QueryCatalog::default());
             if let Some(registry) = registry {
                 code.push_str(&generate_rust_models(registry, catalog));
             }

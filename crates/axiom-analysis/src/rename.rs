@@ -12,7 +12,13 @@ use crate::{Rename, SymbolKind, TextEdit};
 impl AnalysisDatabase {
     pub fn rename(&mut self, path: &Path, offset: usize, new_name: &str) -> Option<Rename> {
         let sym = self.symbol_at(path, offset)?;
-        if sym.name.eq_ignore_ascii_case(new_name) {
+        // SQL identifiers are case-insensitive, so a case-only edit is a
+        // no-op for tables and columns. Axiom identifiers are exact-case: a
+        // case-only edit to a model or field is a real rename.
+        let case_only = sym.name == new_name
+            || (matches!(sym.kind, SymbolKind::Table | SymbolKind::Column)
+                && sym.name.eq_ignore_ascii_case(new_name));
+        if case_only {
             return Some(Rename { edits: Vec::new() });
         }
 
@@ -79,12 +85,12 @@ impl AnalysisDatabase {
                 for file in files {
                     let refs = self.axm_refs(&file);
                     for r in refs {
-                        if r.name.eq_ignore_ascii_case(&sym.name) {
+                        if r.name == sym.name {
                             push(&file, r.span);
                         }
                     }
                     for r in self.return_type_refs(&file) {
-                        if r.name.eq_ignore_ascii_case(&sym.name) {
+                        if r.name == sym.name {
                             push(&file, r.span);
                         }
                     }

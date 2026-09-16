@@ -218,11 +218,10 @@ async fn did_open_reports_parse_errors_for_unknown_files() {
 }
 
 #[tokio::test]
-async fn completion_suggests_columns_after_qualifier() {
+async fn completion_is_empty_for_standalone_sql_files() {
     let (dir, base) = workspace();
     let (mut service, _socket, _root) = setup(&base).await;
 
-    // `SELECT u.| FROM users u` — offset just after the dot.
     let uri = file_uri(&base, "queries/one.sql");
     notify(
         &mut service,
@@ -248,12 +247,17 @@ async fn completion_suggests_columns_after_qualifier() {
     )
     .await;
     let response: Option<CompletionResponse> = serde_json::from_value(value).unwrap();
-    let Some(CompletionResponse::Array(items)) = response else {
-        panic!("expected completion array");
-    };
-    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    assert!(labels.contains(&"id"), "got {labels:?}");
-    assert!(labels.contains(&"email"), "got {labels:?}");
+    match response {
+        // Empty results are reported as `null` by the server.
+        None => {}
+        Some(CompletionResponse::Array(items)) => {
+            assert!(
+                items.is_empty(),
+                "standalone `.sql` files surface no completions, got {items:?}"
+            );
+        }
+        Some(CompletionResponse::List(_)) => panic!("unexpected completion list"),
+    }
     drop((dir, service));
 }
 

@@ -109,9 +109,9 @@ impl SymbolTable {
     }
 
     pub fn model(&self, name: &str) -> Option<&ModelSym> {
-        self.model_index
-            .get(&name.to_lowercase())
-            .and_then(|&i| self.models.get(i))
+        // Axiom identifiers are exact-case: `User` and `user` are distinct
+        // symbols, so model lookups never canonicalize.
+        self.model_index.get(name).and_then(|&i| self.models.get(i))
     }
 
     pub fn table_names(&self) -> impl Iterator<Item = &str> {
@@ -146,9 +146,9 @@ impl SymbolTable {
     }
 
     pub(crate) fn add_model(&mut self, model: ModelSym) {
-        if !self.model_index.contains_key(&model.name.to_lowercase()) {
+        if !self.model_index.contains_key(&model.name) {
             self.model_index
-                .insert(model.name.to_lowercase(), self.models.len());
+                .insert(model.name.clone(), self.models.len());
             self.models.push(model);
         }
     }
@@ -381,5 +381,20 @@ mod tests {
         }
         assert!(st.table("USERS").is_some());
         assert!(st.column("Users", "ID").is_some());
+    }
+
+    #[test]
+    fn axm_model_lookup_is_exact_case() {
+        let src = "model User {\n  email: String\n}\n";
+        let axm = parse_axm_file(src).unwrap();
+        let index = PositionIndex::new_axm(src);
+        let models = build_model_symbols(Path::new("models/user.axm"), &axm, &index);
+        let mut st = SymbolTable::default();
+        for m in models {
+            st.add_model(m);
+        }
+        assert!(st.model("User").is_some());
+        assert!(st.model("user").is_none(), "models are case-sensitive");
+        assert_eq!(st.models.len(), 1);
     }
 }

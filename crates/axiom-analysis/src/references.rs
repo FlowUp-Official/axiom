@@ -406,7 +406,8 @@ fn field_type_span(
         .iter()
         .find(|t| t.start >= field_end && t.kind == TokenKind::Punct && t.text == ":")?;
     let word = tokens.iter().find(|t| {
-        t.start >= colon.end && t.is_word() && t.ident_value().eq_ignore_ascii_case(type_name)
+        // Axiom type references are exact-case: `User` and `user` are distinct.
+        t.start >= colon.end && t.is_word() && t.ident_value() == type_name
     })?;
     Some(Span::new(word.start, word.end))
 }
@@ -507,7 +508,7 @@ mod tests {
             symbols.table_index.insert(t.name.to_lowercase(), i);
         }
         for (i, m) in symbols.models.iter().enumerate() {
-            symbols.model_index.insert(m.name.to_lowercase(), i);
+            symbols.model_index.insert(m.name.clone(), i);
         }
         symbols
     }

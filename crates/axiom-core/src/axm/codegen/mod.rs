@@ -18,7 +18,7 @@ use std::path::Path;
 
 use crate::axm::ast::{AnnotatedType, Literal, ModelDecl, QueryReturn, Rule, TypeRef};
 use crate::axm::resolver::ModelRegistry;
-use crate::catalog::TableCatalog;
+use crate::catalog::{TableCatalog, TableSchema};
 use crate::codegen::util;
 
 /// Which optional helpers a generated output needs, so only the used helpers
@@ -82,7 +82,12 @@ impl Uses {
             TypeRef::Date => self.date = true,
             TypeRef::DateTime => self.datetime = true,
             TypeRef::Bytes => self.bytes = true,
-            TypeRef::Uuid => self.uuid = true,
+            // UUID values coerce through the string helper on both targets,
+            // so the string helper must be emitted alongside any UUID use.
+            TypeRef::Uuid => {
+                self.uuid = true;
+                self.string = true;
+            }
             TypeRef::Named(_) => {}
             TypeRef::Nullable(inner) => self.add_type(inner),
             TypeRef::Array(inner) => {
@@ -174,6 +179,32 @@ pub(crate) struct EffectiveField {
     pub default: Option<Literal>,
 }
 
+/// Resolve a `select<relation>` source expression against the schema catalog.
+///
+/// The relation is a database identifier, so a fully qualified reference
+/// (`public.users`) matches the qualified catalogue name exactly, while an
+/// unqualified reference (`users`) may match the last segment of a qualified
+/// table. Matching is case-sensitive, like all Axiom identifiers.
+pub fn resolve_relation<'a, 'b>(
+    catalog: &'a TableCatalog<'b>,
+    relation: &str,
+) -> Option<&'a TableSchema<'b>> {
+    catalog
+        .tables
+        .iter()
+        .find(|t| t.name == relation)
+        .or_else(|| {
+            if relation.contains('.') {
+                None
+            } else {
+                catalog
+                    .tables
+                    .iter()
+                    .find(|t| t.name.rsplit('.').next() == Some(relation))
+            }
+        })
+}
+
 /// Compute the effective fields for a model declared in `path`.
 ///
 /// A bare model uses its declared fields. A database-backed model
@@ -188,7 +219,7 @@ pub(crate) fn effective_fields(
     model: &ModelDecl,
 ) -> Vec<EffectiveField> {
     if let Some(source) = &model.source
-        && let Some(table) = catalog.tables.iter().find(|t| t.name == source.relation)
+        && let Some(table) = resolve_relation(catalog, &source.relation)
     {
         let mut used = vec![false; model.fields.len()];
         let mut out = Vec::with_capacity(table.columns.len() + model.fields.len());

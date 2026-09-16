@@ -109,6 +109,31 @@ pub enum Placeholder<'a> {
 /// Placeholders are only recognized outside string literals (single-quoted,
 /// PostgreSQL dollar-quoted, and `E'...'`), quoted identifiers, and comments.
 pub fn scan_placeholders(sql: &str) -> Vec<(usize, usize, Placeholder<'_>)> {
+    scan_dollar_tokens(sql, false)
+        .into_iter()
+        .map(|(start, len, token)| {
+            let kind = if token.bytes().all(|b| b.is_ascii_digit()) {
+                Placeholder::Positional(token.parse().unwrap_or(0))
+            } else {
+                Placeholder::Named(token)
+            };
+            (start, len, kind)
+        })
+        .collect()
+}
+
+/// Scan a query body for `$` placeholders, including structured `$input.field`
+/// paths. Returns the byte offset, length, and full marker text (without the
+/// leading `$`) of each hit.
+///
+/// Like [`scan_placeholders`], markers are only recognized outside string
+/// literals (single-quoted, PostgreSQL dollar-quoted, and `E'...'`), quoted
+/// identifiers, and comments, so a literal such as `'cost is $5'` never binds.
+pub fn scan_dotted_placeholders(sql: &str) -> Vec<(usize, usize, &str)> {
+    scan_dollar_tokens(sql, true)
+}
+
+fn scan_dollar_tokens(sql: &str, allow_dots: bool) -> Vec<(usize, usize, &str)> {
     fn skip_until_char(bytes: &[u8], quote: u8, mut i: usize) -> usize {
         i += 1;
         while i < bytes.len() {
@@ -153,22 +178,29 @@ pub fn scan_placeholders(sql: &str) -> Vec<(usize, usize, Placeholder<'_>)> {
                     continue;
                 }
                 let start = i;
-                let after = &sql[i + 1..];
-                let end = after
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(after.len());
-                let token = &after[..end];
-                if !token.is_empty() {
-                    let kind = if token.bytes().all(|b| b.is_ascii_digit()) {
-                        Placeholder::Positional(token.parse().unwrap_or(0))
-                    } else {
-                        Placeholder::Named(token)
-                    };
-                    out.push((start, 1 + end, kind));
-                    i = start + 1 + end;
-                } else {
-                    i += 1;
+                let mut j = i + 1;
+                let mut first = true;
+                loop {
+                    let next = sql[j..].chars().next();
+                    match next {
+                        Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                            j += c.len_utf8();
+                            first = false;
+                        }
+                        Some('.') if allow_dots && !first => {
+                            j += '.'.len_utf8();
+                            first = true;
+                        }
+                        _ => break,
+                    }
                 }
+                let token = &sql[start + 1..j];
+                if token.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                out.push((start, j - start, token));
+                i = j;
             }
             '-' if sql[i..].starts_with("--") => {
                 while i < bytes.len() && bytes[i] != b'\n' {
@@ -275,6 +307,25 @@ mod tests {
         let hits = scan_placeholders(sql);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].2, Placeholder::Named("title"));
+    }
+
+    #[test]
+    fn scan_dotted_placeholders_finds_structured_paths() {
+        let sql = "INSERT INTO users (email, name) VALUES ($input.email, $input.profile.name)";
+        let hits = scan_dotted_placeholders(sql);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].2, "input.email");
+        assert_eq!(hits[1].2, "input.profile.name");
+        assert_eq!(&sql[hits[0].0..hits[0].0 + hits[0].1], "$input.email");
+    }
+
+    #[test]
+    fn scan_dotted_placeholders_skips_literals() {
+        let sql = "SELECT '$input.email', \"$input.email\", -- $input.email\n".to_string()
+            + "  cost FROM users WHERE cost > $$sometag$a$b$$ AND email = $input.email";
+        let hits = scan_dotted_placeholders(&sql);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].2, "input.email");
     }
 
     #[test]
