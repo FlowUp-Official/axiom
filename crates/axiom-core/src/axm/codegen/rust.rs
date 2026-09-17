@@ -1215,9 +1215,9 @@ fn emit_query(
         QueryReturn::Single(ty_ref) => {
             let ty = rust_named_type(registry, path, ty_ref);
             if is_model_return(registry, path, ty_ref) {
-                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| format!(\"{pascal} returned no rows\"))?;", rust_raw_string(&sql_wrapped));
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_wrapped));
             } else {
-                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| format!(\"{pascal} returned no rows\"))?;", rust_raw_string(&sql_scalar));
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_scalar));
             }
             if is_model_return(registry, path, ty_ref) {
                 out.push_str("    let js: String = row.try_get(0)?;\n");
