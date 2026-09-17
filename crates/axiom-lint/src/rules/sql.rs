@@ -122,10 +122,14 @@ impl LintRule for UnindexedForeignKey {
 
         let mut foreign_keys: Vec<(String, String)> = Vec::new();
         let mut indexes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for stmt in statements {
             match stmt {
-                Statement::CreateTable(create) => collect_table_fks(create, &mut foreign_keys),
+                Statement::CreateTable(create) => {
+                    collect_table_fks(create, &mut foreign_keys);
+                    collect_table_keys(create, &mut keys);
+                }
                 Statement::CreateIndex(index) => collect_index(index, &mut indexes),
                 _ => {}
             }
@@ -133,9 +137,16 @@ impl LintRule for UnindexedForeignKey {
 
         let mut out = Vec::new();
         for (table, column) in foreign_keys {
+            let col = column.to_lowercase();
             let covered = indexes
                 .get(&table.to_lowercase())
-                .is_some_and(|cols| cols.iter().any(|c| c == &column.to_lowercase()));
+                .is_some_and(|cols| cols.iter().any(|c| c == &col))
+                // A column-level `PRIMARY KEY`/`UNIQUE` (or a table-level
+                // constraint over this column) also creates an index that
+                // backs the foreign key, so such columns need no extra index.
+                || keys
+                    .get(&table.to_lowercase())
+                    .is_some_and(|cols| cols.iter().any(|c| c == &col));
             if covered {
                 continue;
             }
@@ -192,6 +203,41 @@ fn collect_index(index: &CreateIndex, out: &mut BTreeMap<String, Vec<String>>) {
         .map(|c| c.to_lowercase())
         .collect();
     out.entry(table).or_default().extend(cols);
+}
+
+/// Collect every column that the database backs with an index via a
+/// `PRIMARY KEY` or `UNIQUE` constraint, so foreign keys on those columns are
+/// considered covered. Both column-level options and table-level constraints
+/// are handled.
+fn collect_table_keys(create: &CreateTable, out: &mut BTreeMap<String, Vec<String>>) {
+    let table = create.name.to_string().to_lowercase();
+    let entry = out.entry(table).or_default();
+    for column in &create.columns {
+        let is_key = column.options.iter().any(|o| {
+            matches!(
+                &o.option,
+                ColumnOption::PrimaryKey(_) | ColumnOption::Unique(_)
+            )
+        });
+        if is_key {
+            entry.push(column.name.to_string().to_lowercase());
+        }
+    }
+    for constraint in &create.constraints {
+        match constraint {
+            TableConstraint::PrimaryKey(c) => push_constraint_columns(entry, &c.columns),
+            TableConstraint::Unique(c) => push_constraint_columns(entry, &c.columns),
+            _ => {}
+        }
+    }
+}
+
+fn push_constraint_columns(entry: &mut Vec<String>, columns: &[IndexColumn]) {
+    for col in columns {
+        if let Some(name) = index_column_name(col) {
+            entry.push(name.to_lowercase());
+        }
+    }
 }
 
 fn index_column_name(column: &IndexColumn) -> Option<String> {
@@ -312,6 +358,40 @@ mod tests {
     #[test]
     fn non_foreign_keys_are_ignored() {
         let source = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);";
+        let ws = WorkspaceView::empty();
+        assert!(UnindexedForeignKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn primary_key_foreign_key_is_fine() {
+        let source = "CREATE TABLE posts (id INT PRIMARY KEY);\nCREATE TABLE post_analytics (post_id TEXT PRIMARY KEY REFERENCES posts(id));";
+        let ws = WorkspaceView::empty();
+        assert!(
+            UnindexedForeignKey.check(&ctx(source, &ws)).is_empty(),
+            "{:?}",
+            UnindexedForeignKey.check(&ctx(source, &ws))
+        );
+    }
+
+    #[test]
+    fn table_level_unique_foreign_key_is_fine() {
+        let source = "CREATE TABLE posts (id INT PRIMARY KEY);\nCREATE TABLE post_analytics (post_id TEXT, UNIQUE (post_id), FOREIGN KEY (post_id) REFERENCES posts(id));";
+        let ws = WorkspaceView::empty();
+        assert!(UnindexedForeignKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn composite_unique_still_requires_indexed_fk_column() {
+        let source = "CREATE TABLE posts (id INT PRIMARY KEY);\nCREATE TABLE post_analytics (post_id TEXT, slug TEXT, UNIQUE (slug), FOREIGN KEY (post_id) REFERENCES posts(id));";
+        let ws = WorkspaceView::empty();
+        let diags = UnindexedForeignKey.check(&ctx(source, &ws));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("post_id"));
+    }
+
+    #[test]
+    fn table_level_primary_key_covers_fk_column() {
+        let source = "CREATE TABLE posts (id INT PRIMARY KEY);\nCREATE TABLE post_analytics (post_id TEXT, PRIMARY KEY (post_id), FOREIGN KEY (post_id) REFERENCES posts(id));";
         let ws = WorkspaceView::empty();
         assert!(UnindexedForeignKey.check(&ctx(source, &ws)).is_empty());
     }
