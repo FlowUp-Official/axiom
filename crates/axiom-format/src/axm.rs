@@ -94,11 +94,45 @@ fn format_query(query: &QueryDecl) -> Vec<String> {
         QueryReturn::Many(ty) => format!(" -> {}[]", format_type(ty)),
     };
     let mut out = vec![format!("query {}({params}){ret} {{", query.name)];
-    for body_line in query.sql.lines() {
-        out.push(format!("  {body_line}"));
+    // SQL bodies are stored verbatim by the parser (only the outer edges are
+    // trimmed), so each line may carry indentation from the source. Dedent the
+    // common continuation prefix first, then indent uniformly — otherwise every
+    // format pass re-indents an already-indented body and the output drifts.
+    for body_line in dedent_lines(&query.sql) {
+        out.push(format!("{}{body_line}", indent(1)));
     }
     out.push("}".to_string());
     out
+}
+
+/// Remove the common leading whitespace shared by the continuation lines of a
+/// body, preserving relative indentation (e.g. inside `$$...$$` literals).
+///
+/// The parser stores the SQL body verbatim, trimming only the outer edges, so
+/// the first line is already flush but continuation lines keep their source
+/// indent. Canonical output prefixes every line with one indent level, so the
+/// minimum continuation indent in a formatted body is always non-zero; measuring
+/// the min over continuation lines (skipping the first) makes formatting a
+/// fixed point instead of shifting every line by +1 level on each pass.
+fn dedent_lines(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let min_indent = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .min()
+        .unwrap_or(0);
+    lines
+        .into_iter()
+        .map(|l| {
+            // Only strip whitespace, never content. The first line is
+            // pre-trimmed by the parser, so slicing off `min_indent` characters
+            // there would eat part of the statement.
+            let leading = l.chars().take_while(|c| c.is_whitespace()).count();
+            l.chars().skip(leading.min(min_indent)).collect()
+        })
+        .collect()
 }
 
 fn format_param(param: &ParamDecl) -> String {
@@ -456,5 +490,30 @@ query ListUsers($limit: Int) -> User[] {
     fn invalid_axm_is_reported() {
         let err = format_axm("model {").expect_err("should fail to parse");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn multiline_sql_bodies_do_not_drift() {
+        let src = r#"query Stats($limit: Int) {
+  SELECT id, name
+    FROM users
+    WHERE active = true
+    ORDER BY id
+    LIMIT $limit;
+}
+query InsertAdmin($email: String) {
+  INSERT INTO users (email, body)
+  VALUES ($email, $$
+    <div>
+      <p>admin</p>
+    </div>
+  $$);
+}"#;
+        let once = fmt(src);
+        let twice = fmt(&once);
+        assert_eq!(once, twice, "formatting must be idempotent");
+        assert_eq!(twice, fmt(&twice), "must not drift on repeated passes");
+        assert!(once.contains("  SELECT id, name\n  FROM users\n"), "{once}");
+        assert!(once.contains("      <p>admin</p>\n"), "{once}");
     }
 }
