@@ -319,7 +319,7 @@ fn emit_table(out: &mut String, table: &TableSchema) {
     );
     let _ = writeln!(out, "pub struct {type_name} {{");
     for column in &table.columns {
-        let field = util::rust_field_name(&column.name);
+        let field = util::rust_field_ident(&column.name);
         let ty = util::rust_type(&column.data_type);
         if column.nullable {
             let _ = writeln!(out, "    pub {field}: Option<{ty}>,");
@@ -455,7 +455,7 @@ fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition)
     );
     let _ = writeln!(out, "pub struct {params_type} {{");
     for param in &query.params {
-        let field = util::rust_field_name(&param.name);
+        let field = util::rust_field_ident(&param.name);
         let ty = util::rust_type(&param.param_type);
         let _ = writeln!(out, "    pub {field}: {ty},");
     }
@@ -534,7 +534,7 @@ fn emit_query(out: &mut String, catalog: &TableCatalog, query: &QueryDefinition)
 }
 
 fn emit_param_validation(out: &mut String, param: &str, rules: &[ValidationRule]) {
-    let field = util::rust_field_name(param);
+    let field = util::rust_field_ident(param);
     let mut chain = String::new();
     for rule in rules {
         if !util::is_transform(&rule.kind) {
@@ -582,7 +582,7 @@ fn emit_param_validation(out: &mut String, param: &str, rules: &[ValidationRule]
 fn bound_fields(query: &QueryDefinition) -> Vec<String> {
     let max = query.max_placeholder_index().min(query.params.len());
     (0..max)
-        .map(|i| util::rust_field_name(&query.params[i].name))
+        .map(|i| util::rust_field_ident(&query.params[i].name))
         .collect()
 }
 

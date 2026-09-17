@@ -83,6 +83,31 @@ pub fn rust_field_name(name: &str) -> String {
     out
 }
 
+/// Rust keywords that cannot be used as field identifiers even as raw
+/// identifiers (`r#self` is rejected by the compiler).
+const RAW_FORBIDDEN: &[&str] = &["self", "Self", "super", "crate", "_"];
+const KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "if",
+    "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
+    "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "crate",
+];
+
+/// A snake_case Rust field identifier, escaped as a raw identifier when it
+/// collides with a keyword (e.g. a `type` column becomes `r#type`).
+pub fn rust_field_ident(name: &str) -> String {
+    let base = rust_field_name(name);
+    if KEYWORDS.contains(&base.as_str()) {
+        if RAW_FORBIDDEN.contains(&base.as_str()) {
+            format!("{base}_field")
+        } else {
+            format!("r#{base}")
+        }
+    } else {
+        base
+    }
+}
+
 fn to_pascal_case(s: &str) -> String {
     let mut out = String::new();
     let mut cap = true;
