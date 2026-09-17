@@ -91,7 +91,7 @@ with `type` and an output location with `path`:
 | `type`       | Description                                        |
 | ------------ | -------------------------------------------------- |
 | `typescript` | Emit a TypeScript module using the `postgres` driver |
-| `rust`       | Emit a Rust module using `sqlx`                    |
+| `rust`       | Emit a Rust module using `tokio-postgres`          |
 
 ## Schema validation
 

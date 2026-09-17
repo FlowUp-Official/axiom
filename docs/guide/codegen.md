@@ -40,19 +40,18 @@ export async function getUser(
 
 ## Rust
 
-A Rust module that pairs with `sqlx`:
+A Rust module that pairs with `tokio-postgres`:
 
 - **Serde structs** — one `#[derive(Debug, Clone, Serialize, Deserialize)]`
   struct per table.
 - **Validation** — each struct implements a `validate()` method running the
   compiled column rules.
 - **Query functions** — one `pub async fn` per `query` declaration in a `.axm`
-  file, taking `&sqlx::PgPool` and a typed params struct. Parameter validation
-  runs before `sqlx::query_as!` / `sqlx::query` execution.
+  file, taking `&tokio_postgres::Client` and a typed params struct. Parameter
+  validation runs before the query executes; params are bound as text so
+  Postgres coerces them to the target column types at runtime.
 
 ```rust
-use sqlx::PgPool;
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Users {
     pub id: i64,
@@ -64,10 +63,10 @@ pub struct GetUserParams {
 }
 
 pub async fn get_user(
-    pool: &PgPool,
+    client: &tokio_postgres::Client,
     params: GetUserParams,
 ) -> Result<Option<Users>, Box<dyn std::error::Error>> {
-    // ...params validation + sqlx::query_as!
+    // ...params validation + row_to_json decode
 }
 ```
 
