@@ -152,20 +152,21 @@ fn generates_typescript_and_rust_outputs() {
     assert!(rs.contains("pub struct GetUserParams {"));
     assert!(rs.contains("pub email: String,"));
     assert!(rs.contains("pub async fn get_user("));
-    assert!(rs.contains("pool: &sqlx::PgPool,"));
+    assert!(rs.contains("client: &tokio_postgres::Client,"));
     assert!(rs.contains(") -> Result<Users, Box<dyn std::error::Error>> {"));
     assert!(rs.contains(
         "params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;"
     ));
-    assert!(rs.contains("sqlx::query_as!("));
-    assert!(rs.contains(".fetch_all(pool)"));
+    assert!(rs.contains("let bind0 = params.email.to_axm_text();"));
+    assert!(rs.contains("let binds: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&bind0];"));
+    assert!(rs.contains("row_to_json(axm_q)::text AS axm_row"));
+    assert!(rs.contains("serde_json::from_value::<Users>(value)?"));
     assert!(rs.contains("pub async fn get_users("));
     assert!(rs.contains(") -> Result<Vec<Users>, Box<dyn std::error::Error>> {"));
-    assert!(rs.contains(".fetch_all(pool)"));
+    assert!(rs.contains("let rows = client.query("));
     assert!(rs.contains("pub async fn delete_user("));
-    assert!(rs.contains("sqlx::query("));
-    assert!(rs.contains(".bind(params.id)"));
-    assert!(rs.contains(".execute(pool)"));
+    assert!(rs.contains("client.execute("));
+    assert!(rs.contains("impl ToSql for AxmTextValue {"));
 }
 
 #[test]

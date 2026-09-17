@@ -2,13 +2,21 @@
 //!
 //! Emits serde structs, reusable helper functions, per-model `coerce`
 //! validators that compose recursively, `coerce` validators for type aliases
-//! that carry methods, and sqlx-backed query wrappers. Every model exposes
-//! `safe_parse()` and `parse()` (panics on failure). Only `std`, `serde`, and
-//! `sqlx` are used.
+//! that carry methods, and tokio-postgres-backed query wrappers. Every model
+//! exposes `safe_parse()` and `parse()` (panics on failure). Only `std`,
+//! `serde`, `serde_json`, and `tokio_postgres` are used.
+//!
+//! Query wrappers take a `&tokio_postgres::Client` and bind every parameter as
+//! a text `ToSql` value so Postgres coerces it to the target column type at
+//! runtime — no compile-time schema or `DATABASE_URL` is needed. Row-shaped
+//! results are decoded by wrapping the query in `row_to_json(...)::text` and
+//! deserializing; scalar results are decoded through a single renamed text
+//! column.
 //!
 //! Error paths are threaded as `Vec<PathSegment>` and rendered to strings only
 //! inside `push_error()`, at reporting time.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 
@@ -31,6 +39,7 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
     }
 
     let uses = collect_uses(registry, catalog);
+    let cyclic = cyclic_models(registry, catalog);
     let mut out = String::new();
     out.push_str(
         "\n// ---------------------------------------------------------------------------\n",
@@ -41,6 +50,10 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
     );
 
     emit_helpers(&mut out, &uses);
+
+    if !registry.queries.is_empty() {
+        emit_db_helpers(&mut out);
+    }
 
     for resolved in &registry.types {
         emit_type_alias(
@@ -53,11 +66,19 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
     }
     for resolved in &registry.models {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
-        emit_struct(&mut out, registry, &resolved.path, &resolved.model, &fields);
+        emit_struct(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.model,
+            &fields,
+            &cyclic,
+        );
     }
     for resolved in &registry.models {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
-        emit_impl_and_coerce(&mut out, registry, &resolved.path, &resolved.model, &fields);
+        emit_impl_and_coerce(&mut out, registry, &resolved.path, &resolved.model, &fields,
+            &cyclic);
     }
     for resolved in &registry.types {
         emit_alias_coerce(
@@ -66,6 +87,7 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
             &resolved.path,
             &resolved.ty.name,
             &resolved.ty.ty,
+            &cyclic,
         );
     }
     for resolved in &registry.queries {
@@ -420,6 +442,7 @@ fn emit_alias_coerce(
     path: &Path,
     declared: &str,
     ann: &AnnotatedType,
+    cyclic: &BTreeSet<String>,
 ) {
     let inlined = inline_annotated(registry, path, ann);
     if inlined.transforms.is_empty() && inlined.rules.is_empty() {
@@ -431,7 +454,7 @@ fn emit_alias_coerce(
         "fn coerce_{}(anchor: &serde_json::Value, path: &mut Vec<PathSegment>, errors: &mut Vec<ValidationError>) -> {result_ty} {{",
         util::rust_field_name(registry.effective_name(path, declared))
     );
-    emit_annotated_value(out, registry, path, &inlined, "anchor", 4);
+    emit_annotated_value(out, registry, path, &inlined, "anchor", 4, cyclic);
     let _ = writeln!(out, "    value");
     let _ = writeln!(out, "}}\n");
 }
@@ -442,16 +465,17 @@ fn emit_struct(
     path: &Path,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
+    cyclic: &BTreeSet<String>,
 ) {
     let type_name = model_name(model);
     let _ = writeln!(
         out,
-        "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, sqlx::FromRow)]"
+        "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]"
     );
     let _ = writeln!(out, "pub struct {type_name} {{");
     for field in fields {
-        let rust_name = util::rust_field_name(&field.emitted_name);
-        let ty = rust_field_type(registry, path, field);
+        let rust_name = util::rust_field_ident(&field.emitted_name);
+        let ty = rust_field_type(registry, path, field, cyclic);
         let _ = writeln!(out, "    pub {rust_name}: {ty},");
     }
     let _ = writeln!(out, "}}\n");
@@ -463,6 +487,7 @@ fn emit_impl_and_coerce(
     path: &Path,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
+    cyclic: &BTreeSet<String>,
 ) {
     let type_name = model_name(model);
     let coerce_name = coerce_fn_name(&model.name);
@@ -514,7 +539,7 @@ fn emit_impl_and_coerce(
     let _ = writeln!(out, "        return out;");
     let _ = writeln!(out, "    }};");
     for field in fields {
-        emit_field(out, registry, path, field, 4);
+        emit_field(out, registry, path, field, 4, cyclic);
     }
     let _ = writeln!(out, "    out");
     let _ = writeln!(out, "}}\n");
@@ -526,6 +551,7 @@ fn emit_field(
     path: &Path,
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
+    cyclic: &BTreeSet<String>,
 ) {
     let pad = " ".repeat(base_indent);
     let key = util::escape_rust(&field.emitted_name);
@@ -538,18 +564,18 @@ fn emit_field(
                 rust_json_literal(literal)
             );
             let _ = writeln!(out, "{pad}{{");
-            emit_field_body(out, registry, path, field, base_indent + 4);
+            emit_field_body(out, registry, path, field, base_indent + 4, cyclic);
             let _ = writeln!(out, "{pad}}}");
         }
         None if field.optional => {
             let _ = writeln!(out, "{pad}if let Some(raw) = record.get(\"{key}\") {{");
-            emit_field_body(out, registry, path, field, base_indent + 4);
+            emit_field_body(out, registry, path, field, base_indent + 4, cyclic);
             let _ = writeln!(out, "{pad}}}");
         }
         None => {
             let _ = writeln!(out, "{pad}match record.get(\"{key}\") {{");
             let _ = writeln!(out, "{pad}    Some(raw) => {{");
-            emit_field_body(out, registry, path, field, base_indent + 8);
+            emit_field_body(out, registry, path, field, base_indent + 8, cyclic);
             let _ = writeln!(out, "{pad}    }}");
             let _ = writeln!(out, "{pad}    None => {{");
             let _ = writeln!(
@@ -573,10 +599,11 @@ fn emit_field_body(
     path: &Path,
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
+    cyclic: &BTreeSet<String>,
 ) {
     let pad = " ".repeat(base_indent);
     let key = util::escape_rust(&field.emitted_name);
-    let rust_name = util::rust_field_name(&field.emitted_name);
+    let rust_name = util::rust_field_ident(&field.emitted_name);
     let optional = field.optional;
     let raw_expr = if field.default.is_some() {
         "&raw"
@@ -599,7 +626,7 @@ fn emit_field_body(
                 transforms: field.annotated.transforms.clone(),
                 rules: field.annotated.rules.clone(),
             };
-            emit_annotated_value(out, registry, path, &nested, raw_expr, base_indent + 4);
+            emit_annotated_value(out, registry, path, &nested, raw_expr, base_indent + 4, cyclic);
             let _ = writeln!(out, "{pad}    out.{rust_name} = Some(value);");
             let _ = writeln!(out, "{pad}}}");
             let _ = writeln!(out, "{pad}path.pop();");
@@ -618,7 +645,7 @@ fn emit_field_body(
             let _ = writeln!(
                 out,
                 "{pad}    items.push({});",
-                rust_coerce_value_expr(registry, path, inner, "&entry")
+                rust_coerce_value_expr(registry, path, inner, "&entry", cyclic)
             );
             let _ = writeln!(out, "{pad}    path.pop();");
             let _ = writeln!(out, "{pad}}}");
@@ -639,7 +666,7 @@ fn emit_field_body(
             let _ = writeln!(out, "{pad}path.pop();");
         }
         _ => {
-            emit_annotated_value(out, registry, path, &field.annotated, raw_expr, base_indent);
+            emit_annotated_value(out, registry, path, &field.annotated, raw_expr, base_indent, cyclic);
             let assign = if optional {
                 "Some(value)".to_string()
             } else {
@@ -660,12 +687,13 @@ fn emit_annotated_value(
     ann: &AnnotatedType,
     raw: &str,
     base_indent: usize,
+    cyclic: &BTreeSet<String>,
 ) {
     let pad = " ".repeat(base_indent);
     let _ = writeln!(
         out,
         "{pad}let base = {};",
-        rust_coerce_value_expr(registry, path, &ann.base, raw)
+        rust_coerce_value_expr(registry, path, &ann.base, raw, cyclic)
     );
     if ann.transforms.is_empty() {
         let _ = writeln!(out, "{pad}let value = base;");
@@ -739,20 +767,114 @@ fn rust_field_type(
     registry: &ModelRegistry,
     path: &Path,
     field: &crate::axm::codegen::EffectiveField,
+    cyclic: &BTreeSet<String>,
 ) -> String {
     let nullable_is_base = matches!(field.annotated.base, TypeRef::Nullable(_));
     let base = if nullable_is_base {
         match &field.annotated.base {
-            TypeRef::Nullable(inner) => rust_named_type(registry, path, inner),
+            TypeRef::Nullable(inner) => rust_named_type_boxed(registry, path, inner, cyclic),
             _ => unreachable!(),
         }
     } else {
-        rust_named_type(registry, path, &field.annotated.base)
+        rust_named_type_boxed(registry, path, &field.annotated.base, cyclic)
     };
     if field.optional || nullable_is_base {
         format!("Option<{base}>")
     } else {
         base
+    }
+}
+
+/// Like [`rust_named_type`], but boxing direct references to models that sit
+/// inside a reference cycle so the emitted structs have finite size.
+fn rust_named_type_boxed(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+    cyclic: &BTreeSet<String>,
+) -> String {
+    match ty {
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(name) if cyclic.contains(&name) => {
+                format!("Box<{}>", util::pascal_case(&name))
+            }
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+                util::pascal_case(&name)
+            }
+            NamedKind::Pure(base) => rust_named_type_boxed(registry, path, &base, cyclic),
+        },
+        TypeRef::Array(inner) => {
+            format!("Vec<{}>", rust_named_type_boxed(registry, path, inner, cyclic))
+        }
+        TypeRef::Nullable(inner) => {
+            format!("Option<{}>", rust_named_type_boxed(registry, path, inner, cyclic))
+        }
+        _ => rust_named_type(registry, path, ty),
+    }
+}
+
+/// Collect the model names that participate in a reference cycle, e.g.
+/// `DirectConversation` <-> `Message`. Cyclic models box their model-typed
+/// fields to keep the generated structs finite.
+fn cyclic_models(registry: &ModelRegistry, catalog: &TableCatalog) -> BTreeSet<String> {
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for resolved in &registry.models {
+        let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
+        let mut deps: BTreeSet<String> = BTreeSet::new();
+        for field in &fields {
+            collect_model_deps(registry, &resolved.path, &field.annotated.base, &mut deps);
+        }
+        edges.insert(resolved.model.name.clone(), deps);
+    }
+
+    let mut cyclic = BTreeSet::new();
+    for name in edges.keys() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        if let Some(deps) = edges.get(name) {
+            for dep in deps {
+                collect_reachable_models(dep, &edges, &mut seen);
+            }
+        }
+        if seen.contains(name) {
+            cyclic.insert(name.clone());
+        }
+    }
+    cyclic
+}
+
+fn collect_model_deps(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+    out: &mut BTreeSet<String>,
+) {
+    match ty {
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(model) => {
+                out.insert(model.clone());
+            }
+            NamedKind::Pure(base) => collect_model_deps(registry, path, &base, out),
+            _ => {}
+        },
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
+            collect_model_deps(registry, path, inner, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_reachable_models(
+    name: &str,
+    edges: &BTreeMap<String, BTreeSet<String>>,
+    seen: &mut BTreeSet<String>,
+) {
+    if !seen.insert(name.to_string()) {
+        return;
+    }
+    if let Some(deps) = edges.get(name) {
+        for dep in deps {
+            collect_reachable_models(dep, edges, seen);
+        }
     }
 }
 
@@ -782,6 +904,7 @@ fn rust_coerce_value_expr(
     path: &Path,
     ty: &TypeRef,
     value: &str,
+    cyclic: &BTreeSet<String>,
 ) -> String {
     match ty {
         TypeRef::String => format!("coerce_string({value}, path, errors)"),
@@ -795,23 +918,31 @@ fn rust_coerce_value_expr(
         TypeRef::DateTime => format!("coerce_datetime({value}, path, errors)"),
         TypeRef::Bytes => format!("coerce_bytes({value}, path, errors)"),
         TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(model) if cyclic.contains(&model) => {
+                format!(
+                    "Box::new(coerce_{}({value}, path, errors))",
+                    util::rust_field_name(&model)
+                )
+            }
             NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
                 format!(
                     "coerce_{}({value}, path, errors)",
                     util::rust_field_name(&name)
                 )
             }
-            NamedKind::Pure(base) => rust_coerce_value_expr(registry, path, &base, value),
+            NamedKind::Pure(base) => {
+                rust_coerce_value_expr(registry, path, &base, value, cyclic)
+            }
         },
         TypeRef::Array(inner) => {
-            let item = rust_coerce_value_expr(registry, path, inner, "&entry");
+            let item = rust_coerce_value_expr(registry, path, inner, "&entry", cyclic);
             format!(
                 "{{ let base = coerce_array({value}, path, errors); let mut items = Vec::with_capacity(base.len()); for (index, entry) in base.into_iter().enumerate() {{ path.push(PathSegment::Index(index)); let item = {item}; path.pop(); items.push(item); }} items }}"
             )
         }
         TypeRef::Nullable(inner) => format!(
             "match {value} {{ n if n.is_null() => None, other => Some({}) }}",
-            rust_coerce_value_expr(registry, path, inner, "other")
+            rust_coerce_value_expr(registry, path, inner, "other", cyclic)
         ),
     }
 }
@@ -827,6 +958,128 @@ fn rust_json_literal(literal: &Literal) -> String {
 
 fn format_rust_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Emit the runtime helpers that tokio-postgres query wrappers rely on:
+/// a text-format `ToSql` binder that accepts any target column type, and the
+/// `AxmToText` coercion trait used to render parameters as Postgres text
+/// literals.
+fn emit_db_helpers(out: &mut String) {
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
+    out.push_str("// tokio-postgres helpers\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
+    out.push_str("use tokio_postgres::types::{Format, IsNull, ToSql, Type};\n");
+    out.push_str("use tokio_postgres::types::private::BytesMut;\n");
+    out.push_str("use tokio_postgres::types::to_sql_checked;\n\n");
+
+    out.push_str("#[derive(Debug, Clone)]\n");
+    out.push_str("pub struct AxmTextValue {\n");
+    out.push_str("    pub value: String,\n");
+    out.push_str("    pub null: bool,\n");
+    out.push_str("}\n\n");
+
+    out.push_str("impl ToSql for AxmTextValue {\n");
+    out.push_str("    fn to_sql(&self, _ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {\n");
+    out.push_str("        if self.null {\n");
+    out.push_str("            Ok(IsNull::Yes)\n");
+    out.push_str("        } else {\n");
+    out.push_str("            out.extend_from_slice(self.value.as_bytes());\n");
+    out.push_str("            Ok(IsNull::No)\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("    fn accepts(_ty: &Type) -> bool {\n");
+    out.push_str("        true\n");
+    out.push_str("    }\n");
+    out.push_str("    fn encode_format(&self, _ty: &Type) -> Format {\n");
+    out.push_str("        Format::Text\n");
+    out.push_str("    }\n");
+    out.push_str("    to_sql_checked!();\n");
+    out.push_str("}\n\n");
+
+    out.push_str("pub trait AxmToText {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue;\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for String {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: self.clone(), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for i64 {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: self.to_string(), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for f64 {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: self.to_string(), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for bool {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: self.to_string(), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for serde_json::Value {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: self.to_string(), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl<T: AxmToText> AxmToText for Option<T> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        match self {\n");
+    out.push_str("            Some(v) => v.to_axm_text(),\n");
+    out.push_str("            None => AxmTextValue { value: String::new(), null: true },\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+/// Returns true when a query return type is a row-shaped model (decoded via
+/// `row_to_json`) rather than a scalar (decoded through a renamed text column).
+/// Names that resolve to neither a model nor an alias refer to table-shaped
+/// rows and are therefore treated as models too.
+fn is_model_return(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> bool {
+    scalar_from_text(registry, path, ty).is_none()
+}
+
+/// Rust expression that converts a local `String` binding named `text` into
+/// the scalar axiom type `ty`. Returns `None` for row-shaped (non-scalar)
+/// types.
+fn scalar_from_text(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> Option<String> {
+    match ty {
+        TypeRef::String | TypeRef::Uuid | TypeRef::Date | TypeRef::DateTime => {
+            Some("text".to_string())
+        }
+        TypeRef::Int | TypeRef::BigInt => Some("text.parse::<i64>()?".to_string()),
+        TypeRef::Float => Some("text.parse::<f64>()?".to_string()),
+        TypeRef::Boolean => Some("text.parse::<bool>()?".to_string()),
+        TypeRef::Json => Some("serde_json::from_str(&text)?".to_string()),
+        TypeRef::Bytes => Some("text.into_bytes()".to_string()),
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Pure(base) => scalar_from_text(registry, path, &base),
+            _ => None,
+        },
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => scalar_from_text(registry, path, inner),
+    }
+}
+
+/// Wraps a query so its rows can be decoded as a single text column carrying a
+/// JSON object (row-shaped results) or a renamed scalar text column.
+fn wrap_sql(sql: &str, model_row: bool) -> String {
+    let trimmed = sql.trim_end().trim_end_matches(';').trim_end();
+    if model_row {
+        format!(
+            "WITH axm_q AS ({trimmed}) SELECT row_to_json(axm_q)::text AS axm_row FROM axm_q"
+        )
+    } else {
+        format!(
+            "WITH axm_q AS ({trimmed}) SELECT (t.axm_value)::text AS axm_value FROM axm_q AS t(axm_value)"
+        )
+    }
 }
 
 fn emit_query(
@@ -845,7 +1098,7 @@ fn emit_query(
     );
     let _ = writeln!(out, "pub struct {params_type} {{");
     for param in &query.params {
-        let field = util::rust_field_name(&param.name);
+        let field = util::rust_field_ident(&param.name);
         let ty = rust_named_type(registry, path, &param.ty);
         let _ = writeln!(out, "    pub {field}: {ty},");
     }
@@ -878,7 +1131,8 @@ fn emit_query(
     out.push_str("}\n\n");
 
     let (sql, binds) = driver_sql(&query.sql, &query.params);
-    let sql_lit = rust_raw_string(&sql);
+    let sql_wrapped = wrap_sql(&sql, true);
+    let sql_scalar = wrap_sql(&sql, false);
 
     let ret_ty = match &query.return_type {
         QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, ty_ref)),
@@ -890,57 +1144,95 @@ fn emit_query(
     };
 
     let _ = writeln!(out, "pub async fn {fn_name}(");
-    let _ = writeln!(out, "    pool: &sqlx::PgPool,");
+    let _ = writeln!(out, "    client: &tokio_postgres::Client,");
     let _ = writeln!(out, "    params: {params_type},");
     let _ = writeln!(out, ") -> Result<{ret_ty}, Box<dyn std::error::Error>> {{");
     out.push_str(
         "    params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;\n",
     );
 
+    // Emit the parameter bindings as owned text values that outlive the
+    // borrowed `binds` slice.
+    for (index, bind) in binds.iter().enumerate() {
+        let _ = writeln!(out, "    let bind{index} = {bind}.to_axm_text();");
+    }
+    out.push_str("    let binds: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![");
+    if !binds.is_empty() {
+        let refs: Vec<String> = (0..binds.len())
+            .map(|i| format!("&bind{i}"))
+            .collect();
+        out.push_str(&refs.join(", "));
+    }
+    out.push_str("];\n");
+
     match &query.return_type {
-        QueryReturn::Many(ty_ref) | QueryReturn::Optional(ty_ref) => {
+        QueryReturn::Many(ty_ref) => {
             let ty = rust_named_type(registry, path, ty_ref);
-            let fetch = if matches!(query.return_type, QueryReturn::Many(_)) {
-                "fetch_all(pool)"
+            if is_model_return(registry, path, ty_ref) {
+                let _ = writeln!(out, "    let rows = client.query({}, &binds).await?;", rust_raw_string(&sql_wrapped));
+                let _ = writeln!(out, "    let mut out: Vec<{ty}> = Vec::with_capacity(rows.len());");
+                out.push_str("    for row in rows {\n");
+                out.push_str("        let js: String = row.try_get(0)?;\n");
+                out.push_str("        let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "        out.push(serde_json::from_value::<{ty}>(value)?);");
+                out.push_str("    }\n");
+                out.push_str("    Ok(out)\n");
             } else {
-                "fetch_optional(pool)"
-            };
-            let _ = writeln!(out, "    let rows = sqlx::query_as!(");
-            let _ = writeln!(out, "        {ty},");
-            let _ = writeln!(out, "        {sql_lit},");
-            for bind in &binds {
-                let _ = writeln!(out, "        {bind},");
+                let conv = scalar_from_text(registry, path, ty_ref)
+                    .unwrap_or_else(|| "text".to_string());
+                let _ = writeln!(out, "    let rows = client.query({}, &binds).await?;", rust_raw_string(&sql_scalar));
+                let _ = writeln!(out, "    let mut out: Vec<{ty}> = Vec::with_capacity(rows.len());");
+                out.push_str("    for row in rows {\n");
+                out.push_str("        let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "        out.push({conv});");
+                out.push_str("    }\n");
+                out.push_str("    Ok(out)\n");
             }
-            out.push_str("    )\n");
-            let _ = writeln!(out, "    .{fetch}");
-            out.push_str("    .await?;\n");
-            let _ = writeln!(out, "    Ok(rows)");
+        }
+        QueryReturn::Optional(ty_ref) => {
+            let ty = rust_named_type(registry, path, ty_ref);
+            if is_model_return(registry, path, ty_ref) {
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?;", rust_raw_string(&sql_wrapped));
+            } else {
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?;", rust_raw_string(&sql_scalar));
+            }
+            out.push_str("    match row {\n");
+            out.push_str("        Some(row) => {\n");
+            if is_model_return(registry, path, ty_ref) {
+                out.push_str("            let js: String = row.try_get(0)?;\n");
+                out.push_str("            let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "            Ok(Some(serde_json::from_value::<{ty}>(value)?))");
+            } else {
+                let conv = scalar_from_text(registry, path, ty_ref)
+                    .unwrap_or_else(|| "text".to_string());
+                out.push_str("            let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "            Ok(Some({conv}))");
+            }
+            out.push_str("        }\n");
+            out.push_str("        None => Ok(None),\n");
+            out.push_str("    }\n");
         }
         QueryReturn::Single(ty_ref) => {
             let ty = rust_named_type(registry, path, ty_ref);
-            let _ = writeln!(out, "    let rows = sqlx::query_as!(");
-            let _ = writeln!(out, "        {ty},");
-            let _ = writeln!(out, "        {sql_lit},");
-            for bind in &binds {
-                let _ = writeln!(out, "        {bind},");
+            if is_model_return(registry, path, ty_ref) {
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| format!(\"{pascal} returned no rows\"))?;", rust_raw_string(&sql_wrapped));
+            } else {
+                let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| format!(\"{pascal} returned no rows\"))?;", rust_raw_string(&sql_scalar));
             }
-            out.push_str("    )\n");
-            out.push_str("    .fetch_all(pool).await?;\n");
-            let _ = writeln!(
-                out,
-                "    let row = rows.into_iter().next().ok_or_else(|| format!(\"{pascal} returned no rows\"))?;"
-            );
-            let _ = writeln!(out, "    Ok(row)");
+            if is_model_return(registry, path, ty_ref) {
+                out.push_str("    let js: String = row.try_get(0)?;\n");
+                out.push_str("    let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "    Ok(serde_json::from_value::<{ty}>(value)?)");
+            } else {
+                let conv = scalar_from_text(registry, path, ty_ref)
+                    .unwrap_or_else(|| "text".to_string());
+                out.push_str("    let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "    Ok({conv})");
+            }
         }
         QueryReturn::Exec => {
-            let _ = writeln!(out, "    sqlx::query(");
-            let _ = writeln!(out, "        {sql_lit},");
-            out.push_str("    )\n");
-            for bind in &binds {
-                let _ = writeln!(out, "    .bind({bind})");
-            }
-            out.push_str("    .execute(pool)\n");
-            out.push_str("    .await?;\n");
+            let sql_plain = sql.trim_end().trim_end_matches(';').trim_end();
+            let _ = writeln!(out, "    client.execute({}, &binds).await?;", rust_raw_string(sql_plain));
             out.push_str("    Ok(())\n");
         }
     }
@@ -957,7 +1249,7 @@ fn emit_param_validation(
     if inlined.rules.is_empty() && inlined.transforms.is_empty() {
         return;
     }
-    let field = util::rust_field_name(&param.name);
+    let field = util::rust_field_ident(&param.name);
     let chain: String = inlined.transforms.iter().map(rust_transform_op).collect();
     let value = if chain.is_empty() {
         format!("self.{field}")
@@ -996,20 +1288,20 @@ fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<
             if fields.len() > 1 && fields[0] == "input" {
                 let input = params.iter().find(|p| p.name == "input")?;
                 let sub = fields[1..].join(".");
-                let mut field = util::rust_field_name(&input.name);
+                let mut field = util::rust_field_ident(&input.name);
                 field.push('.');
-                field.push_str(&util::rust_field_name(&sub));
+                field.push_str(&util::rust_field_ident(&sub));
                 return Some(format!("params.{field}"));
             }
             if token.bytes().all(|b| b.is_ascii_digit()) {
                 let n: usize = token.parse().unwrap_or(1).max(1);
                 let param = params.get(n - 1)?;
                 next = next.max(n + 1);
-                return Some(format!("params.{}", util::rust_field_name(&param.name)));
+                return Some(format!("params.{}", util::rust_field_ident(&param.name)));
             }
             if fields.len() == 1 {
                 let param = params.iter().find(|p| p.name == token)?;
-                return Some(format!("params.{}", util::rust_field_name(&param.name)));
+                return Some(format!("params.{}", util::rust_field_ident(&param.name)));
             }
             None
         };
@@ -1065,7 +1357,7 @@ mod tests {
             &no_catalog(),
         );
         assert!(out.contains(
-            "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, sqlx::FromRow)]"
+            "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]"
         ));
         assert!(out.contains("pub struct User {"));
         assert!(out.contains("pub email: String,"));
@@ -1175,6 +1467,39 @@ mod tests {
     }
 
     #[test]
+    fn keyword_named_fields_are_escaped() {
+        let src = "model Notification {\n  type: String\n  isRead: Boolean\n}\n";
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub r#type: String,"));
+        assert!(out.contains("out.r#type = value;"));
+        assert!(out.contains("record.get(\"type\")"));
+    }
+
+    #[test]
+    fn relational_cycles_box_fields() {
+        let src = r#"
+model User { id: UUID }
+model DirectConversation {
+  id: UUID
+  lastMessage: Message
+  userA: User
+}
+model Message {
+  id: UUID
+  conversation: DirectConversation
+  sender: User
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct DirectConversation {"));
+        assert!(out.contains("pub last_message: Box<Message>,"));
+        assert!(out.contains("pub user_a: User,"));
+        assert!(out.contains("pub struct Message {"));
+        assert!(out.contains("pub conversation: Box<DirectConversation>,"));
+        assert!(out.contains("pub sender: User,"));
+    }
+
+    #[test]
     fn nullable_fields_emit_option() {
         let out = generate_rust_models(&registry("model User {\n  bio: String?\n}"), &no_catalog());
         assert!(out.contains("pub bio: Option<String>,"));
@@ -1196,11 +1521,12 @@ query GetActiveUsers() -> User[] {
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(out.contains("pub struct GetUserParams {"));
         assert!(out.contains("pub async fn get_user("));
-        assert!(out.contains("params.id,"));
+        assert!(out.contains("client: &tokio_postgres::Client,"));
+        assert!(out.contains("params.id.to_axm_text()"));
         assert!(out.contains("WHERE id = $1"));
-        assert!(out.contains("fetch_optional(pool)"));
+        assert!(out.contains("client.query_opt"));
         assert!(out.contains("-> Result<Option<User>, Box<dyn std::error::Error>>"));
-        assert!(out.contains("fetch_all(pool)"));
+        assert!(out.contains("client.query"));
         assert!(out.contains("get_active_users"));
     }
 
@@ -1213,7 +1539,7 @@ query CreateUser($input: CreateUserInput) {
 }
 "#;
         let out = generate_rust_models(&registry(src), &no_catalog());
-        assert!(out.contains(".bind(params.input.email)") || out.contains("params.input.email,"));
+        assert!(out.contains("params.input.email.to_axm_text()"));
         assert!(out.contains("VALUES ($1)"));
     }
 
@@ -1272,6 +1598,6 @@ query GetUser($id: UUID) -> User {
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(out.contains("-> Result<User, Box<dyn std::error::Error>>"));
         assert!(out.contains("GetUser returned no rows"));
-        assert!(out.contains("Ok(row)"));
+        assert!(out.contains("serde_json::from_value::<User>(value)?)"));
     }
 }
