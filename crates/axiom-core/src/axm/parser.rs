@@ -5,11 +5,13 @@
 //!
 //! ```text
 //! file           := item*
-//! item           := import | type_decl | model_decl | query_decl
+//! item           := override* (model | query) | import | type_decl
 //! import         := "import" "{" name ("," name)* "}" "from" string [";"]
 //! name           := ident ("as" ident)?
 //! type_decl      := "type" ident "=" annotated_type [";"]
 //! model          := "model" ident ("extends" "select<" db_ident ">")? "{" field* "}"
+//! override       := "@" ident ("(" word ("," word)* ")")?
+//! word           := string | ident
 //! field          := (ident | string) "?"? ":" annotated_type ("=" literal)?
 //! annotated_type := type_ref call*
 //! call           := "." ident "(" args? ")"
@@ -30,6 +32,16 @@
 //! raw strings. Rule names are lowercase and canonical: `min_length` /
 //! `max_length` (the `min_len` / `max_len` aliases are rejected). Axiom
 //! identifiers are never case-canonicalized here.
+//!
+//! Model and query decorators: a `model` or `query` may be preceded by
+//! `@target(...)` (restrict codegen to the listed targets, quoted or bare
+//! words), which applies to both. `@no_codegen` (never emit a standalone
+//! validation API) applies to `model` declarations only and is rejected on
+//! `query` and `type` declarations. `@target` and `@no_codegen` are mutually
+//! exclusive on a model, each decorator may appear at most once per
+//! declaration, and an unknown decorator name or target is rejected.
+//! `@target` accepts either quote style: `@target("typescript", "rust")` and
+//! `@target('rust', 'typescript')`.
 
 use std::fmt;
 
@@ -45,8 +57,9 @@ use winnow::token::{any, one_of, take_while};
 type PResult<T> = winnow::ModalResult<T, ContextError>;
 
 use crate::axm::ast::{
-    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelSource,
-    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TypeDecl, TypeRef,
+    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
+    ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target, Transform,
+    TypeDecl, TypeRef,
 };
 
 /// A failed `.axm` parse with a human-readable message.
@@ -521,7 +534,198 @@ fn model_decl(input: &mut &str) -> PResult<ModelDecl> {
         name,
         source,
         fields,
+        overrides: Vec::new(),
     })
+}
+
+/// A `@...` decorator that precedes a `model` or `query` declaration. Fails
+/// (backtracks) when the input does not begin with `@`, so
+/// `repeat(0.., model_override)` can collect any number of decorators and stop
+/// cleanly at the first item that is not one.
+fn model_override(input: &mut &str) -> PResult<ModelOverride> {
+    (ws, '@').parse_next(input)?;
+    let name = ident.parse_next(input)?;
+    match name.as_str() {
+        "target" => {
+            let Some(words): Option<Vec<String>> = opt(delimited(
+                ('(', ws).map(|(c, _): (char, ())| c),
+                separated(1.., target_word, (ws, ',')),
+                (ws, ')').map(|(_, c): ((), char)| c),
+            ))
+            .parse_next(input)?
+            else {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError(
+                        "`@target` requires a target list, e.g. `@target(\"typescript\", \"rust\")`"
+                            .into(),
+                    ),
+                )));
+            };
+            let mut targets = Vec::with_capacity(words.len());
+            for word in words {
+                let Some(target) = Target::parse(&word) else {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError(format!(
+                            "unknown codegen target `{word}` in `@target` (expected `typescript` or `rust`)"
+                        )),
+                    )));
+                };
+                targets.push(target);
+            }
+            Ok(ModelOverride::Target(targets))
+        }
+        "no_codegen" => {
+            if opt('(').parse_next(input)?.is_some() {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError("`@no_codegen` takes no arguments".into()),
+                )));
+            }
+            Ok(ModelOverride::NoCodegen)
+        }
+        "parse" => {
+            if opt('(').parse_next(input)?.is_some() {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError("`@parse` takes no arguments".into()),
+                )));
+            }
+            Ok(ModelOverride::Parse)
+        }
+        "safeParse" => {
+            let Some((_ws, word)): Option<((), String)> = opt(delimited(
+                ('(', ws).map(|(c, _): (char, ())| c),
+                (ws, alt((quoted_word, ident))),
+                (ws, ')').map(|(_, c): ((), char)| c),
+            ))
+            .parse_next(input)?
+            else {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError(
+                        "`@safeParse` requires one argument: `@safeParse(\"first\")` or `@safeParse(\"all\")`"
+                            .into(),
+                    ),
+                )));
+            };
+            let Some(mode) = SafeParseMode::parse(&word) else {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError(format!(
+                        "unknown safeParse mode `{word}` (expected `first` or `all`)"
+                    )),
+                )));
+            };
+            Ok(ModelOverride::SafeParse(mode))
+        }
+        other => Err(ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError(format!("unknown model override `@{other}`")),
+        ))),
+    }
+}
+
+/// A target name inside `@target(...)`: a quoted string (either quote style)
+/// or a bare identifier. `separated` consumes whitespace up to the comma only,
+/// so skip any leading whitespace here.
+fn target_word(input: &mut &str) -> PResult<String> {
+    let (_, word) = (ws, alt((quoted_word, ident))).parse_next(input)?;
+    Ok(word)
+}
+
+/// A string literal delimited by either `'` or `"` (the rest of the grammar
+/// only accepts double quotes; `@target` accepts both).
+fn quoted_word(input: &mut &str) -> PResult<String> {
+    let mut quote = alt(('\'', '"')).parse_next(input)?;
+    let mut out = String::new();
+    loop {
+        let chunk = take_while(0.., |c: char| c != quote && c != '\\').parse_next(input)?;
+        out.push_str(chunk);
+        if opt('\\').parse_next(input)?.is_some() {
+            let escaped = any.parse_next(input)?;
+            out.push(match escaped {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\'' => '\'',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+        } else {
+            break;
+        }
+    }
+    quote.parse_next(input)?;
+    Ok(out)
+}
+
+/// Reject decorator combinations that cannot be honored: `@target` with
+/// `@no_codegen`, a parse-API toggle (`@no_codegen`) with a parse-API shape
+/// decorator (`@parse`/`@safeParse`), or a repeated decorator of the same kind.
+fn validate_override_combination(input: &mut &str, overrides: &[ModelOverride]) -> PResult<()> {
+    let mut has_target = false;
+    let mut has_no_codegen = false;
+    let mut has_parse = false;
+    let mut has_safe_parse = false;
+    for override_ in overrides {
+        match override_ {
+            ModelOverride::Target(_) => {
+                if has_target {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@target` is specified more than once".into()),
+                    )));
+                }
+                has_target = true;
+            }
+            ModelOverride::NoCodegen => {
+                if has_no_codegen {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@no_codegen` is specified more than once".into()),
+                    )));
+                }
+                has_no_codegen = true;
+            }
+            ModelOverride::Parse => {
+                if has_parse {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@parse` is specified more than once".into()),
+                    )));
+                }
+                has_parse = true;
+            }
+            ModelOverride::SafeParse(_) => {
+                if has_safe_parse {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@safeParse` is specified more than once".into()),
+                    )));
+                }
+                has_safe_parse = true;
+            }
+        }
+    }
+    if has_target && has_no_codegen {
+        return Err(ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError("`@target` cannot be combined with `@no_codegen` on the same model".into()),
+        )));
+    }
+    if has_no_codegen && (has_parse || has_safe_parse) {
+        return Err(ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError(
+                "`@no_codegen` cannot be combined with `@parse` or `@safeParse` on the same model"
+                    .into(),
+            ),
+        )));
+    }
+    Ok(())
 }
 
 fn param_decl(input: &mut &str) -> PResult<ParamDecl> {
@@ -568,6 +772,7 @@ fn query_decl(input: &mut &str) -> PResult<QueryDecl> {
         params,
         return_type,
         sql,
+        overrides: Vec::new(),
     })
 }
 
@@ -688,21 +893,66 @@ enum Item {
     Query(QueryDecl),
 }
 
+/// A single top-level declaration, optionally preceded by decorators. A
+/// decorator (or decorators) may precede a `model` or a `query` declaration;
+/// `@no_codegen` is rejected on `query` (it only applies to `model`), and
+/// decorators cannot decorate a `type` or `import`.
+fn item(input: &mut &str) -> PResult<Item> {
+    let overrides: Vec<ModelOverride> = repeat(0.., model_override).parse_next(input)?;
+    if overrides.is_empty() {
+        alt((
+            import_stmt.map(Item::Import),
+            type_decl.map(Item::Type),
+            model_decl.map(Item::Model),
+            query_decl.map(Item::Query),
+        ))
+        .parse_next(input)
+    } else {
+        ws(input)?;
+        // Decorators may introduce a `model` or a `query`; peek at the keyword
+        // so both are recognized and each validates its own decorator rules.
+        if peek(kw("model")).parse_next(input).is_ok() {
+            let mut model = model_decl.parse_next(input)?;
+            validate_override_combination(input, &overrides)?;
+            model.overrides = overrides;
+            Ok(Item::Model(model))
+        } else if peek(kw("query")).parse_next(input).is_ok() {
+            validate_query_overrides(input, &overrides)?;
+            let mut query = query_decl.parse_next(input)?;
+            query.overrides = overrides;
+            Ok(Item::Query(query))
+        } else {
+            Err(ErrMode::Cut(ContextError::from_external_error(
+                input,
+                RuleError(
+                    "`@...` decorators must precede a `model` or `query` declaration".into(),
+                ),
+            )))
+        }
+    }
+}
+
+/// `@no_codegen`, `@parse`, and `@safeParse` apply to `model` declarations
+/// only; a decorated query still honors duplicate-`@target` rejection.
+fn validate_query_overrides(input: &mut &str, overrides: &[ModelOverride]) -> PResult<()> {
+    for override_ in overrides {
+        let message = match override_ {
+            ModelOverride::NoCodegen => "`@no_codegen` only applies to `model` declarations",
+            ModelOverride::Parse => "`@parse` only applies to `model` declarations",
+            ModelOverride::SafeParse(_) => "`@safeParse` only applies to `model` declarations",
+            ModelOverride::Target(_) => continue,
+        };
+        return Err(ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError(message.into()),
+        )));
+    }
+    validate_override_combination(input, overrides)
+}
+
 fn axm_file(input: &mut &str) -> PResult<AxmFile> {
     ws(input)?;
-    let items: Vec<Item> = repeat(
-        0..,
-        terminated(
-            alt((
-                import_stmt.map(Item::Import),
-                type_decl.map(Item::Type),
-                model_decl.map(Item::Model),
-                query_decl.map(Item::Query),
-            )),
-            ws,
-        ),
-    )
-    .parse_next(input)?;
+    let items: Vec<Item> = repeat(0.., terminated(item, ws)).parse_next(input)?;
 
     let mut imports = Vec::new();
     let mut types = Vec::new();
@@ -821,6 +1071,185 @@ model User extends select<users> {
     fn parses_bare_model_without_source() {
         let file = parse("model User { name: String }");
         assert_eq!(file.models[0].source, None);
+    }
+
+    #[test]
+    fn parses_target_override_with_both_quote_styles() {
+        let file = parse("@target(\"typescript\", \"rust\")\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::Target(vec![
+                Target::TypeScript,
+                Target::Rust
+            ])]
+        );
+
+        let file = parse("@target('rust', 'typescript')\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::Target(vec![
+                Target::Rust,
+                Target::TypeScript
+            ])]
+        );
+        assert_eq!(
+            file.models[0].target_restriction(),
+            Some(&[Target::Rust, Target::TypeScript][..])
+        );
+    }
+
+    #[test]
+    fn parses_single_target_as_bare_word() {
+        let file = parse("@target(typescript)\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::Target(vec![Target::TypeScript])]
+        );
+    }
+
+    #[test]
+    fn parses_no_codegen_override() {
+        let file = parse("@no_codegen\nmodel User { id: UUID }");
+        assert_eq!(file.models[0].overrides, vec![ModelOverride::NoCodegen]);
+        assert!(file.models[0].is_no_codegen());
+        assert!(file.models[0].target_restriction().is_none());
+    }
+
+    #[test]
+    fn target_override_applies_to_queries() {
+        let file = parse(
+            "@target(\"rust\")\nquery Log($msg: String) { INSERT INTO logs (msg) VALUES ($msg) }",
+        );
+        assert_eq!(
+            file.queries[0].overrides,
+            vec![ModelOverride::Target(vec![Target::Rust])]
+        );
+        assert_eq!(
+            file.queries[0].target_restriction(),
+            Some(&[Target::Rust][..])
+        );
+    }
+
+    #[test]
+    fn no_codegen_rejected_on_queries_and_decorators_rejected_on_others() {
+        let err = parse_err(
+            "@no_codegen\nquery Log($msg: String) { INSERT INTO logs (msg) VALUES ($msg) }",
+        );
+        assert!(err.contains("only applies to `model`"), "{err}");
+        let err = parse_err("@parse\nquery Log($msg: String) { SELECT $msg }");
+        assert!(err.contains("`@parse` only applies to `model`"), "{err}");
+        let err = parse_err("@safeParse(\"first\")\nquery Log($msg: String) { SELECT $msg }");
+        assert!(err.contains("`@safeParse` only applies to `model`"), "{err}");
+        parse_err("@no_codegen\ntype Email = String;");
+        parse_err("@target(\"rust\")\nimport { User } from \"./users\";");
+        let err = parse_err("@target(\"rust\")\ntype Email = String;");
+        assert!(err.contains("must precede a `model` or `query`"), "{err}");
+    }
+
+    #[test]
+    fn decorators_can_stack_on_a_query() {
+        let file = parse(
+            "query A($x: Int) { SELECT $x }\n@target(\"typescript\", \"rust\")\nquery B($y: Int) { SELECT $y }",
+        );
+        assert_eq!(file.queries[0].target_restriction(), None);
+        assert_eq!(
+            file.queries[1].target_restriction(),
+            Some(&[Target::TypeScript, Target::Rust][..])
+        );
+    }
+
+    #[test]
+    fn rejects_target_combined_with_no_codegen() {
+        let err = parse_err("@target(\"typescript\")\n@no_codegen\nmodel User { id: UUID }");
+        assert!(err.contains("cannot be combined"), "{err}");
+    }
+
+    #[test]
+    fn rejects_repeated_overrides() {
+        let err =
+            parse_err("@target(\"typescript\")\n@target(\"rust\")\nmodel User { a: String }");
+        assert!(err.contains("more than once"), "{err}");
+        let err = parse_err("@no_codegen\n@no_codegen\nmodel User { a: String }");
+        assert!(err.contains("more than once"), "{err}");
+        let err = parse_err("@parse\n@parse\nmodel User { a: String }");
+        assert!(err.contains("more than once"), "{err}");
+        let err = parse_err("@safeParse(\"first\")\n@safeParse(\"all\")\nmodel User { a: String }");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_target_and_override() {
+        let err = parse_err("@target(\"golang\")\nmodel User { a: String }");
+        assert!(err.contains("unknown codegen target `golang`"), "{err}");
+        let err = parse_err("@truncate\nmodel User { a: String }");
+        assert!(err.contains("unknown model override `@truncate`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_or_unexpected_arguments() {
+        let err = parse_err("@target\nmodel User { a: String }");
+        assert!(err.contains("requires a target list"), "{err}");
+        let err = parse_err("@no_codegen()\nmodel User { a: String }");
+        assert!(err.contains("takes no arguments"), "{err}");
+        let err = parse_err("@parse(\"x\")\nmodel User { a: String }");
+        assert!(err.contains("takes no arguments"), "{err}");
+        let err = parse_err("@safeParse\nmodel User { a: String }");
+        assert!(err.contains("requires one argument"), "{err}");
+        let err = parse_err("@safeParse(\"first\", \"all\")\nmodel User { a: String }");
+        assert!(err.contains("requires one argument"), "{err}");
+    }
+
+    #[test]
+    fn parses_parse_and_safe_parse_overrides() {
+        let file = parse("@parse\n@safeParse(\"first\")\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![
+                ModelOverride::Parse,
+                ModelOverride::SafeParse(SafeParseMode::First)
+            ]
+        );
+        assert_eq!(file.models[0].safe_parse_mode(), SafeParseMode::First);
+
+        let file = parse("@safeParse('all')\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::SafeParse(SafeParseMode::All)]
+        );
+        assert_eq!(file.models[0].safe_parse_mode(), SafeParseMode::All);
+
+        let file = parse("@safeParse(all)\nmodel User { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::SafeParse(SafeParseMode::All)]
+        );
+
+        let file = parse("@target(\"typescript\")\n@parse\n@safeParse(\"all\")\nmodel User { a: String }");
+        assert_eq!(
+            file.models[0].target_restriction(),
+            Some(&[Target::TypeScript][..])
+        );
+        assert_eq!(file.models[0].safe_parse_mode(), SafeParseMode::All);
+    }
+
+    #[test]
+    fn safe_parse_defaults_to_all() {
+        let file = parse("@target(\"rust\")\nmodel User { id: UUID }");
+        assert_eq!(file.models[0].safe_parse_mode(), SafeParseMode::All);
+    }
+
+    #[test]
+    fn rejects_unknown_safe_parse_mode() {
+        let err = parse_err("@safeParse(\"both\")\nmodel User { id: UUID }");
+        assert!(err.contains("unknown safeParse mode `both`"), "{err}");
+    }
+
+    #[test]
+    fn rejects_parse_api_overrides_combined_with_no_codegen() {
+        let err = parse_err("@no_codegen\n@parse\nmodel User { a: String }");
+        assert!(err.contains("cannot be combined"), "{err}");
+        let err = parse_err("@safeParse(\"first\")\n@no_codegen\nmodel User { a: String }");
+        assert!(err.contains("cannot be combined"), "{err}");
     }
 
     #[test]

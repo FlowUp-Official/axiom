@@ -13,10 +13,11 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, Transform, TypeRef};
+use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, SafeParseMode, Transform, TypeRef};
 use crate::axm::codegen::{
-    NamedKind, Uses, canonical_name, collect_uses, effective_fields, inline_annotated, model_name,
-    named_kind,
+    ModelEmission, NamedKind, Target, Uses, ValidationOptions, canonical_name, collect_uses,
+    effective_fields, effective_safe_parse_mode, emit_plan, inline_annotated, model_name,
+    named_kind, query_emitted,
 };
 use crate::axm::resolver::ModelRegistry;
 use crate::catalog::TableCatalog;
@@ -37,11 +38,26 @@ const ALPHANUMERIC_RE: &str = r#"^[a-zA-Z0-9]+$"#;
 /// output already defines `ValidationError` (which the SQL generator always
 /// does), so it is reused rather than redefined.
 pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatalog) -> String {
+    generate_typescript_models_with_options(registry, catalog, &ValidationOptions::default())
+}
+
+/// Generate TypeScript for a registry with explicit `codegen.validation`
+/// options (which standalone parse APIs to emit and the default safeParse
+/// error-aggregation mode).
+pub fn generate_typescript_models_with_options(
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    options: &ValidationOptions,
+) -> String {
     if registry.is_empty() {
         return String::new();
     }
 
-    let uses = collect_uses(registry, catalog);
+    let plan = emit_plan(registry, Target::TypeScript);
+    let uses = collect_uses(registry, catalog, &plan, Target::TypeScript);
+    let fail_fast = plan.iter().any(|(resolved, _)| {
+        effective_safe_parse_mode(&resolved.model, options) == SafeParseMode::First
+    });
     let mut out = String::new();
     out.push_str(
         "\n// ---------------------------------------------------------------------------\n",
@@ -51,11 +67,17 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
         "// ---------------------------------------------------------------------------\n\n",
     );
 
-    if !registry.queries.is_empty() {
+    let emitted_queries = registry
+        .queries
+        .iter()
+        .filter(|resolved| query_emitted(&resolved.query, Target::TypeScript))
+        .collect::<Vec<_>>();
+
+    if !emitted_queries.is_empty() {
         out.push_str("import type { Sql } from 'postgres';\n\n");
     }
 
-    emit_helpers(&mut out, &uses);
+    emit_helpers(&mut out, &uses, fail_fast);
 
     for resolved in &registry.types {
         emit_type_alias_for(
@@ -67,9 +89,17 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
         );
     }
 
-    for resolved in &registry.models {
+    for (resolved, emission) in &plan {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
-        emit_model(&mut out, registry, &resolved.path, &resolved.model, &fields);
+        emit_model(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.model,
+            &fields,
+            *emission,
+            options,
+        );
     }
 
     for resolved in &registry.types {
@@ -82,14 +112,14 @@ pub fn generate_typescript_models(registry: &ModelRegistry, catalog: &TableCatal
         );
     }
 
-    for resolved in &registry.queries {
+    for resolved in emitted_queries {
         emit_query(&mut out, registry, &resolved.path, &resolved.query);
     }
 
     out
 }
 
-fn emit_helpers(out: &mut String, uses: &Uses) {
+fn emit_helpers(out: &mut String, uses: &Uses, fail_fast: bool) {
     out.push_str("type Seg = ['f', string] | ['i', number];\n\n");
     out.push_str("function renderPath(path: Seg[]): string {\n");
     out.push_str("  let out = '';\n");
@@ -100,10 +130,22 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     out.push_str("  return out;\n");
     out.push_str("}\n\n");
 
+    if fail_fast {
+        // `@safeParse("first")` short-circuits validation by throwing a
+        // sentinel once the first error is recorded; `_axm_fail_fast` is only
+        // true inside a first-mode `safeParse` call, so `fail` from any other
+        // call site (nested "all" paths, query params) still collects normally.
+        out.push_str("const AXM_STOP = Symbol('axm.stop');\n");
+        out.push_str("let _axm_fail_fast = false;\n\n");
+    }
+
     out.push_str(
         "function fail(errors: ValidationError[], path: Seg[], message: string): boolean {\n",
     );
     out.push_str("  errors.push({ path: renderPath(path), message });\n");
+    if fail_fast {
+        out.push_str("  if (_axm_fail_fast) throw AXM_STOP;\n");
+    }
     out.push_str("  return false;\n");
     out.push_str("}\n\n");
 
@@ -424,8 +466,11 @@ fn emit_model(
     path: &Path,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
+    emission: ModelEmission,
+    options: &ValidationOptions,
 ) {
     let type_name = model_name(model);
+    let first = effective_safe_parse_mode(model, options) == SafeParseMode::First;
 
     let _ = writeln!(out, "export interface {type_name} {{");
     for field in fields {
@@ -459,33 +504,86 @@ fn emit_model(
     let _ = writeln!(out, "  return out;");
     let _ = writeln!(out, "}}\n");
 
-    let _ = writeln!(
-        out,
-        "export type {type_name}Result = {{ ok: true; value: {type_name} }} | {{ ok: false; errors: ValidationError[] }};"
-    );
-    let _ = writeln!(
-        out,
-        "export function safeParse{type_name}(input: unknown): {type_name}Result {{"
-    );
-    let _ = writeln!(out, "  const errors: ValidationError[] = [];");
-    let _ = writeln!(out, "  const value = coerce{type_name}(input, [], errors);");
-    let _ = writeln!(
-        out,
-        "  if (errors.length > 0) return {{ ok: false, errors }};"
-    );
-    let _ = writeln!(out, "  return {{ ok: true, value }};");
-    let _ = writeln!(out, "}}\n");
-    let _ = writeln!(
-        out,
-        "export function parse{type_name}(input: unknown): {type_name} {{"
-    );
-    let _ = writeln!(out, "  const result = safeParse{type_name}(input);");
-    let _ = writeln!(
-        out,
-        "  if (!result.ok) throw new Error('{type_name} validation failed: ' + JSON.stringify(result.errors));"
-    );
-    let _ = writeln!(out, "  return result.value;");
-    let _ = writeln!(out, "}}\n");
+    if matches!(emission, ModelEmission::Full) {
+        if options.emit_safe_parse {
+            let _ = writeln!(
+                out,
+                "export type {type_name}Result = {{ ok: true; value: {type_name} }} | {{ ok: false; errors: ValidationError[] }};"
+            );
+            let _ = writeln!(
+                out,
+                "export function safeParse{type_name}(input: unknown): {type_name}Result {{"
+            );
+            let _ = writeln!(out, "  const errors: ValidationError[] = [];");
+            if first {
+                // `@safeParse("first")` (or `codegen.validation` `"errors": "first"`)
+                // — stop coercing at the first error.
+                let _ = writeln!(out, "  let value: {type_name} | undefined;");
+                let _ = writeln!(out, "  _axm_fail_fast = true;");
+                let _ = writeln!(out, "  try {{");
+                let _ = writeln!(out, "    value = coerce{type_name}(input, [], errors);");
+                let _ = writeln!(out, "  }} catch (e) {{");
+                let _ = writeln!(out, "    if (e !== AXM_STOP) throw e;");
+                let _ = writeln!(out, "  }} finally {{");
+                let _ = writeln!(out, "    _axm_fail_fast = false;");
+                let _ = writeln!(out, "  }}");
+                let _ = writeln!(
+                    out,
+                    "  if (errors.length > 0) return {{ ok: false, errors }};"
+                );
+                let _ = writeln!(out, "  return {{ ok: true, value: value as {type_name} }};");
+            } else {
+                let _ = writeln!(out, "  const value = coerce{type_name}(input, [], errors);");
+                let _ = writeln!(
+                    out,
+                    "  if (errors.length > 0) return {{ ok: false, errors }};"
+                );
+                let _ = writeln!(out, "  return {{ ok: true, value }};");
+            }
+            let _ = writeln!(out, "}}\n");
+        }
+        if options.emit_parse {
+            let _ = writeln!(
+                out,
+                "export function parse{type_name}(input: unknown): {type_name} {{"
+            );
+            if options.emit_safe_parse {
+                let _ = writeln!(out, "  const result = safeParse{type_name}(input);");
+                let _ = writeln!(
+                    out,
+                    "  if (!result.ok) throw new Error('{type_name} validation failed: ' + JSON.stringify(result.errors));"
+                );
+                let _ = writeln!(out, "  return result.value;");
+            } else if first {
+                // Standalone `parse` (no `safeParse` requested): stop at the
+                // first error and throw directly.
+                let _ = writeln!(out, "  const errors: ValidationError[] = [];");
+                let _ = writeln!(out, "  let value: {type_name} | undefined;");
+                let _ = writeln!(out, "  _axm_fail_fast = true;");
+                let _ = writeln!(out, "  try {{");
+                let _ = writeln!(out, "    value = coerce{type_name}(input, [], errors);");
+                let _ = writeln!(out, "  }} catch (e) {{");
+                let _ = writeln!(out, "    if (e !== AXM_STOP) throw e;");
+                let _ = writeln!(out, "  }} finally {{");
+                let _ = writeln!(out, "    _axm_fail_fast = false;");
+                let _ = writeln!(out, "  }}");
+                let _ = writeln!(
+                    out,
+                    "  if (errors.length > 0) throw new Error('{type_name} validation failed: ' + JSON.stringify(errors));"
+                );
+                let _ = writeln!(out, "  return value as {type_name};");
+            } else {
+                let _ = writeln!(out, "  const errors: ValidationError[] = [];");
+                let _ = writeln!(out, "  const value = coerce{type_name}(input, [], errors);");
+                let _ = writeln!(
+                    out,
+                    "  if (errors.length > 0) throw new Error('{type_name} validation failed: ' + JSON.stringify(errors));"
+                );
+                let _ = writeln!(out, "  return value;");
+            }
+            let _ = writeln!(out, "}}\n");
+        }
+    }
 }
 
 fn emit_field(
@@ -871,6 +969,49 @@ mod tests {
     }
 
     #[test]
+    fn safe_parse_first_stops_at_first_error() {
+        let src = "@safeParse(\"first\")\nmodel User {\n  email: String .email()\n  age: Int .min(0)\n}";
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("const AXM_STOP = Symbol('axm.stop');"), "{out}");
+        assert!(out.contains("let _axm_fail_fast = false;"));
+        assert!(out.contains("if (_axm_fail_fast) throw AXM_STOP;"));
+        assert!(out.contains("_axm_fail_fast = true;"));
+        assert!(out.contains("} catch (e) {"));
+        assert!(out.contains("if (e !== AXM_STOP) throw e;"));
+        assert!(out.contains("return { ok: true, value: value as User };"));
+        assert!(out.contains("export function parseUser("));
+    }
+
+    #[test]
+    fn safe_parse_all_is_default_and_parse_marker_is_noop() {
+        let src = "@parse\n@safeParse(\"all\")\nmodel User {\n  email: String .email()\n}";
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(!out.contains("AXM_STOP"), "{out}");
+        assert!(!out.contains("_axm_fail_fast"));
+        assert!(out.contains("const value = coerceUser(input, [], errors);"));
+        assert!(out.contains("export function parseUser("));
+    }
+
+    #[test]
+    fn first_and_all_models_coexist_in_one_module() {
+        let src = r#"
+@safeParse("first")
+model Admin {
+  email: String .email()
+}
+@safeParse("all")
+model User {
+  email: String .email()
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("const AXM_STOP"));
+        assert!(out.contains("export function safeParseUser(input: unknown): UserResult {"));
+        let user_block = &out[out.find("safeParseUser").unwrap()..];
+        assert!(!user_block.contains("_axm_fail_fast"));
+    }
+
+    #[test]
     fn emits_safe_parse_and_parse() {
         let out = generate_typescript_models(
             &registry("model User {\n  email: String\n}"),
@@ -882,6 +1023,94 @@ mod tests {
         assert!(out.contains(
             "throw new Error('User validation failed: ' + JSON.stringify(result.errors));"
         ));
+    }
+
+    #[test]
+    fn options_parse_only_emits_standalone_parse() {
+        let opts = ValidationOptions {
+            emit_safe_parse: false,
+            emit_parse: true,
+            default_errors: SafeParseMode::All,
+        };
+        let out = generate_typescript_models_with_options(
+            &registry("model User {\n  email: String .email()\n}"),
+            &no_catalog(),
+            &opts,
+        );
+        assert!(!out.contains("function safeParse"), "{out}");
+        assert!(!out.contains("UserResult"));
+        assert!(out.contains("export function parseUser(input: unknown): User {"));
+        assert!(!out.contains("const result = safeParseUser(input);"));
+        assert!(out.contains(
+            "if (errors.length > 0) throw new Error('User validation failed: ' + JSON.stringify(errors));"
+        ));
+    }
+
+    #[test]
+    fn options_safe_parse_only_emits_safe_parse() {
+        let opts = ValidationOptions {
+            emit_safe_parse: true,
+            emit_parse: false,
+            default_errors: SafeParseMode::All,
+        };
+        let out = generate_typescript_models_with_options(
+            &registry("model User {\n  email: String\n}"),
+            &no_catalog(),
+            &opts,
+        );
+        assert!(out.contains("export function safeParseUser(input: unknown): UserResult {"));
+        assert!(!out.contains("export function parseUser("), "{out}");
+    }
+
+    #[test]
+    fn options_empty_emits_neither_api() {
+        let opts = ValidationOptions {
+            emit_safe_parse: false,
+            emit_parse: false,
+            default_errors: SafeParseMode::All,
+        };
+        let out = generate_typescript_models_with_options(
+            &registry("model User {\n  email: String\n}"),
+            &no_catalog(),
+            &opts,
+        );
+        assert!(!out.contains("function safeParse"), "{out}");
+        assert!(!out.contains("function parseUser"), "{out}");
+        assert!(out.contains("export interface User {"));
+        assert!(out.contains("function coerceUser("));
+    }
+
+    #[test]
+    fn options_default_first_applies_without_decorator() {
+        let opts = ValidationOptions {
+            emit_safe_parse: true,
+            emit_parse: true,
+            default_errors: SafeParseMode::First,
+        };
+        let out = generate_typescript_models_with_options(
+            &registry("model User {\n  email: String .email()\n}"),
+            &no_catalog(),
+            &opts,
+        );
+        assert!(out.contains("const AXM_STOP"), "{out}");
+        assert!(out.contains("_axm_fail_fast = true;"));
+        assert!(out.contains("export function safeParseUser(input: unknown): UserResult {"));
+    }
+
+    #[test]
+    fn decorator_overrides_config_default() {
+        let opts = ValidationOptions {
+            emit_safe_parse: true,
+            emit_parse: true,
+            default_errors: SafeParseMode::First,
+        };
+        let out = generate_typescript_models_with_options(
+            &registry("@safeParse(\"all\")\nmodel User {\n  email: String .email()\n}"),
+            &no_catalog(),
+            &opts,
+        );
+        assert!(!out.contains("AXM_STOP"), "{out}");
+        assert!(out.contains("const value = coerceUser(input, [], errors);"));
     }
 
     #[test]
@@ -943,6 +1172,57 @@ mod tests {
             generate_typescript_models(&ModelRegistry::default(), &no_catalog()),
             ""
         );
+    }
+
+    #[test]
+    fn target_override_filters_models() {
+        let src = r#"
+@target("typescript")
+model Internal {
+  id: UUID
+}
+@target("rust")
+model RustOnly {
+  id: UUID
+}
+@target('typescript', 'rust')
+model Shared {
+  id: UUID
+}
+model Open {
+  id: UUID
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface Internal {"));
+        assert!(out.contains("export interface Shared {"));
+        assert!(out.contains("export interface Open {"));
+        assert!(!out.contains("RustOnly"));
+    }
+
+    #[test]
+    fn no_codegen_models_emit_only_when_referenced() {
+        let src = r#"
+@no_codegen
+model Secret {
+  id: UUID
+}
+model User {
+  account: Account
+}
+@no_codegen
+model Account {
+  id: UUID
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(!out.contains("Secret"));
+        assert!(out.contains("export interface Account {"));
+        assert!(out.contains("  account: Account;"));
+        assert!(out.contains("function coerceAccount("));
+        assert!(!out.contains("safeParseAccount"));
+        assert!(!out.contains("parseAccount"));
+        assert!(!out.contains("AccountResult"));
     }
 
     #[test]
@@ -1017,6 +1297,41 @@ query GetActiveUsers() -> User[] {
         assert!(out.contains("return rows[0] ?? null;"));
         assert!(out.contains("Promise<User[]>"));
         assert!(out.contains("export async function getActiveUsers("));
+    }
+
+    #[test]
+    fn target_override_filters_queries() {
+        let src = r#"
+@target("typescript")
+query TsOnly($id: UUID) -> Int {
+  SELECT 1;
+}
+@target("rust")
+query RustOnly($id: UUID) -> Int {
+  SELECT 1;
+}
+query Open($id: UUID) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export async function tsOnly("));
+        assert!(out.contains("export async function open("));
+        assert!(!out.contains("rustOnly"));
+        assert!(!out.contains("RustOnlyParams"));
+    }
+
+    #[test]
+    fn target_excluded_queries_do_not_pull_in_sql_import_or_helpers() {
+        let src = r#"
+@target("rust")
+query OnlyRust($id: UUID) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(!out.contains("Sql"), "no db import for a rust-only query");
+        assert!(!out.contains("export async function"));
     }
 
     #[test]

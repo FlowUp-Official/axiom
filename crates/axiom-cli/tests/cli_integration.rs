@@ -48,7 +48,12 @@ fn write_fixture(dir: &Path, schema: &str) {
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
-  "validation": { "on_error": "fail" },
+  "codegen": {
+    "validation": {
+      "apis": ["safeParse", "parse"],
+      "safeParse": { "errors": "all" }
+    }
+  },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },
     "core": { "type": "rust", "path": "gen/core.rs" }
@@ -371,7 +376,12 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
-  "validation": { "on_error": "fail" },
+  "codegen": {
+    "validation": {
+      "apis": ["safeParse", "parse"],
+      "safeParse": { "errors": "all" }
+    }
+  },
   "outputs": {
     "api": { "type": "typescript", "path": "gen/api.ts" },
     "core": { "type": "rust", "path": "gen/core.rs" }
@@ -402,5 +412,125 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
     assert!(
         stderr.contains("lint.missing-where-clause"),
         "stderr should report missing-where-clause: {stderr}"
+    );
+}
+
+const APIS_MODELS_AXM: &str = r#"
+model User {
+  email: String .email()
+  age: Int .min(0)
+}
+"#;
+
+fn write_apis_fixture(dir: &Path, config_json: &str) {
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::write(dir.join("axiom.json"), config_json).unwrap();
+    std::fs::write(dir.join("schema.sql"), SCHEMA_SQL).unwrap();
+    std::fs::write(dir.join("models/models.axm"), APIS_MODELS_AXM).unwrap();
+}
+
+fn config_with_apis(apis: &str) -> String {
+    format!(
+        r#"{{
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "project": {{ "name": "fixture", "dialect": "postgres" }},
+  "cache": {{ "enabled": false, "path": ".axiom.cache" }},
+  "source": {{ "schema": ["schema.sql"], "axm": ["models/models.axm"] }},
+  "codegen": {{
+    "validation": {{
+      "apis": {apis}
+    }}
+  }},
+  "outputs": {{
+    "api": {{ "type": "typescript", "path": "gen/api.ts" }},
+    "core": {{ "type": "rust", "path": "gen/core.rs" }}
+  }}
+}}
+"#,
+    )
+}
+
+#[test]
+fn safe_parse_only_emits_no_parse() {
+    let dir = fixture_dir("run_apis_safe_parse_only");
+    write_apis_fixture(&dir, &config_with_apis(r#"["safeParse"]"#));
+    // safeParse requires its config object since it's in apis.
+    let config_path = dir.join("axiom.json");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        r#""validation": {
+      "apis": ["safeParse"]
+    }"#,
+        r#""validation": {
+      "apis": ["safeParse"],
+      "safeParse": { "errors": "all" }
+    }"#,
+    );
+    std::fs::write(&config_path, config).unwrap();
+
+    let output = run_generate(&dir);
+    assert!(output.status.success(), "generate failed: {}", stdout(&output));
+
+    let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
+    assert!(ts.contains("export function safeParseUser("));
+    assert!(!ts.contains("export function parseUser("), "parse should not be emitted");
+
+    let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
+    assert!(rs.contains("pub fn safe_parse("));
+    assert!(!rs.contains("pub fn parse("), "parse should not be emitted");
+}
+
+#[test]
+fn parse_only_emits_standalone_parse() {
+    let dir = fixture_dir("run_apis_parse_only");
+    write_apis_fixture(&dir, &config_with_apis(r#"["parse"]"#));
+
+    let output = run_generate(&dir);
+    assert!(output.status.success(), "generate failed: {}", stdout(&output));
+
+    let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
+    assert!(ts.contains("export function parseUser("));
+    assert!(!ts.contains("function safeParse"), "safeParse should not be emitted");
+    assert!(
+        !ts.contains("const result = safeParseUser"),
+        "standalone parse should not delegate to safeParse"
+    );
+
+    let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
+    assert!(rs.contains("pub fn parse("));
+    assert!(!rs.contains("pub fn safe_parse("), "safe_parse should not be emitted");
+}
+
+#[test]
+fn safe_parse_first_errors_mode_drives_fail_fast_default() {
+    let dir = fixture_dir("run_apis_safe_parse_first");
+    write_apis_fixture(&dir, &config_with_apis(r#"["safeParse"]"#));
+    let config_path = dir.join("axiom.json");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config = config.replace(
+        r#""validation": {
+      "apis": ["safeParse"]
+    }"#,
+        r#""validation": {
+      "apis": ["safeParse"],
+      "safeParse": { "errors": "first" }
+    }"#,
+    );
+    std::fs::write(&config_path, config).unwrap();
+
+    let output = run_generate(&dir);
+    assert!(output.status.success(), "generate failed: {}", stdout(&output));
+
+    let ts = std::fs::read_to_string(dir.join("gen/api.ts")).expect("api.ts should exist");
+    assert!(
+        ts.contains("AXM_STOP"),
+        "first mode should emit fail-fast scaffolding in TS"
+    );
+    assert!(ts.contains("_axm_fail_fast"));
+
+    let rs = std::fs::read_to_string(dir.join("gen/core.rs")).expect("core.rs should exist");
+    assert!(
+        rs.contains("AXM_FAIL_FAST"),
+        "first mode should emit fail-fast scaffolding in Rust"
     );
 }

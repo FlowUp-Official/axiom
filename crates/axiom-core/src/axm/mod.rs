@@ -11,8 +11,14 @@ pub mod codegen;
 pub mod parser;
 pub mod resolver;
 
-pub use ast::{AxmFile, FieldDecl, ModelDecl, QueryDecl, Rule, Transform, TypeRef};
-pub use codegen::{generate_rust_models, generate_typescript_models};
+pub use ast::{
+    AxmFile, FieldDecl, ModelDecl, ModelOverride, QueryDecl, Rule, SafeParseMode, Target,
+    Transform, TypeRef,
+};
+pub use codegen::{
+    generate_rust_models, generate_rust_models_with_options, generate_typescript_models,
+    generate_typescript_models_with_options, ValidationOptions,
+};
 pub use parser::parse_axm_file;
 pub use resolver::{ModelRegistry, query_catalog, query_definition, resolve_models, type_ref_name};
 

@@ -18,6 +18,15 @@ A TypeScript module that pairs with the `postgres` driver:
   (`$1`) and named (`$email`) placeholders are rewritten to postgres.js
   parameter syntax, and params are validated before the query executes.
 
+Declarations flagged `@target("rust")` (models **or** queries) are skipped by
+the TypeScript generator — a filtered-out query emits neither its function nor
+a `Sql` import. Models flagged `@no_codegen` always get the interface and
+`coerce` function but never a `safeParse`/`parse` entry point, and are omitted
+entirely when no emitted declaration references them. `@safeParse("first")`
+models emit fail-fast `safeParse` functions that stop at the first validation
+error (plus a module-level `AXM_STOP` sentinel when any model asks for it).
+See [Model decorators](/guide/axm#model-decorators).
+
 ```ts
 import type { Sql } from 'postgres';
 
@@ -51,6 +60,14 @@ A Rust module that pairs with `tokio-postgres`:
   validation runs before the query executes; params are bound as text so
   Postgres coerces them to the target column types at runtime.
 
+Declarations flagged `@target("typescript")` (models **or** queries) are
+skipped by the Rust generator; models flagged `@no_codegen` get the `pub
+struct` and the free `coerce_*` function but no `impl` block with
+`parse`/`safe_parse`. `@safeParse("first")` models emit a fail-fast
+`safe_parse` that records only the first validation error (using
+`thread_local!` state emitted when any model asks for it). See
+[Model decorators](/guide/axm#model-decorators).
+
 ```rust
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Users {
@@ -74,6 +91,12 @@ pub async fn get_user(
 
 - **Naming conversions** — SQL `snake_case` names are converted per target:
   `camelCase` for TypeScript, `snake_case` for Rust.
+- **Per-model decorators** — `@target(...)` filters both model and query output
+  per target in both generators; `@no_codegen` (models only) suppresses the
+  standalone parse API; `@parse` is a no-op marker; `@safeParse("first")` /
+  `@safeParse("all")` (models only) select fail-fast vs. collect-all error
+  handling for the standalone parse API. Models referenced only by emitted
+  declarations are pulled in with just their type and coercion logic.
 - **Only what you use** — validation helpers (e.g. regex presets for email/UUID)
   are emitted lazily, so unused rules do not bloat the output.
 - **Deterministic output** — generation is a pure function of the inputs, so

@@ -20,12 +20,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, Transform, TypeRef};
-use crate::axm::codegen::{
-    NamedKind, Uses, collect_uses, effective_fields, inline_annotated, model_name, named_kind,
-    rule_message,
+use crate::axm::ast::{
+    AnnotatedType, Literal, QueryReturn, Rule, SafeParseMode, Transform, TypeRef,
 };
-use crate::axm::resolver::ModelRegistry;
+use crate::axm::codegen::{
+    ModelEmission, NamedKind, Target, Uses, ValidationOptions, collect_model_deps, collect_uses,
+    effective_fields, effective_safe_parse_mode, emit_plan, inline_annotated, model_name,
+    named_kind, query_emitted, rule_message,
+};
+use crate::axm::resolver::{ModelRegistry, ResolvedModel};
 use crate::catalog::TableCatalog;
 use crate::codegen::rust::REGEX_MATCHER;
 use crate::codegen::util;
@@ -34,12 +37,27 @@ use crate::codegen::util;
 /// output already defines `ValidationError` (which the SQL generator always
 /// does), so it is reused rather than redefined.
 pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) -> String {
+    generate_rust_models_with_options(registry, catalog, &ValidationOptions::default())
+}
+
+/// Generate Rust for a registry with explicit `codegen.validation` options
+/// (which standalone parse APIs to emit and the default safeParse
+/// error-aggregation mode).
+pub fn generate_rust_models_with_options(
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    options: &ValidationOptions,
+) -> String {
     if registry.is_empty() {
         return String::new();
     }
 
-    let uses = collect_uses(registry, catalog);
-    let cyclic = cyclic_models(registry, catalog);
+    let plan = emit_plan(registry, Target::Rust);
+    let uses = collect_uses(registry, catalog, &plan, Target::Rust);
+    let cyclic = cyclic_models(registry, catalog, &plan);
+    let fail_fast = plan.iter().any(|(resolved, _)| {
+        effective_safe_parse_mode(&resolved.model, options) == SafeParseMode::First
+    });
     let mut out = String::new();
     out.push_str(
         "\n// ---------------------------------------------------------------------------\n",
@@ -49,9 +67,15 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
         "// ---------------------------------------------------------------------------\n\n",
     );
 
-    emit_helpers(&mut out, &uses);
+    emit_helpers(&mut out, &uses, fail_fast);
 
-    if !registry.queries.is_empty() {
+    let emitted_queries = registry
+        .queries
+        .iter()
+        .filter(|resolved| query_emitted(&resolved.query, Target::Rust))
+        .collect::<Vec<_>>();
+
+    if !emitted_queries.is_empty() {
         emit_db_helpers(&mut out);
     }
 
@@ -64,7 +88,7 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
             &resolved.ty.ty,
         );
     }
-    for resolved in &registry.models {
+    for (resolved, _) in &plan {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
         emit_struct(
             &mut out,
@@ -75,10 +99,19 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
             &cyclic,
         );
     }
-    for resolved in &registry.models {
+    for (resolved, emission) in &plan {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
-        emit_impl_and_coerce(&mut out, registry, &resolved.path, &resolved.model, &fields,
-            &cyclic);
+        emit_impl_and_coerce(
+            &mut out,
+            registry,
+            &resolved.path,
+            &resolved.model,
+            &fields,
+            &cyclic,
+            *emission,
+            fail_fast,
+            options,
+        );
     }
     for resolved in &registry.types {
         emit_alias_coerce(
@@ -90,7 +123,7 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
             &cyclic,
         );
     }
-    for resolved in &registry.queries {
+    for resolved in emitted_queries {
         emit_query(&mut out, registry, &resolved.path, &resolved.query);
     }
 
@@ -103,7 +136,7 @@ pub fn generate_rust_models(registry: &ModelRegistry, catalog: &TableCatalog) ->
     out
 }
 
-fn emit_helpers(out: &mut String, uses: &Uses) {
+fn emit_helpers(out: &mut String, uses: &Uses, fail_fast: bool) {
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("pub enum PathSegment {\n");
     out.push_str("    Field(String),\n");
@@ -135,11 +168,30 @@ fn emit_helpers(out: &mut String, uses: &Uses) {
     out.push_str(
         "fn push_error(errors: &mut Vec<ValidationError>, path: &[PathSegment], message: &str) {\n",
     );
+    if fail_fast {
+        // `@safeParse("first")` short-circuits validation by recording only the
+        // first error and flagging the run so field/array guards stop coercing.
+        out.push_str("    if axm_stopped(errors) {\n");
+        out.push_str("        return;\n");
+        out.push_str("    }\n");
+    }
     out.push_str("    errors.push(ValidationError {\n");
     out.push_str("        path: render_path(path),\n");
     out.push_str("        message: message.to_string(),\n");
     out.push_str("    });\n");
     out.push_str("}\n\n");
+
+    if fail_fast {
+        // Whether any `@safeParse("first")` parse is currently running. Only
+        // `safe_parse` toggles this, so "all" parses and query-param/alias
+        // validation always collect normally.
+        out.push_str(
+            "thread_local! {\n    static AXM_FAIL_FAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };\n}\n\n",
+        );
+        out.push_str("fn axm_stopped(errors: &[ValidationError]) -> bool {\n");
+        out.push_str("    !errors.is_empty() && AXM_FAIL_FAST.with(|c| c.get())\n");
+        out.push_str("}\n\n");
+    }
 
     if uses.string {
         emit_coerce_helper(out, "coerce_string", "String", "expected a string", false);
@@ -481,6 +533,7 @@ fn emit_struct(
     let _ = writeln!(out, "}}\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_impl_and_coerce(
     out: &mut String,
     registry: &ModelRegistry,
@@ -488,43 +541,99 @@ fn emit_impl_and_coerce(
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
     cyclic: &BTreeSet<String>,
+    emission: ModelEmission,
+    fail_fast: bool,
+    options: &ValidationOptions,
 ) {
     let type_name = model_name(model);
     let coerce_name = coerce_fn_name(&model.name);
+    let first = fail_fast && effective_safe_parse_mode(model, options) == SafeParseMode::First;
 
-    let _ = writeln!(out, "impl {type_name} {{");
-    let _ = writeln!(
-        out,
-        "    pub fn safe_parse(value: &serde_json::Value) -> Result<{type_name}, Vec<ValidationError>> {{"
-    );
-    let _ = writeln!(
-        out,
-        "        let mut errors: Vec<ValidationError> = Vec::new();"
-    );
-    let _ = writeln!(out, "        let mut path: Vec<PathSegment> = Vec::new();");
-    let _ = writeln!(
-        out,
-        "        let out = {coerce_name}(value, &mut path, &mut errors);"
-    );
-    let _ = writeln!(out, "        if errors.is_empty() {{");
-    let _ = writeln!(out, "            Ok(out)");
-    let _ = writeln!(out, "        }} else {{");
-    let _ = writeln!(out, "            Err(errors)");
-    let _ = writeln!(out, "        }}");
-    let _ = writeln!(out, "    }}\n");
-    let _ = writeln!(
-        out,
-        "    pub fn parse(value: &serde_json::Value) -> {type_name} {{"
-    );
-    let _ = writeln!(out, "        match Self::safe_parse(value) {{");
-    let _ = writeln!(out, "            Ok(value) => value,");
-    let _ = writeln!(
-        out,
-        "            Err(errors) => panic!(\"{type_name} validation failed: {{errors:?}}\"),"
-    );
-    let _ = writeln!(out, "        }}");
-    let _ = writeln!(out, "    }}");
-    let _ = writeln!(out, "}}\n");
+    // `@no_codegen` models have their type and `coerce` emitted (referencing
+    // declarations depend on them) but no standalone `safe_parse`/`parse`.
+    if matches!(emission, ModelEmission::Full) {
+        let _ = writeln!(out, "impl {type_name} {{");
+        if options.emit_safe_parse {
+            let _ = writeln!(
+                out,
+                "    pub fn safe_parse(value: &serde_json::Value) -> Result<{type_name}, Vec<ValidationError>> {{"
+            );
+            let _ = writeln!(
+                out,
+                "        let mut errors: Vec<ValidationError> = Vec::new();"
+            );
+            let _ = writeln!(
+                out,
+                "        let mut path: Vec<PathSegment> = Vec::new();"
+            );
+            if first {
+                let _ = writeln!(out, "        let prev_fail_fast = AXM_FAIL_FAST.with(|c| c.get());");
+                let _ = writeln!(out, "        AXM_FAIL_FAST.with(|c| c.set(true));");
+            }
+            let _ = writeln!(
+                out,
+                "        let out = {coerce_name}(value, &mut path, &mut errors);"
+            );
+            if first {
+                let _ = writeln!(out, "        AXM_FAIL_FAST.with(|c| c.set(prev_fail_fast));");
+            }
+            let _ = writeln!(out, "        if errors.is_empty() {{");
+            let _ = writeln!(out, "            Ok(out)");
+            let _ = writeln!(out, "        }} else {{");
+            let _ = writeln!(out, "            Err(errors)");
+            let _ = writeln!(out, "        }}");
+            let _ = writeln!(out, "    }}\n");
+        }
+        if options.emit_parse {
+            let _ = writeln!(
+                out,
+                "    pub fn parse(value: &serde_json::Value) -> {type_name} {{"
+            );
+            if options.emit_safe_parse {
+                let _ = writeln!(out, "        match Self::safe_parse(value) {{");
+                let _ = writeln!(out, "            Ok(value) => value,");
+                let _ = writeln!(
+                    out,
+                    "            Err(errors) => panic!(\"{type_name} validation failed: {{errors:?}}\"),"
+                );
+                let _ = writeln!(out, "        }}");
+            } else {
+                // Standalone `parse` (no `safe_parse` requested): inline the
+                // coercion and panic on the first (or all) errors.
+                let _ = writeln!(
+                    out,
+                    "        let mut errors: Vec<ValidationError> = Vec::new();"
+                );
+                let _ = writeln!(
+                    out,
+                    "        let mut path: Vec<PathSegment> = Vec::new();"
+                );
+                if first {
+                    let _ = writeln!(out, "        let prev_fail_fast = AXM_FAIL_FAST.with(|c| c.get());");
+                    let _ = writeln!(out, "        AXM_FAIL_FAST.with(|c| c.set(true));");
+                }
+                let _ = writeln!(
+                    out,
+                    "        let out = {coerce_name}(value, &mut path, &mut errors);"
+                );
+                if first {
+                    let _ = writeln!(out, "        AXM_FAIL_FAST.with(|c| c.set(prev_fail_fast));");
+                }
+                let _ = writeln!(
+                    out,
+                    "        if !errors.is_empty() {{"
+                );
+                let _ = writeln!(
+                    out,
+                    "            panic!(\"{type_name} validation failed: {{errors:?}}\");"
+                );
+                let _ = writeln!(out, "        }}");
+                let _ = writeln!(out, "        out");
+            }
+            let _ = writeln!(out, "    }}");
+        }
+        let _ = writeln!(out, "}}\n");
+    }
 
     let _ = writeln!(
         out,
@@ -539,7 +648,13 @@ fn emit_impl_and_coerce(
     let _ = writeln!(out, "        return out;");
     let _ = writeln!(out, "    }};");
     for field in fields {
-        emit_field(out, registry, path, field, 4, cyclic);
+        if fail_fast {
+            let _ = writeln!(out, "    if !axm_stopped(&errors) {{");
+            emit_field(out, registry, path, field, 6, cyclic, fail_fast);
+            let _ = writeln!(out, "    }}");
+        } else {
+            emit_field(out, registry, path, field, 4, cyclic, fail_fast);
+        }
     }
     let _ = writeln!(out, "    out");
     let _ = writeln!(out, "}}\n");
@@ -552,6 +667,7 @@ fn emit_field(
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
     cyclic: &BTreeSet<String>,
+    fail_fast: bool,
 ) {
     let pad = " ".repeat(base_indent);
     let key = util::escape_rust(&field.emitted_name);
@@ -564,18 +680,18 @@ fn emit_field(
                 rust_json_literal(literal)
             );
             let _ = writeln!(out, "{pad}{{");
-            emit_field_body(out, registry, path, field, base_indent + 4, cyclic);
+            emit_field_body(out, registry, path, field, base_indent + 4, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}}}");
         }
         None if field.optional => {
             let _ = writeln!(out, "{pad}if let Some(raw) = record.get(\"{key}\") {{");
-            emit_field_body(out, registry, path, field, base_indent + 4, cyclic);
+            emit_field_body(out, registry, path, field, base_indent + 4, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}}}");
         }
         None => {
             let _ = writeln!(out, "{pad}match record.get(\"{key}\") {{");
             let _ = writeln!(out, "{pad}    Some(raw) => {{");
-            emit_field_body(out, registry, path, field, base_indent + 8, cyclic);
+            emit_field_body(out, registry, path, field, base_indent + 8, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}    }}");
             let _ = writeln!(out, "{pad}    None => {{");
             let _ = writeln!(
@@ -600,6 +716,7 @@ fn emit_field_body(
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
     cyclic: &BTreeSet<String>,
+    fail_fast: bool,
 ) {
     let pad = " ".repeat(base_indent);
     let key = util::escape_rust(&field.emitted_name);
@@ -641,6 +758,9 @@ fn emit_field_body(
                 out,
                 "{pad}for (index, entry) in base.into_iter().enumerate() {{"
             );
+            if fail_fast {
+                let _ = writeln!(out, "{pad}    if axm_stopped(&errors) {{ break; }}");
+            }
             let _ = writeln!(out, "{pad}    path.push(PathSegment::Index(index));");
             let _ = writeln!(
                 out,
@@ -815,10 +935,16 @@ fn rust_named_type_boxed(
 
 /// Collect the model names that participate in a reference cycle, e.g.
 /// `DirectConversation` <-> `Message`. Cyclic models box their model-typed
-/// fields to keep the generated structs finite.
-fn cyclic_models(registry: &ModelRegistry, catalog: &TableCatalog) -> BTreeSet<String> {
+/// fields to keep the generated structs finite. Only the models in `plan`
+/// contribute edges, so `@target`-excluded models cannot create spurious
+/// cycles.
+fn cyclic_models(
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    plan: &[(&ResolvedModel, ModelEmission)],
+) -> BTreeSet<String> {
     let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for resolved in &registry.models {
+    for (resolved, _) in plan {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
         let mut deps: BTreeSet<String> = BTreeSet::new();
         for field in &fields {
@@ -840,27 +966,6 @@ fn cyclic_models(registry: &ModelRegistry, catalog: &TableCatalog) -> BTreeSet<S
         }
     }
     cyclic
-}
-
-fn collect_model_deps(
-    registry: &ModelRegistry,
-    path: &Path,
-    ty: &TypeRef,
-    out: &mut BTreeSet<String>,
-) {
-    match ty {
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Model(model) => {
-                out.insert(model.clone());
-            }
-            NamedKind::Pure(base) => collect_model_deps(registry, path, &base, out),
-            _ => {}
-        },
-        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
-            collect_model_deps(registry, path, inner, out);
-        }
-        _ => {}
-    }
 }
 
 fn collect_reachable_models(
@@ -1379,6 +1484,56 @@ mod tests {
     }
 
     #[test]
+    fn safe_parse_first_emits_fail_fast_scaffolding() {
+        let out = generate_rust_models(
+            &registry("@safeParse(\"first\")\nmodel User {\n  email: String .email()\n}"),
+            &no_catalog(),
+        );
+        assert!(out.contains("thread_local! {"), "{out}");
+        assert!(out.contains("static AXM_FAIL_FAST: std::cell::Cell<bool>"));
+        assert!(out.contains("fn axm_stopped(errors: &[ValidationError]) -> bool"));
+        assert!(out.contains("if axm_stopped(errors) {"));
+        assert!(out.contains("prev_fail_fast"));
+        assert!(out.contains("AXM_FAIL_FAST.with(|c| c.set(true));"));
+    }
+
+    #[test]
+    fn safe_parse_first_field_guard_and_array_break() {
+        let out = generate_rust_models(
+            &registry(
+                "@safeParse(\"first\")\nmodel User {\n  tags: String[]\n  email: String .email()\n}",
+            ),
+            &no_catalog(),
+        );
+        assert!(out.contains("if !axm_stopped(&errors) {"), "{out}");
+        assert!(
+            out.contains("if axm_stopped(&errors) { break; }"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn safe_parse_all_module_is_not_fail_fast() {
+        let out = generate_rust_models(
+            &registry("@safeParse(\"all\")\nmodel User {\n  email: String .email()\n}"),
+            &no_catalog(),
+        );
+        assert!(!out.contains("AXM_FAIL_FAST"), "{out}");
+        assert!(!out.contains("axm_stopped"));
+        assert!(!out.contains("prev_fail_fast"));
+    }
+
+    #[test]
+    fn parse_inherits_safe_parse_mode() {
+        let out = generate_rust_models(
+            &registry("@safeParse(\"first\")\nmodel User {\n  email: String .email()\n}"),
+            &no_catalog(),
+        );
+        assert!(out.contains("pub fn parse(value: &serde_json::Value) -> User {"));
+        assert!(out.contains("match Self::safe_parse(value) {"));
+    }
+
+    #[test]
     fn emits_transforms_before_validation() {
         let out = generate_rust_models(
             &registry("model User {\n  email: String .trim() .lowercase() .email()\n}"),
@@ -1455,6 +1610,51 @@ mod tests {
     }
 
     #[test]
+    fn target_override_filters_models() {
+        let src = r#"
+@target("rust")
+model Core {
+  id: UUID
+}
+@target("typescript")
+model TsOnly {
+  id: UUID
+}
+@target('typescript', 'rust')
+model Shared {
+  id: UUID
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct Core {"));
+        assert!(out.contains("pub struct Shared {"));
+        assert!(!out.contains("TsOnly"));
+    }
+
+    #[test]
+    fn no_codegen_models_emit_struct_but_not_impl() {
+        let src = r#"
+model User {
+  account: Account
+}
+@no_codegen
+model Account {
+  id: UUID
+}
+@no_codegen
+model Secret {
+  id: UUID
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(!out.contains("Secret"));
+        assert!(out.contains("pub struct Account {"));
+        assert!(out.contains("fn coerce_account("));
+        assert!(!out.contains("impl Account {"));
+        assert!(!out.contains("safe_parse(value: &serde_json::Value) -> Result<Account"));
+    }
+
+    #[test]
     fn type_aliases_fold_and_emit() {
         let src = "type Email = String .email() .max_length(320)\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
         let out = generate_rust_models(&registry(src), &no_catalog());
@@ -1528,6 +1728,41 @@ query GetActiveUsers() -> User[] {
         assert!(out.contains("-> Result<Option<User>, Box<dyn std::error::Error>>"));
         assert!(out.contains("client.query"));
         assert!(out.contains("get_active_users"));
+    }
+
+    #[test]
+    fn target_override_filters_queries() {
+        let src = r#"
+@target("rust")
+query RustOnly($id: UUID) -> Int {
+  SELECT 1;
+}
+@target("typescript")
+query TsOnly($id: UUID) -> Int {
+  SELECT 1;
+}
+query Open($id: UUID) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub async fn rust_only("));
+        assert!(out.contains("pub async fn open("));
+        assert!(!out.contains("ts_only"));
+        assert!(!out.contains("TsOnlyParams"));
+    }
+
+    #[test]
+    fn target_excluded_queries_do_not_emit_db_helpers() {
+        let src = r#"
+@target("typescript")
+query OnlyTs($id: UUID) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(!out.contains("pub async fn"));
+        assert!(!out.contains("fn to_axm_text"), "db helpers not emitted");
     }
 
     #[test]

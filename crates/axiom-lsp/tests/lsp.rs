@@ -64,7 +64,12 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
                 "schema": ["schema.sql"],
                 "axm": ["models/**/*.axm"]
             },
-            "validation": { "on_error": "fail" },
+            "codegen": {
+                "validation": {
+                    "apis": ["safeParse", "parse"],
+                    "safeParse": { "errors": "all" }
+                }
+            },
             "outputs": {
                 "api": { "type": "typescript", "path": "gen/api.ts" }
             }
@@ -458,7 +463,12 @@ async fn workspace_load_failure_publishes_error_diagnostic() {
         r#"{
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": false },
-            "validation": { "on_error": "fail" },
+            "codegen": {
+                "validation": {
+                    "apis": ["safeParse", "parse"],
+                    "safeParse": { "errors": "all" }
+                }
+            },
             "source": { "schema": ["["], "axm": [] },
             "outputs": {}
         }"#,

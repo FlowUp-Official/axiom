@@ -12,14 +12,202 @@ pub mod rust;
 pub mod typescript;
 
 pub use rust::generate_rust_models;
+pub use rust::generate_rust_models_with_options;
 pub use typescript::generate_typescript_models;
+pub use typescript::generate_typescript_models_with_options;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::axm::ast::{AnnotatedType, Literal, ModelDecl, QueryReturn, Rule, TypeRef};
-use crate::axm::resolver::ModelRegistry;
+use crate::axm::ast::{
+    AnnotatedType, Literal, ModelDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target,
+    TypeRef,
+};
+use crate::axm::resolver::{ModelRegistry, ResolvedModel};
 use crate::catalog::{TableCatalog, TableSchema};
 use crate::codegen::util;
+
+/// Global codegen directives for standalone validation APIs, derived from
+/// `codegen.validation` in `axiom.json`. Per-model `@...` decorators apply on
+/// top of these.
+#[derive(Debug, Clone, Copy)]
+pub struct ValidationOptions {
+    /// Emit the result-returning `safeParse`/`safe_parse` API for full models.
+    pub emit_safe_parse: bool,
+    /// Emit the throwing `parse`/`parse` API for full models. When
+    /// `emit_safe_parse` is `false` the `parse` API is emitted standalone
+    /// (it inlines the coercion instead of delegating to `safeParse`).
+    pub emit_parse: bool,
+    /// Default error-aggregation mode used by models without an explicit
+    /// `@safeParse(...)` decorator.
+    pub default_errors: SafeParseMode,
+}
+
+impl Default for ValidationOptions {
+    fn default() -> Self {
+        Self {
+            emit_safe_parse: true,
+            emit_parse: true,
+            default_errors: SafeParseMode::All,
+        }
+    }
+}
+
+/// The effective safeParse mode for `model`: an explicit `@safeParse(...)`
+/// decorator wins; otherwise the codegen default from `options`.
+pub fn effective_safe_parse_mode(model: &ModelDecl, options: &ValidationOptions) -> SafeParseMode {
+    model.safe_parse_override().unwrap_or(options.default_errors)
+}
+
+/// How a model is emitted for a specific codegen target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelEmission {
+    /// The full public surface: the type plus the standalone validation API
+    /// (`safeParse`/`parse`, Rust `safe_parse`/`parse`).
+    Full,
+    /// Only the type and `coerce` needed by referencing declarations —
+    /// `@no_codegen` models pulled into the output by a reference.
+    Internal,
+}
+
+/// The ordered list of models to emit for `target`, paired with how they are
+/// emitted.
+///
+/// A model restricted by `@target(...)` that does not name `target` is omitted
+/// entirely. A `@no_codegen` model is omitted unless another always-emitted or
+/// already-emitted declaration references it; pulled-in models are emitted as
+/// [`ModelEmission::Internal`]. Declaration order and reference composition are
+/// preserved, so generated structs/interfaces always reference emitted types.
+///
+/// Reference edges only come from declarations emitted for `target`: a query
+/// restricted to another target does not pull `@no_codegen` models into this
+/// target's output.
+pub(crate) fn emit_plan(
+    registry: &ModelRegistry,
+    target: Target,
+) -> Vec<(&ResolvedModel, ModelEmission)> {
+    // Every `@no_codegen` / unrestricted model that is publicly emitted for
+    // this target.
+    let mut public: BTreeSet<String> = BTreeSet::new();
+    for resolved in &registry.models {
+        let model = &resolved.model;
+        let emitted_for_target = match model.target_restriction() {
+            Some(targets) => targets.contains(&target),
+            None => !model.is_no_codegen(),
+        };
+        if emitted_for_target {
+            public.insert(model.name.clone());
+        }
+    }
+
+    // Pull `@no_codegen` models in when an emitted model, a type alias, or a
+    // query emitted for this target references them — transitively, since the
+    // pulled-in type depends on its own references.
+    let mut emitted = public.clone();
+    loop {
+        let mut added = false;
+
+        for resolved in &registry.models {
+            if !emitted.contains(&resolved.model.name) {
+                continue;
+            }
+            let mut deps = BTreeSet::new();
+            for field in &resolved.model.fields {
+                collect_model_deps(registry, &resolved.path, &field.ty.base, &mut deps);
+            }
+            added |= pull_in_no_codegen(registry, &deps, &mut emitted);
+        }
+        for resolved in &registry.types {
+            let mut deps = BTreeSet::new();
+            collect_model_deps(registry, &resolved.path, &resolved.ty.ty.base, &mut deps);
+            added |= pull_in_no_codegen(registry, &deps, &mut emitted);
+        }
+        for resolved in &registry.queries {
+            if !query_emitted(&resolved.query, target) {
+                continue;
+            }
+            let mut deps = BTreeSet::new();
+            for param in &resolved.query.params {
+                collect_model_deps(registry, &resolved.path, &param.ty, &mut deps);
+            }
+            match &resolved.query.return_type {
+                QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                    collect_model_deps(registry, &resolved.path, ty, &mut deps);
+                }
+                QueryReturn::Exec => {}
+            }
+            added |= pull_in_no_codegen(registry, &deps, &mut emitted);
+        }
+
+        if !added {
+            break;
+        }
+    }
+
+    registry
+        .models
+        .iter()
+        .filter(|resolved| emitted.contains(&resolved.model.name))
+        .map(|resolved| {
+            let emission = if public.contains(&resolved.model.name) {
+                ModelEmission::Full
+            } else {
+                ModelEmission::Internal
+            };
+            (resolved, emission)
+        })
+        .collect()
+}
+
+/// Whether a query's `@target(...)` restriction includes `target`. Queries
+/// carry no `@no_codegen`, so an unrestricted query is emitted everywhere.
+pub(crate) fn query_emitted(query: &QueryDecl, target: Target) -> bool {
+    query.target_restriction().is_none_or(|ts| ts.contains(&target))
+}
+
+/// Add any `@no_codegen` model referenced by `deps` to `emitted`. Returns true
+/// when at least one model was added.
+fn pull_in_no_codegen(
+    registry: &ModelRegistry,
+    deps: &BTreeSet<String>,
+    emitted: &mut BTreeSet<String>,
+) -> bool {
+    let mut added = false;
+    for dep in deps {
+        if !emitted.contains(dep)
+            && registry
+                .model_by_name(dep)
+                .is_some_and(|resolved| resolved.model.is_no_codegen())
+        {
+            emitted.insert(dep.clone());
+            added = true;
+        }
+    }
+    added
+}
+
+/// Collect the canonical model names directly or indirectly referenced by a
+/// type (through pure aliases).
+pub(crate) fn collect_model_deps(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+    out: &mut BTreeSet<String>,
+) {
+    match ty {
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(model) => {
+                out.insert(model.clone());
+            }
+            NamedKind::Pure(base) => collect_model_deps(registry, path, &base, out),
+            _ => {}
+        },
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
+            collect_model_deps(registry, path, inner, out);
+        }
+        _ => {}
+    }
+}
 
 /// Which optional helpers a generated output needs, so only the used helpers
 /// are emitted (mirroring the SQL generators' behavior).
@@ -106,10 +294,17 @@ impl Uses {
 }
 
 /// Collect the set of helpers needed to emit the whole registry, including
-/// database-backed columns (which bring primitive types) and queries.
-pub(crate) fn collect_uses(registry: &ModelRegistry, catalog: &TableCatalog) -> Uses {
+/// database-backed columns (which bring primitive types) and queries. Only the
+/// models in `plan` and the queries emitted for `target` contribute, so
+/// `@target`-excluded declarations do not pull in helpers.
+pub(crate) fn collect_uses(
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    plan: &[(&ResolvedModel, ModelEmission)],
+    target: Target,
+) -> Uses {
     let mut uses = Uses::default();
-    for resolved in &registry.models {
+    for (resolved, _) in plan {
         for field in effective_fields(registry, catalog, &resolved.path, &resolved.model) {
             uses.add_annotated(&field.annotated);
         }
@@ -118,6 +313,9 @@ pub(crate) fn collect_uses(registry: &ModelRegistry, catalog: &TableCatalog) -> 
         uses.add_annotated(&inline_annotated(registry, &resolved.path, &resolved.ty.ty));
     }
     for resolved in &registry.queries {
+        if !query_emitted(&resolved.query, target) {
+            continue;
+        }
         for param in &resolved.query.params {
             uses.add_type(&param.ty);
         }

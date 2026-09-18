@@ -5,8 +5,8 @@
 //! returned as an error and left untouched by callers.
 
 use axiom_core::axm::ast::{
-    AnnotatedType, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ParamDecl, QueryDecl,
-    QueryReturn, Rule, Transform, TypeDecl, TypeRef,
+    AnnotatedType, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
+    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TypeDecl, TypeRef,
 };
 use axiom_core::axm::parser::parse_axm_file;
 
@@ -64,19 +64,38 @@ fn format_type_decl(decl: &TypeDecl) -> String {
     format!("type {} = {};", decl.name, format_annotated(&decl.ty))
 }
 
-/// Render a full top-level model including its `extends select<...>` source.
+/// Render a full top-level model including any `@...` decorators (e.g.
+/// `@target(...)`, `@no_codegen`, `@parse`, `@safeParse(...)`) and the
+/// `extends select<...>` source.
 fn format_model(model: &ModelDecl) -> Vec<String> {
+    let mut out: Vec<String> = model.overrides.iter().map(format_override).collect();
     let source = model
         .source
         .as_ref()
         .map(|s| format!(" extends select<{}>", s.relation))
         .unwrap_or_default();
-    let mut out = vec![format!("model {}{source} {{", model.name)];
+    out.push(format!("model {}{source} {{", model.name));
     for field in &model.fields {
         out.push(format!("{}{}", indent(1), format_field(field)));
     }
     out.push("}".to_string());
     out
+}
+
+fn format_override(override_: &ModelOverride) -> String {
+    match override_ {
+        ModelOverride::Target(targets) => format!(
+            "@target({})",
+            targets
+                .iter()
+                .map(|t| format!("\"{}\"", t.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ModelOverride::NoCodegen => "@no_codegen".to_string(),
+        ModelOverride::Parse => "@parse".to_string(),
+        ModelOverride::SafeParse(mode) => format!("@safeParse(\"{}\")", mode.name()),
+    }
 }
 
 /// Render a full query declaration.
@@ -93,7 +112,8 @@ fn format_query(query: &QueryDecl) -> Vec<String> {
         QueryReturn::Optional(ty) => format!(" -> {}?", format_type(ty)),
         QueryReturn::Many(ty) => format!(" -> {}[]", format_type(ty)),
     };
-    let mut out = vec![format!("query {}({params}){ret} {{", query.name)];
+    let mut out: Vec<String> = query.overrides.iter().map(format_override).collect();
+    out.push(format!("query {}({params}){ret} {{", query.name));
     // SQL bodies are stored verbatim by the parser (only the outer edges are
     // trimmed), so each line may carry indentation from the source. Dedent the
     // common continuation prefix first, then indent uniformly — otherwise every
@@ -397,6 +417,43 @@ model UserView extends select<public.users> {
              \x20 id: UserId\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn formats_model_overrides() {
+        let src =
+            "@target(\"typescript\", \"rust\")\nmodel User {\n  id: UUID\n}\n@no_codegen\nmodel Secret {\n  name: String\n}";
+        let out = fmt(src);
+        assert!(
+            out.contains("@target(\"typescript\", \"rust\")\nmodel User {"),
+            "{out}"
+        );
+        assert!(out.contains("@no_codegen\nmodel Secret {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+    }
+
+    #[test]
+    fn single_quote_targets_normalize_to_double_quotes() {
+        let src = "@target('rust', 'typescript')\nmodel M { a: String }";
+        let out = fmt(src);
+        assert!(
+            out.contains("@target(\"rust\", \"typescript\")\nmodel M {"),
+            "{out}"
+        );
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+    }
+
+    #[test]
+    fn formats_parse_and_safe_parse_overrides() {
+        let src = "@parse\n@safeParse('first')\nmodel User {\n  id: UUID\n}";
+        let out = fmt(src);
+        assert!(out.contains("@parse\n@safeParse(\"first\")\nmodel User {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+
+        let src = "@safeParse(all)\nmodel M { a: String }";
+        let out = fmt(src);
+        assert!(out.contains("@safeParse(\"all\")\nmodel M {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
     }
 
     #[test]

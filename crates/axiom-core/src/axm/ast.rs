@@ -102,12 +102,136 @@ impl AnnotatedType {
 /// where `select<users>` is a *database-derived source expression* (the
 /// relation's DB identifier, not an Axiom type). Bare models (no `source`)
 /// remain valid as pure application models with no database backing.
+///
+/// A model may be preceded by `@` decorators that override code generation for
+/// just that model, e.g. `@target("typescript")` or `@no_codegen`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDecl {
     pub name: String,
     /// The `select<...>` source expression, when the model is database-backed.
     pub source: Option<ModelSource>,
     pub fields: Vec<FieldDecl>,
+    /// The `@...` decorators applied to this model, in source order.
+    pub overrides: Vec<ModelOverride>,
+}
+
+impl ModelDecl {
+    /// The explicit `@target(...)` restriction, if any.
+    pub fn target_restriction(&self) -> Option<&[Target]> {
+        target_restriction(&self.overrides)
+    }
+
+    /// Whether the `@no_codegen` decorator is applied.
+    pub fn is_no_codegen(&self) -> bool {
+        self.overrides
+            .iter()
+            .any(|o| matches!(o, ModelOverride::NoCodegen))
+    }
+
+    /// The explicit `@safeParse(...)` mode, if the model carries the decorator.
+    pub fn safe_parse_override(&self) -> Option<SafeParseMode> {
+        self.overrides.iter().find_map(|o| match o {
+            ModelOverride::SafeParse(mode) => Some(*mode),
+            _ => None,
+        })
+    }
+
+    /// The `@safeParse(...)` error-aggregation mode, defaulting to `All`.
+    pub fn safe_parse_mode(&self) -> SafeParseMode {
+        self.safe_parse_override().unwrap_or(SafeParseMode::All)
+    }
+}
+
+/// A single `@...` decorator on a model or query. The list is extensible: new
+/// decorators become new variants parsed by the same `@ ident (...) ?` rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelOverride {
+    /// `@target("typescript", "rust")` — restrict code generation for this
+    /// model or query to the listed targets.
+    Target(Vec<Target>),
+    /// `@no_codegen` — never emit this model's standalone validation API.
+    /// Its type and `coerce` are emitted only when another emitted declaration
+    /// references the model. Only applicable to `model` declarations.
+    NoCodegen,
+    /// `@parse` — declare that this model keeps its standalone validation
+    /// entry points (`Result`/`safeParse`/`parse`). Documentary: every
+    /// model not marked `@no_codegen` gets them anyway. Only applicable to
+    /// `model` declarations; mutually exclusive with `@no_codegen`.
+    Parse,
+    /// `@safeParse("first")` / `@safeParse("all")` — how `safeParse`/`parse`
+    /// aggregate validation errors. `First` stops coercing at the first error
+    /// and reports only it; `All` (the default) collects every error. Only
+    /// applicable to `model` declarations; mutually exclusive with
+    /// `@no_codegen`.
+    SafeParse(SafeParseMode),
+}
+
+/// The error-aggregation mode named by `@safeParse(...)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafeParseMode {
+    /// `@safeParse("first")` — stop validating at the first error.
+    First,
+    /// `@safeParse("all")` — collect every validation error (the default).
+    All,
+}
+
+impl SafeParseMode {
+    /// The recognized mode names, in canonical order.
+    pub const ALL: [SafeParseMode; 2] = [SafeParseMode::First, SafeParseMode::All];
+
+    /// The lowercase source spelling of the mode.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SafeParseMode::First => "first",
+            SafeParseMode::All => "all",
+        }
+    }
+
+    /// Parse a mode name; names are case-sensitive and lowercase.
+    pub fn parse(name: &str) -> Option<SafeParseMode> {
+        match name {
+            "first" => Some(SafeParseMode::First),
+            "all" => Some(SafeParseMode::All),
+            _ => None,
+        }
+    }
+}
+
+/// The explicit `@target(...)` restriction in a decorator list, if any.
+fn target_restriction(overrides: &[ModelOverride]) -> Option<&[Target]> {
+    overrides.iter().find_map(|o| match o {
+        ModelOverride::Target(targets) => Some(targets.as_slice()),
+        ModelOverride::NoCodegen | ModelOverride::Parse | ModelOverride::SafeParse(_) => None,
+    })
+}
+
+/// A codegen target named by `@target(...)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    TypeScript,
+    Rust,
+}
+
+impl Target {
+    /// The recognized target names, in canonical order.
+    pub const ALL: [Target; 2] = [Target::TypeScript, Target::Rust];
+
+    /// The lowercase source spelling of the target.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Target::TypeScript => "typescript",
+            Target::Rust => "rust",
+        }
+    }
+
+    /// Parse a target name; names are case-sensitive and lowercase.
+    pub fn parse(name: &str) -> Option<Target> {
+        match name {
+            "typescript" => Some(Target::TypeScript),
+            "rust" => Some(Target::Rust),
+            _ => None,
+        }
+    }
 }
 
 /// A database-derived source expression: `select<users>`.
@@ -141,12 +265,27 @@ pub struct FieldDecl {
 /// The missing return type (or `-> Exec`) marks an execution-only query. `-> T`
 /// is exactly one value, `-> T?` zero or one, and `-> T[]` zero or more. The
 /// SQL body is ordinary SQL and is stored verbatim.
+///
+/// A query may be preceded by `@` decorators; `@target(...)` restricts which
+/// codegen targets the query function is emitted for. `@no_codegen` does not
+/// apply to queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryDecl {
     pub name: String,
     pub params: Vec<ParamDecl>,
     pub return_type: QueryReturn,
     pub sql: String,
+    /// The `@...` decorators applied to this query, in source order.
+    pub overrides: Vec<ModelOverride>,
+}
+
+impl QueryDecl {
+    /// The explicit `@target(...)` restriction, if any. Queries cannot carry
+    /// `@no_codegen` (rejected at parse time), so a `None` restriction means
+    /// the query is emitted for every target.
+    pub fn target_restriction(&self) -> Option<&[Target]> {
+        target_restriction(&self.overrides)
+    }
 }
 
 /// A single query parameter, e.g. `$id: UUID`. Parameter names are `camelCase`

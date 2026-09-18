@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use axiom_core::axm::{generate_rust_models, generate_typescript_models, resolve_models};
+use axiom_core::axm::{
+    generate_rust_models_with_options, generate_typescript_models_with_options, resolve_models,
+};
 use axiom_core::cache::{compute_file_hash, is_cache_valid, write_cache_atomically};
 use axiom_core::catalog::{TableCatalog, parse_sql_catalog};
 use axiom_core::codegen::{generate_rust, generate_typescript};
@@ -263,6 +265,8 @@ async fn run_generate(
         Some(resolve_models(&model_sources)?)
     };
 
+    let validation_options = config.codegen.validation_options();
+
     let generated: Vec<(String, String)> = config
         .outputs
         .iter()
@@ -270,14 +274,22 @@ async fn run_generate(
             OutputConfig::TypeScript(_) => {
                 let mut code = generate_typescript(&catalog, &QueryCatalog::default());
                 if let Some(registry) = &model_registry {
-                    code.push_str(&generate_typescript_models(registry, &catalog));
+                    code.push_str(&generate_typescript_models_with_options(
+                        registry,
+                        &catalog,
+                        &validation_options,
+                    ));
                 }
                 (name.clone(), code)
             }
             OutputConfig::Rust(_) => {
                 let mut code = generate_rust(&catalog, &QueryCatalog::default());
                 if let Some(registry) = &model_registry {
-                    code.push_str(&generate_rust_models(registry, &catalog));
+                    code.push_str(&generate_rust_models_with_options(
+                        registry,
+                        &catalog,
+                        &validation_options,
+                    ));
                 }
                 (name.clone(), code)
             }

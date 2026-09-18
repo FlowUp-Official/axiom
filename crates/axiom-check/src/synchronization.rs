@@ -3,7 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use axiom_core::axm::{ModelRegistry, generate_rust_models, generate_typescript_models};
+use axiom_core::axm::{
+    ModelRegistry, generate_rust_models_with_options, generate_typescript_models_with_options,
+    ValidationOptions,
+};
 use axiom_core::catalog::TableCatalog;
 use axiom_core::codegen::{generate_rust, generate_typescript};
 use axiom_core::config::{AxiomConfig, OutputConfig};
@@ -31,10 +34,11 @@ pub fn check_synchronization(
     query_catalog: &QueryCatalog<'_>,
     registry: Option<&ModelRegistry>,
 ) -> SyncCheck {
+    let validation_options = config.codegen.validation_options();
     let mut result = SyncCheck::default();
 
     for (name, output) in &config.outputs {
-        let generated = render_output(output, catalog, query_catalog, registry);
+        let generated = render_output(output, catalog, query_catalog, registry, &validation_options);
         let output_path = output_path(base, output);
 
         if !output_path.exists() {
@@ -86,9 +90,10 @@ pub fn write_fixed_outputs(
     query_catalog: &QueryCatalog<'_>,
     registry: Option<&ModelRegistry>,
 ) -> Result<Vec<PathBuf>, AxiomError> {
+    let validation_options = config.codegen.validation_options();
     let mut written = Vec::new();
     for output in config.outputs.values() {
-        let generated = render_output(output, catalog, query_catalog, registry);
+        let generated = render_output(output, catalog, query_catalog, registry, &validation_options);
         let output_path = output_path(base, output);
 
         let current = std::fs::read_to_string(&output_path).unwrap_or_default();
@@ -109,6 +114,7 @@ fn render_output(
     catalog: &TableCatalog<'_>,
     _query_catalog: &QueryCatalog<'_>,
     registry: Option<&ModelRegistry>,
+    options: &ValidationOptions,
 ) -> String {
     match output {
         // `.axm` queries are emitted by the model generators below; passing
@@ -117,14 +123,14 @@ fn render_output(
         OutputConfig::TypeScript(_) => {
             let mut code = generate_typescript(catalog, &QueryCatalog::default());
             if let Some(registry) = registry {
-                code.push_str(&generate_typescript_models(registry, catalog));
+                code.push_str(&generate_typescript_models_with_options(registry, catalog, options));
             }
             code
         }
         OutputConfig::Rust(_) => {
             let mut code = generate_rust(catalog, &QueryCatalog::default());
             if let Some(registry) = registry {
-                code.push_str(&generate_rust_models(registry, catalog));
+                code.push_str(&generate_rust_models_with_options(registry, catalog, options));
             }
             code
         }

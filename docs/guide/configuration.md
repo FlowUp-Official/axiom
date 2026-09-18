@@ -42,7 +42,12 @@ An `axiom init` template looks like this:
     "schema": ["./schema.sql"],
     "axm": ["./models/**/*.axm"]
   },
-  "validation": { "on_error": "fail" },
+  "codegen": {
+    "validation": {
+      "apis": ["safeParse", "parse"],
+      "safeParse": { "errors": "all" }
+    }
+  },
   "outputs": {
     "api": { "type": "typescript", "path": "./gen/api.ts" },
     "core": { "type": "rust", "path": "./gen/api.rs" }
@@ -77,11 +82,18 @@ digests match, generation is skipped entirely. See
 
 Paths are resolved relative to the directory containing the config file.
 
-### `validation`
+### `codegen.validation`
 
-| Field     | Type   | Description                                        |
-| --------- | ------ | -------------------------------------------------- |
-| `on_error`| string | Failure policy for validation, e.g. `fail`         |
+Selects which standalone validation APIs are generated for each emitted model and sets the
+default error-aggregation mode for the `safeParse` API.
+
+| Field                | Type     | Default | Description                                                                 |
+| -------------------- | -------- | ------- | --------------------------------------------------------------------------- |
+| `apis`               | string[] | `[safeParse, parse]` | Which standalone validation APIs to emit (`safeParse`, `parse`) |
+| `safeParse.errors`   | string   | `"all"` | How `safeParse` aggregates errors: `"all"` collects every error, `"first"` stops at the first (`first` requires `safeParse` in `apis`) |
+
+The `safeParse` object is required when (and only when) the `apis` list contains `safeParse`.
+Model-level `@safeParse("all" | "first")` decorators override the global default per model.
 
 ### `outputs`
 

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::axm::codegen::ValidationOptions;
+use crate::axm::ast::SafeParseMode;
 use crate::errors::AxiomError;
 use crate::paths::resolve_path;
 
@@ -50,9 +52,114 @@ pub struct SourceConfig {
     pub axm: Vec<String>,
 }
 
+/// A standalone validation API that may be generated for each model. `parse`
+/// delegates to (`safeParse`)[#SafeParse], so listing `parse` needs no extra
+/// configuration; model-level `@no_codegen`/`@target(...)`/`@safeParse(...)`
+/// decorators still apply on top of this global selection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub enum ValidationApi {
+    #[serde(rename = "safeParse")]
+    SafeParse,
+    #[serde(rename = "parse")]
+    Parse,
+}
+
+/// How the `safeParse` API aggregates validation errors. Used as the global
+/// default for models without an explicit `@safeParse("all"|"first")`
+/// decorator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SafeParseErrors {
+    All,
+    First,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ValidationConfig {
-    pub on_error: String,
+pub struct SafeParseConfig {
+    pub errors: SafeParseErrors,
+}
+
+/// `codegen.validation` selects which standalone validation APIs are generated
+/// and how `safeParse` aggregates errors. The `safeParse` object is required
+/// when (and only when) the `apis` list contains `safeParse`; `parse` in the
+/// list needs no companion object because it has no error-collection mode of
+/// its own. Enforced by the generated JSON schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationCodegenConfig {
+    /// The standalone validation APIs to generate, e.g. `["safeParse", "parse"]`.
+    pub apis: Vec<ValidationApi>,
+    /// Options for the `safeParse` API; required when `apis` includes
+    /// `safeParse`.
+    #[serde(rename = "safeParse")]
+    pub safe_parse: Option<SafeParseConfig>,
+}
+
+impl JsonSchema for ValidationCodegenConfig {
+    fn schema_name() -> String {
+        "ValidationCodegenConfig".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "apis": {
+                    "type": "array",
+                    "items": { "enum": ["safeParse", "parse"] },
+                    "uniqueItems": true,
+                    "minItems": 1
+                },
+                "safeParse": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "errors": { "enum": ["all", "first"] }
+                    },
+                    "required": ["errors"]
+                }
+            },
+            "required": ["apis"],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "apis": { "contains": { "const": "safeParse" } }
+                        },
+                        "required": ["apis"]
+                    },
+                    "then": { "required": ["safeParse"] }
+                }
+            ]
+        }))
+        .expect("validation codegen schema is always valid JSON")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CodegenConfig {
+    pub validation: ValidationCodegenConfig,
+}
+
+impl CodegenConfig {
+    /// Build the codegen [`ValidationOptions`] (which standalone validation
+    /// APIs to emit and the default safeParse error-aggregation mode) from the
+    /// `codegen.validation` section of the config.
+    pub fn validation_options(&self) -> ValidationOptions {
+        let v = &self.validation;
+        ValidationOptions {
+            emit_safe_parse: v.apis.contains(&ValidationApi::SafeParse),
+            emit_parse: v.apis.contains(&ValidationApi::Parse),
+            default_errors: v
+                .safe_parse
+                .as_ref()
+                .map(|c| match c.errors {
+                    SafeParseErrors::All => SafeParseMode::All,
+                    SafeParseErrors::First => SafeParseMode::First,
+                })
+                .unwrap_or(SafeParseMode::All),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -90,7 +197,7 @@ pub struct AxiomConfig {
     pub project: ProjectConfig,
     pub cache: CacheConfig,
     pub source: SourceConfig,
-    pub validation: ValidationConfig,
+    pub codegen: CodegenConfig,
     pub outputs: BTreeMap<String, OutputConfig>,
 }
 
@@ -161,8 +268,13 @@ impl AxiomConfig {
                 schema: vec!["./schema.sql".to_string()],
                 axm: vec!["./models/**/*.axm".to_string()],
             },
-            validation: ValidationConfig {
-                on_error: "fail".to_string(),
+            codegen: CodegenConfig {
+                validation: ValidationCodegenConfig {
+                    apis: vec![ValidationApi::SafeParse, ValidationApi::Parse],
+                    safe_parse: Some(SafeParseConfig {
+                        errors: SafeParseErrors::All,
+                    }),
+                },
             },
             outputs: BTreeMap::from([
                 (
@@ -252,7 +364,12 @@ mod tests {
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": true, "path": ".axiom.cache" },
             "source": { "schema": ["schema.sql"], "axm": ["models/accounts.axm"] },
-            "validation": { "on_error": "fail" },
+            "codegen": {
+                "validation": {
+                    "apis": ["safeParse", "parse"],
+                    "safeParse": { "errors": "all" }
+                }
+            },
             "outputs": {
                 "api": { "type": "typescript", "path": "gen/api.ts" }
             }
@@ -309,6 +426,62 @@ mod tests {
             err.contains("source"),
             "expected the error to mention the missing key, got: {err}"
         );
+    }
+
+    #[test]
+    fn safe_parse_in_apis_requires_safe_parse_object() {
+        let mut value = valid_config();
+        value["codegen"]["validation"]
+            .as_object_mut()
+            .expect("validation object")
+            .remove("safeParse");
+
+        let err = validate_config_json(&value).expect_err("expected validation failure");
+        assert!(
+            err.contains("required"),
+            "expected a required-key error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn safe_parse_object_not_required_when_apis_omits_safe_parse() {
+        let mut value = valid_config();
+        value["codegen"]["validation"]["apis"] =
+            serde_json::json!(["parse"]);
+        value["codegen"]["validation"]
+            .as_object_mut()
+            .expect("validation object")
+            .remove("safeParse");
+
+        assert_eq!(validate_config_json(&value), Ok(()));
+
+        // `parse` in the list requires no `parse` companion object.
+        value["codegen"]["validation"]["apis"] =
+            serde_json::json!(["parse", "safeParse"]);
+        let err = validate_config_json(&value).expect_err("expected validation failure");
+        assert!(
+            err.contains("required"),
+            "expected a required-key error once safeParse is listed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_api_name_fails_json_schema_validation() {
+        let mut value = valid_config();
+        value["codegen"]["validation"]["apis"] = serde_json::json!(["nope"]);
+
+        let err = validate_config_json(&value).expect_err("expected validation failure");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn unknown_safe_parse_error_mode_fails_json_schema_validation() {
+        let mut value = valid_config();
+        value["codegen"]["validation"]["safeParse"]["errors"] =
+            serde_json::json!("sometimes");
+
+        let err = validate_config_json(&value).expect_err("expected validation failure");
+        assert!(!err.is_empty());
     }
 
     fn fixture_path(name: &str) -> PathBuf {
