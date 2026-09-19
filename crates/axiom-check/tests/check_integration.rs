@@ -3,11 +3,12 @@
 use std::path::PathBuf;
 
 use axiom_core::cache::ToolCache;
+use axiom_core::config::AxiomConfig;
 
 use axiom_check::workspace::aggregate_hash;
 use axiom_check::{
-    Workspace, check_model_sources, check_models, check_queries, check_schemas,
-    collect_referenced_models,
+    Workspace, check_duplicate_fields, check_model_sources, check_models, check_queries,
+    check_schemas, check_target_references, collect_referenced_models, collect_referenced_types,
 };
 
 fn file(path: &str, src: &str) -> (PathBuf, String) {
@@ -298,6 +299,40 @@ fn referenced_models_include_field_types_and_imports() {
 }
 
 #[test]
+fn referenced_models_include_query_returns_params_and_alias_bases() {
+    let files = vec![
+        file(
+            "models/a.axm",
+            "model Returned { id: UUID }\nmodel Parameter { id: UUID }\n\
+             model Aliased { id: UUID }\nmodel Dead { id: UUID }",
+        ),
+        file(
+            "models/b.axm",
+            "type Base = Aliased\ntype Wrapper = Base\n\
+             query Q($p: Parameter) -> Returned? {\n  SELECT id FROM a\n}",
+        ),
+    ];
+    let referenced = collect_referenced_models(&files);
+    assert!(referenced.contains("Returned"), "{referenced:?}");
+    assert!(referenced.contains("Parameter"), "{referenced:?}");
+    // `Aliased` is reached through a chain of type aliases.
+    assert!(referenced.contains("Aliased"), "{referenced:?}");
+    assert!(!referenced.contains("Dead"), "{referenced:?}");
+}
+
+#[test]
+fn genuinely_unreferenced_model_is_absent_from_referenced_models() {
+    let files = vec![file(
+        "models/a.axm",
+        "model Live { id: UUID }\nmodel Dead { id: UUID }\n\
+         query Get() -> Live? {\n  SELECT id FROM live\n}",
+    )];
+    let referenced = collect_referenced_models(&files);
+    assert!(referenced.contains("Live"), "{referenced:?}");
+    assert!(!referenced.contains("Dead"), "{referenced:?}");
+}
+
+#[test]
 fn workspace_resolution_requires_existing_files() {
     let files = vec![file("models/a.axm", "model A { x: String }")];
     let workspace = Workspace {
@@ -405,4 +440,142 @@ fn dotted_model_placeholders_check_model_fields() {
             .any(|d| d.message.contains("has no field `email_address`")),
         "{diags:?}"
     );
+}
+
+#[test]
+fn duplicate_fields_are_reported() {
+    let files = vec![file(
+        "models/user.axm",
+        "model User {\n  name: String\n  name: String\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_duplicate_fields(&registry, &files);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, "check.duplicate-field");
+    assert!(diags[0].span.is_some());
+}
+
+#[test]
+fn each_extra_duplicate_field_is_reported() {
+    let files = vec![file(
+        "models/user.axm",
+        "model User {\n  name: String\n  name: String\n  name: String\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_duplicate_fields(&registry, &files);
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}
+
+#[test]
+fn distinct_fields_are_not_reported() {
+    let files = vec![file(
+        "models/user.axm",
+        "model User {\n  name: String\n  email: String\n}",
+    )];
+    let registry = registry_from(&files);
+    assert!(check_duplicate_fields(&registry, &files).is_empty());
+}
+
+#[test]
+fn reference_to_target_excluded_model_is_reported() {
+    let files = vec![file(
+        "models/models.axm",
+        "model Address {\n  street: String\n}\n\n@target(\"rust\")\nmodel Account {\n  owner: Address\n}\n\nmodel User {\n  name: String\n  account: Account\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    let ts: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("typescript"))
+        .collect();
+    assert_eq!(ts.len(), 1, "{diags:?}");
+    assert_eq!(ts[0].code, "check.target-excluded-reference");
+    assert!(ts[0].message.contains("`Account`"), "{:?}", ts[0].message);
+    assert!(ts[0].span.is_some());
+    assert_eq!(diags.len(), 1, "rust emits Account, so only typescript fails");
+}
+
+#[test]
+fn transitive_reference_to_target_excluded_model_is_reported() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"rust\")\nmodel Leaf {\n  x: String\n}\n\nmodel Mid {\n  leaf: Leaf\n}\n\nmodel Root {\n  mid: Mid\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, "check.target-excluded-reference");
+    assert!(diags[0].message.contains("model `Mid`"), "{:?}", diags[0].message);
+    assert!(diags[0].message.contains("`Leaf`"), "{:?}", diags[0].message);
+}
+
+#[test]
+fn reference_within_the_same_target_is_clean() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"typescript\")\nmodel Leaf {\n  x: String\n}\n\n@target(\"typescript\")\nmodel Root {\n  leaf: Leaf\n}",
+    )];
+    let registry = registry_from(&files);
+    assert!(
+        check_target_references(&AxiomConfig::default_template(), &registry, &files).is_empty()
+    );
+}
+
+#[test]
+fn type_alias_reference_to_target_excluded_model_is_reported() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"rust\")\nmodel OnlyRust {\n  x: String\n}\n\ntype Alias = OnlyRust",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert!(
+        diags.iter().any(|d| d.message.contains("type `Alias`")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn query_reference_to_target_excluded_model_is_reported() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"rust\")\nmodel OnlyRust {\n  x: String\n}\n\nquery GetThing() -> OnlyRust? {\n  SELECT x FROM things\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert!(
+        diags.iter().any(|d| d.message.contains("query `GetThing`")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn referenced_types_include_fields_aliases_queries_and_imports() {
+    let files = vec![
+        file(
+            "models/a.axm",
+            "type Email = String\nmodel User {\n  email: Email\n}",
+        ),
+        file(
+            "models/b.axm",
+            "import { Email } from \"a\"\nmodel Org {\n  contact: Email\n}",
+        ),
+        file(
+            "models/c.axm",
+            "type Id = String\nquery Get($id: Id) -> Id[] {\n  SELECT id FROM t\n}",
+        ),
+    ];
+    let referenced = collect_referenced_types(&files);
+    assert!(referenced.contains("Email"), "{referenced:?}");
+    assert!(referenced.contains("Id"), "{referenced:?}");
+}
+
+#[test]
+fn unreferenced_type_alias_is_absent_from_referenced_types() {
+    let files = vec![file(
+        "models/a.axm",
+        "type Unused = String\nmodel User {\n  name: String\n}",
+    )];
+    let referenced = collect_referenced_types(&files);
+    assert!(!referenced.contains("Unused"), "{referenced:?}");
 }

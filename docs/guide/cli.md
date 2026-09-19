@@ -99,5 +99,6 @@ codes, e.g.:
 - `axiom::push::db_error` — a push failed.
 - `check.output-outdated` — generated output is out of sync (see [Check](/guide/check)).
 - `check.missing-table` / `check.missing-column` — query/schema mismatch.
+- `check.duplicate-field` / `check.target-excluded-reference` — a model declares a field twice, or an emitted declaration references a model its `@target` excludes.
 - `format.would-reformat` — a file is not formatted (see [Format](/guide/format)).
-- `lint.missing-where-clause` — a `DELETE`/`UPDATE` without `WHERE` (see [Lint](/guide/lint)).
+- `lint.missing-where-clause` / `lint.select-star` — lint findings (see [Lint](/guide/lint)).

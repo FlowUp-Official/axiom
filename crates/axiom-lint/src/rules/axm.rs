@@ -1,8 +1,12 @@
 //! Lint rules over `.axm` domain-model files.
 
+use std::collections::BTreeSet;
+
 use axiom_core::axm::ast::{
-    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, Rule, TypeRef,
+    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, QueryDecl, Rule, TypeRef,
 };
+use axiom_core::axm::is_identifier;
+use axiom_core::query::{Placeholder, scan_placeholders};
 use axiom_diagnostics::{Diagnostic, Span};
 
 use crate::runner::{LintContext, LintRule, word_span};
@@ -77,7 +81,9 @@ impl LintRule for DeadModel {
                 "lint.dead-model",
                 format!("model `{}` is never referenced", model.name),
             )
-            .with_help("reference it from another model to remove this warning");
+            .with_help(
+                "reference it from a model field, query, type alias, or import, or remove it",
+            );
             if let Some(span) = span {
                 diag = diag.with_span(span);
             }
@@ -183,7 +189,7 @@ impl LintRule for NamingConvention {
 
         let mut out = Vec::new();
         for model in &file.models {
-            if !is_pascal_case(&model.name) {
+            if violates_pascal_case(&model.name) {
                 push_naming(
                     ctx,
                     &mut out,
@@ -194,7 +200,7 @@ impl LintRule for NamingConvention {
                 );
             }
             for field in &model.fields {
-                if !is_camel_case(&field.name) {
+                if violates_camel_case(&field.name) {
                     let span = field_line_start(ctx.source, &field.name)
                         .and_then(|ls| word_span(ctx.source, ls, &field.name));
                     push_naming(ctx, &mut out, "field", &field.name, "camelCase", span);
@@ -202,7 +208,7 @@ impl LintRule for NamingConvention {
             }
         }
         for ty in &file.types {
-            if !is_pascal_case(&ty.name) {
+            if violates_pascal_case(&ty.name) {
                 push_naming(
                     ctx,
                     &mut out,
@@ -214,7 +220,7 @@ impl LintRule for NamingConvention {
             }
         }
         for query in &file.queries {
-            if !is_pascal_case(&query.name) {
+            if violates_pascal_case(&query.name) {
                 push_naming(
                     ctx,
                     &mut out,
@@ -225,7 +231,7 @@ impl LintRule for NamingConvention {
                 );
             }
             for param in &query.params {
-                if !is_camel_case(&param.name) {
+                if violates_camel_case(&param.name) {
                     push_naming(
                         ctx,
                         &mut out,
@@ -241,12 +247,36 @@ impl LintRule for NamingConvention {
     }
 }
 
-fn is_pascal_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+/// Whether `name` is a bare identifier that violates Axiom's PascalCase
+/// convention for models, type aliases, and queries.
+///
+/// Quoted names are not identifiers, so they are exempt: the grammar lets an
+/// author deliberately escape identifier rules (e.g. `"first-name": String`),
+/// and such names are not expected to follow a case convention.
+fn violates_pascal_case(name: &str) -> bool {
+    is_identifier(name) && !is_pascal_case(name)
 }
 
+/// Whether `name` is a bare identifier that violates Axiom's camelCase
+/// convention for fields and query parameters. Quoted names are exempt, as for
+/// [`violates_pascal_case`].
+fn violates_camel_case(name: &str) -> bool {
+    is_identifier(name) && !is_camel_case(name)
+}
+
+/// PascalCase over Axiom's identifier grammar: no `_`, and an uppercase ASCII
+/// first letter. Capitalization marks word boundaries, so acronyms and runs of
+/// capitals are allowed (`User`, `UserProfile`, `UUID`, `User2`) — matching the
+/// primitive type names (`UUID`, `DateTime`) and the code generator.
+fn is_pascal_case(name: &str) -> bool {
+    !name.contains('_') && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// camelCase over Axiom's identifier grammar: no `_`, and a lowercase ASCII
+/// first letter (`user`, `userName`, `user2`). Capital runs after the first
+/// character are allowed, so `userID` remains valid.
 fn is_camel_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+    !name.contains('_') && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
 }
 
 fn push_naming(
@@ -422,6 +452,213 @@ fn rule_span(source: &str, field: &str, text: &str) -> Option<Span> {
     Some(Span::new(line_start + rel, line_start + rel + text.len()))
 }
 
+/// Flags `type` aliases that no model, field, query, or other alias references
+/// anywhere in the workspace.
+#[derive(Debug)]
+pub struct UnusedTypeAlias;
+
+impl LintRule for UnusedTypeAlias {
+    fn name(&self) -> &'static str {
+        "unused-type-alias"
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
+        let Some(file) = &ctx.axm else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for ty in &file.types {
+            if ctx.workspace.referenced_types.contains(&ty.name) {
+                continue;
+            }
+            let span = decl_name_span(ctx.source, "type", &ty.name);
+            let mut diag = Diagnostic::warning(
+                ctx.file,
+                "lint.unused-type-alias",
+                format!("type alias `{}` is never referenced", ty.name),
+            )
+            .with_help("reference it from a model, query, or another type alias, or remove it");
+            if let Some(span) = span {
+                diag = diag.with_span(span);
+            }
+            out.push(diag);
+        }
+        out
+    }
+}
+
+/// Flags validator combinations that no value can satisfy: contradictory
+/// numeric bounds (`.min(10) .max(5)`), contradictory length bounds
+/// (`.min_length(10) .max_length(5)`), or `.nonempty()` combined with
+/// `.max_length(0)`.
+#[derive(Debug)]
+pub struct UnsatisfiableValidator;
+
+impl LintRule for UnsatisfiableValidator {
+    fn name(&self) -> &'static str {
+        "unsatisfiable-validator"
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
+        let Some(file) = &ctx.axm else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for model in &file.models {
+            for field in &model.fields {
+                let span = field_line_start(ctx.source, &field.name)
+                    .and_then(|ls| word_span(ctx.source, ls, &field.name));
+                self.check_type(
+                    ctx,
+                    &field.ty,
+                    span,
+                    &format!("field `{}` of model `{}`", field.name, model.name),
+                    &mut out,
+                );
+            }
+        }
+        for ty in &file.types {
+            let span = decl_name_span(ctx.source, "type", &ty.name);
+            self.check_type(ctx, &ty.ty, span, &format!("type `{}`", ty.name), &mut out);
+        }
+        out
+    }
+}
+
+impl UnsatisfiableValidator {
+    fn check_type(
+        &self,
+        ctx: &LintContext<'_>,
+        ty: &AnnotatedType,
+        span: Option<Span>,
+        subject: &str,
+        out: &mut Vec<Diagnostic>,
+    ) {
+        let mut min: Option<i64> = None;
+        let mut max: Option<i64> = None;
+        let mut min_len: Option<usize> = None;
+        let mut max_len: Option<usize> = None;
+        let mut nonempty = false;
+        for rule in &ty.rules {
+            match rule {
+                Rule::Min(n, _) => min = Some(min.map_or(*n, |cur| cur.max(*n))),
+                Rule::Max(n, _) => max = Some(max.map_or(*n, |cur| cur.min(*n))),
+                Rule::MinLength(n, _) => min_len = Some(min_len.map_or(*n, |cur| cur.max(*n))),
+                Rule::MaxLength(n, _) => max_len = Some(max_len.map_or(*n, |cur| cur.min(*n))),
+                Rule::NonEmpty(_) => nonempty = true,
+                _ => {}
+            }
+        }
+
+        let mut push = |message: String, help: &str| {
+            let mut diag =
+                Diagnostic::warning(ctx.file, "lint.unsatisfiable-validator", message)
+                    .with_help(help);
+            if let Some(span) = span {
+                diag = diag.with_span(span);
+            }
+            out.push(diag);
+        };
+
+        if let (Some(lo), Some(hi)) = (min, max)
+            && lo > hi
+        {
+            push(
+                format!(
+                    "{subject} has contradictory bounds: `.min({lo})` with `.max({hi})` can never be satisfied"
+                ),
+                "widen the bounds so a value can satisfy both",
+            );
+        }
+        if let (Some(lo), Some(hi)) = (min_len, max_len)
+            && lo > hi
+        {
+            push(
+                format!(
+                    "{subject} has contradictory length bounds: `.min_length({lo})` with `.max_length({hi})` can never be satisfied"
+                ),
+                "widen the length bounds so a value can satisfy both",
+            );
+        }
+        if nonempty && max_len == Some(0) {
+            push(
+                format!(
+                    "{subject} combines `.nonempty()` with `.max_length(0)`, so no value can satisfy it"
+                ),
+                "raise the maximum length or drop `.nonempty()`",
+            );
+        }
+    }
+}
+
+/// Flags query parameters declared in a signature but never referenced by the
+/// query's SQL body (`$name`, `$1`, or `$name.field`).
+#[derive(Debug)]
+pub struct UnusedQueryParam;
+
+impl LintRule for UnusedQueryParam {
+    fn name(&self) -> &'static str {
+        "unused-query-param"
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
+        let Some(file) = &ctx.axm else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for query in &file.queries {
+            let used = used_param_indices(query);
+            for (index, param) in query.params.iter().enumerate() {
+                if used.contains(&index) {
+                    continue;
+                }
+                let span = param_span(ctx.source, &param.name);
+                let mut diag = Diagnostic::warning(
+                    ctx.file,
+                    "lint.unused-query-param",
+                    format!(
+                        "parameter `${}` of query `{}` is never used in its SQL body",
+                        param.name, query.name
+                    ),
+                )
+                .with_help(format!(
+                    "remove the parameter or reference `${}` in the query body",
+                    param.name
+                ));
+                if let Some(span) = span {
+                    diag = diag.with_span(span);
+                }
+                out.push(diag);
+            }
+        }
+        out
+    }
+}
+
+/// The 0-based indices of parameters referenced by `query.sql`, whether by name
+/// (`$email`), by position (`$1`), or as the base of a structured path
+/// (`$input.email`).
+fn used_param_indices(query: &QueryDecl) -> BTreeSet<usize> {
+    let mut used = BTreeSet::new();
+    for (_, _, kind) in scan_placeholders(&query.sql) {
+        match kind {
+            Placeholder::Positional(n) if n >= 1 && n <= query.params.len() => {
+                used.insert(n - 1);
+            }
+            Placeholder::Named(name) => {
+                if let Some(index) = query.params.iter().position(|p| p.name == name) {
+                    used.insert(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    used
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -491,6 +728,32 @@ mod tests {
     }
 
     #[test]
+    fn dead_model_reports_only_unreferenced_models() {
+        let source = "model Live {\n  x: String\n}\nmodel AlsoLive {\n  y: String\n}\n\
+                      model Dead {\n  z: String\n}";
+        let mut ws = WorkspaceView::empty();
+        ws.referenced_models.insert("Live".to_string());
+        ws.referenced_models.insert("AlsoLive".to_string());
+        let c = ctx(source, &ws);
+        let diags = DeadModel.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.dead-model");
+        assert!(diags[0].message.contains("Dead"), "{}", diags[0].message);
+        assert!(!diags[0].message.contains("AlsoLive"));
+        assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn model_referenced_as_query_return_is_not_dead() {
+        let source = "model User {\n  id: UUID\n}\n\
+                      query GetUser($id: UUID) -> User? {\n  SELECT id FROM users\n}";
+        let mut ws = WorkspaceView::empty();
+        ws.referenced_models.insert("User".to_string());
+        let c = ctx(source, &ws);
+        assert!(DeadModel.check(&c).is_empty());
+    }
+
+    #[test]
     fn redundant_min_is_reported() {
         let source = "model T {\n  x: Int .min(10) .min(5)\n}";
         let ws = WorkspaceView::empty();
@@ -544,5 +807,160 @@ mod tests {
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         assert!(NamingConvention.check(&c).is_empty());
+    }
+
+    fn flagged_names(diags: &[Diagnostic]) -> Vec<String> {
+        diags
+            .iter()
+            .filter_map(|d| d.message.split('`').nth(1).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn naming_convention_rejects_underscores_and_wrong_initial_case() {
+        let source = "type user_name = String\n\
+                      type User_name = String\n\
+                      type UserProfile_name = String\n\
+                      model user {\n  ok: String\n}\n\
+                      model User {\n  user_Name: String\n}\n\
+                      query userName() {\n  SELECT id FROM users\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = NamingConvention.check(&c);
+        assert!(
+            diags.iter().all(|d| d.code == "lint.naming-convention"),
+            "{diags:?}"
+        );
+        let names = flagged_names(&diags);
+        for expected in [
+            "user_name",
+            "User_name",
+            "UserProfile_name",
+            "user",
+            "user_Name",
+            "userName",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "expected `{expected}` to be flagged, got {names:?}"
+            );
+        }
+        let spanless: Vec<_> = diags.iter().filter(|d| d.span.is_none()).collect();
+        assert!(spanless.is_empty(), "diagnostics without spans: {spanless:?}");
+    }
+
+    #[test]
+    fn naming_convention_accepts_acronyms_digits_and_camel_case() {
+        let source = "type EmailAddress = String\n\
+                      type UUID = String\n\
+                      model UserProfile {\n  userName: String\n  user: String\n  user2: String\n}\n\
+                      query ListUsers($userId: UUID, $id: String) -> UserProfile[] {\n  SELECT userName FROM users\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = NamingConvention.check(&c);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn naming_convention_skips_quoted_field_names() {
+        let source = "model User {\n  \"first-name\": String\n  \"x:y\": Int\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = NamingConvention.check(&c);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn unused_type_alias_is_reported() {
+        let source = "type Email = String\nmodel User {\n  name: String\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = UnusedTypeAlias.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.unused-type-alias");
+        assert!(diags[0].message.contains("Email"));
+        assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn referenced_type_alias_is_not_reported() {
+        let source = "type Email = String\nmodel User {\n  email: Email\n}";
+        let mut ws = WorkspaceView::empty();
+        ws.referenced_types.insert("Email".to_string());
+        let c = ctx(source, &ws);
+        assert!(UnusedTypeAlias.check(&c).is_empty());
+    }
+
+    #[test]
+    fn contradictory_numeric_bounds_are_reported() {
+        let source = "model T {\n  x: Int .min(10) .max(5)\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = UnsatisfiableValidator.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.unsatisfiable-validator");
+        assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn contradictory_length_bounds_are_reported() {
+        let source = "model T {\n  x: String .min_length(10) .max_length(5)\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = UnsatisfiableValidator.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.unsatisfiable-validator");
+    }
+
+    #[test]
+    fn nonempty_with_zero_max_length_is_reported() {
+        let source = "model T {\n  x: String .nonempty() .max_length(0)\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert_eq!(UnsatisfiableValidator.check(&c).len(), 1);
+    }
+
+    #[test]
+    fn satisfiable_bounds_are_not_reported() {
+        let source = "model T {\n  x: Int .min(5) .max(10)\n  y: String .min_length(5) .max_length(10)\n  z: String .nonempty() .max_length(10)\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert!(
+            UnsatisfiableValidator.check(&c).is_empty(),
+            "{:?}",
+            UnsatisfiableValidator.check(&c)
+        );
+    }
+
+    #[test]
+    fn out_of_order_bounds_use_effective_values() {
+        let source = "model T {\n  x: Int .max(5) .min(10)\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert_eq!(UnsatisfiableValidator.check(&c).len(), 1);
+    }
+
+    #[test]
+    fn unused_query_param_is_reported() {
+        let source = "model User { id: UUID }\nquery GetUser($id: UUID, $ghost: String) -> User? {\n  SELECT id FROM users WHERE id = $id\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = UnusedQueryParam.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.unused-query-param");
+        assert!(diags[0].message.contains("ghost"));
+        assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn positional_and_dotted_params_count_as_used() {
+        let source = "model User { id: UUID }\nquery A($id: UUID) -> User? {\n  SELECT id FROM users WHERE id = $1\n}\nquery B($input: User) -> User? {\n  INSERT INTO users (id) VALUES ($input.id) RETURNING id\n}";
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert!(
+            UnusedQueryParam.check(&c).is_empty(),
+            "{:?}",
+            UnusedQueryParam.check(&c)
+        );
     }
 }

@@ -1,14 +1,16 @@
 //! Input resolution and the per-input check phases.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::{Expr, ObjectName, Select, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use axiom_core::axm::ast::{AnnotatedType, QueryDecl, QueryReturn, Rule, Transform, TypeRef};
-use axiom_core::axm::codegen::resolve_relation;
+use axiom_core::axm::ast::{
+    AnnotatedType, QueryDecl, QueryReturn, Rule, Target, Transform, TypeRef,
+};
+use axiom_core::axm::codegen::{emitted_model_names, query_emitted_for, resolve_relation};
 use axiom_core::axm::parser::parse_axm_file;
 use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
 use axiom_core::cache::{ToolCache, compute_content_hash};
@@ -176,6 +178,295 @@ fn model_source_relation_span(src: &str, relation: &str) -> Span {
     } else {
         line_of_offset(src, rel_pos)
     }
+}
+
+/// Report fields declared more than once within the same model.
+///
+/// The parser and resolver reject duplicate *declaration* names (models and
+/// type aliases share one namespace), but a model's field list is a
+/// model-local namespace the resolver never inspects. Duplicate fields resolve
+/// without error and generate ambiguous or non-compiling output, so they are a
+/// correctness error.
+pub fn check_duplicate_fields(
+    registry: &ModelRegistry,
+    model_files: &[(PathBuf, String)],
+) -> Vec<Diagnostic> {
+    let src_by_path: BTreeMap<PathBuf, String> = model_files.iter().cloned().collect();
+    let mut diags = Vec::new();
+    for resolved in &registry.models {
+        let src = src_by_path
+            .get(&resolved.path)
+            .map(String::as_str)
+            .unwrap_or("");
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for field in &resolved.model.fields {
+            let count = seen.entry(field.name.as_str()).or_insert(0);
+            *count += 1;
+            if *count < 2 {
+                continue;
+            }
+            let span = field_decl_span(src, &field.name, *count - 1);
+            let mut diag = Diagnostic::error(
+                &resolved.path,
+                "check.duplicate-field",
+                format!(
+                    "model `{}` declares field `{}` more than once",
+                    resolved.model.name, field.name
+                ),
+            )
+            .with_help(
+                "remove or rename the duplicate field; generated code shares one field namespace",
+            );
+            if let Some(span) = span {
+                diag = diag.with_span(span);
+            }
+            diags.push(diag);
+        }
+    }
+    diags
+}
+
+/// Report references from a declaration emitted for a codegen target to a
+/// model that target's `@target(...)` excludes.
+///
+/// `emit_plan` already decides which models each target emits; a reference from
+/// an emitted declaration to an omitted model produces output that names a
+/// type/struct the target never generated. Type aliases are emitted for every
+/// target, so their bases are checked too. A reference hidden behind a pure
+/// alias is caught when the alias itself is checked, so aliases are not
+/// followed from their referencing declarations.
+pub fn check_target_references(
+    config: &AxiomConfig,
+    registry: &ModelRegistry,
+    model_files: &[(PathBuf, String)],
+) -> Vec<Diagnostic> {
+    let src_by_path: BTreeMap<PathBuf, String> = model_files.iter().cloned().collect();
+    let mut diags = Vec::new();
+    let mut seen_targets = BTreeSet::new();
+
+    for name in config.target_types() {
+        let Some(target) = Target::parse(name) else {
+            continue;
+        };
+        if !seen_targets.insert(target.name()) {
+            continue;
+        }
+        let emitted = emitted_model_names(registry, target);
+
+        for resolved in &registry.models {
+            if !emitted.contains(&resolved.model.name) {
+                continue;
+            }
+            let src = src_by_path
+                .get(&resolved.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let owner = format!("model `{}`", resolved.model.name);
+            for field in &resolved.model.fields {
+                let mut refs = Vec::new();
+                collect_excluded_refs(registry, &resolved.path, &field.ty.base, &emitted, &mut refs);
+                for reference in refs {
+                    let span = decl_keyword_start(src, "model", &resolved.model.name)
+                        .and_then(|from| word_span_from(src, &field.name, from))
+                        .and_then(|field| word_span_from(src, &reference.written, field.end));
+                    push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+                }
+            }
+        }
+
+        for resolved in &registry.types {
+            let src = src_by_path
+                .get(&resolved.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let owner = format!("type `{}`", resolved.ty.name);
+            let mut refs = Vec::new();
+            collect_excluded_refs(
+                registry,
+                &resolved.path,
+                &resolved.ty.ty.base,
+                &emitted,
+                &mut refs,
+            );
+            for reference in refs {
+                let span = decl_keyword_start(src, "type", &resolved.ty.name)
+                    .and_then(|from| word_span_from(src, &reference.written, from));
+                push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+            }
+        }
+
+        for resolved in &registry.queries {
+            if !query_emitted_for(&resolved.query, target) {
+                continue;
+            }
+            let src = src_by_path
+                .get(&resolved.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let owner = format!("query `{}`", resolved.query.name);
+            let query_start = decl_keyword_start(src, "query", &resolved.query.name);
+            for param in &resolved.query.params {
+                let mut refs = Vec::new();
+                collect_excluded_refs(registry, &resolved.path, &param.ty, &emitted, &mut refs);
+                for reference in refs {
+                    let span = query_start
+                        .and_then(|from| param_type_span(src, from, &param.name, &reference.written));
+                    push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+                }
+            }
+            let return_ty = match &resolved.query.return_type {
+                QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                    Some(ty)
+                }
+                QueryReturn::Exec => None,
+            };
+            if let Some(ty) = return_ty {
+                let mut refs = Vec::new();
+                collect_excluded_refs(registry, &resolved.path, ty, &emitted, &mut refs);
+                for reference in refs {
+                    let span = query_start
+                        .and_then(|from| word_span_from(src, &reference.written, from));
+                    push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+/// A reference from a checked declaration to a model omitted from a target.
+struct ExcludedReference {
+    /// The spelling at the reference site (`DbUser`), used for the span.
+    written: String,
+    /// The canonical declaration name (`User`), used for the message.
+    canonical: String,
+}
+
+/// Collect references to models that are absent from `emitted`. Type aliases
+/// are skipped: they are emitted for every target and checked where declared.
+fn collect_excluded_refs(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+    emitted: &BTreeSet<String>,
+    out: &mut Vec<ExcludedReference>,
+) {
+    match ty {
+        TypeRef::Named(written) => {
+            let canonical = registry.effective_name(path, written);
+            if registry.type_by_name(canonical).is_some() {
+                return;
+            }
+            if registry.model_by_name(canonical).is_some() && !emitted.contains(canonical) {
+                out.push(ExcludedReference {
+                    written: written.clone(),
+                    canonical: canonical.to_string(),
+                });
+            }
+        }
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
+            collect_excluded_refs(registry, path, inner, emitted, out);
+        }
+        _ => {}
+    }
+}
+
+fn push_excluded_reference(
+    out: &mut Vec<Diagnostic>,
+    path: &Path,
+    target: Target,
+    owner: &str,
+    span: Option<Span>,
+    reference: &ExcludedReference,
+) {
+    let canonical = &reference.canonical;
+    let target_name = target.name();
+    let mut diag = Diagnostic::error(
+        path,
+        "check.target-excluded-reference",
+        format!(
+            "{owner} references model `{canonical}`, which `@target` excludes from target `{target_name}`"
+        ),
+    )
+    .with_help(format!(
+        "emit `{canonical}` for `{target_name}` (widen its `@target`) or stop referencing it from {owner}"
+    ));
+    if let Some(span) = span {
+        diag = diag.with_span(span);
+    }
+    out.push(diag);
+}
+
+/// Byte span of the `name` in the first `keyword name` declaration at or after
+/// the start of `source`.
+fn decl_keyword_start(source: &str, keyword: &str, name: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    for (start, _) in source.match_indices(keyword) {
+        if start > 0 && source[..start].chars().next_back().is_some_and(is_word) {
+            continue;
+        }
+        let after_kw = &source[start + keyword.len()..];
+        let trimmed = after_kw.trim_start();
+        if !trimmed.starts_with(name) {
+            continue;
+        }
+        let name_at = start + keyword.len() + (after_kw.len() - trimmed.len());
+        let after = source[name_at + name.len()..].chars().next();
+        if !after.is_some_and(|c| c.is_ascii_whitespace() || matches!(c, '{' | '(' | '=')) {
+            continue;
+        }
+        return Some(name_at);
+    }
+    None
+}
+
+/// Byte span of `$param`'s type token within the query whose declaration starts
+/// at `from`.
+fn param_type_span(source: &str, from: usize, param: &str, ty: &str) -> Option<Span> {
+    let needle = format!("${param}:");
+    let start = source[from..].find(&needle).map(|i| from + i + needle.len())?;
+    word_span_from(source, ty, start)
+}
+
+/// Byte span of `name` as a whole word at or after `from`.
+fn word_span_from(source: &str, name: &str, from: usize) -> Option<Span> {
+    let from = from.min(source.len());
+    let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    let mut offset = from;
+    while offset <= source.len() {
+        let rel = source[offset..].find(name)?;
+        let start = offset + rel;
+        let before = source[..start].chars().next_back();
+        let after = source[start + name.len()..].chars().next();
+        if boundary(before) && boundary(after) {
+            return Some(Span::new(start, start + name.len()));
+        }
+        offset = start + name.len();
+    }
+    None
+}
+
+/// Byte span of the `occurrence`th (0-based) field declaration of `name`, where
+/// a field declaration is a line whose trimmed text starts with `name` followed
+/// by `?` or `:`.
+fn field_decl_span(source: &str, name: &str, occurrence: usize) -> Option<Span> {
+    let mut offset = 0;
+    let mut seen = 0;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(name)
+            && (rest.starts_with('?') || rest.starts_with(':'))
+        {
+            if seen == occurrence {
+                let leading = line.len() - trimmed.len();
+                return Some(Span::new(offset + leading, offset + leading + name.len()));
+            }
+            seen += 1;
+        }
+        offset += line.len() + 1;
+    }
+    None
 }
 
 /// Validate a single `query` declaration: placeholders must resolve to a
@@ -853,9 +1144,45 @@ pub fn aggregate_hash(files: &[(PathBuf, String)]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// The set of model names referenced (as field types or imports) across the
-/// workspace. Used by the linter's `dead-model` rule.
+/// The set of model names referenced by any legitimate declaration site across
+/// the workspace: an import, a type-alias base, a model field type, or a query
+/// parameter/return type. Used by the linter's `dead-model` rule.
 pub fn collect_referenced_models(
+    model_files: &[(PathBuf, String)],
+) -> std::collections::BTreeSet<String> {
+    collect_referenced_names(model_files)
+}
+
+fn collect_type_names(ty: &TypeRef, out: &mut std::collections::BTreeSet<String>) {
+    match ty {
+        TypeRef::Named(name) => {
+            out.insert(name.clone());
+        }
+        TypeRef::Array(inner) => collect_type_names(inner, out),
+        TypeRef::Nullable(inner) => collect_type_names(inner, out),
+        _ => {}
+    }
+}
+
+/// The set of type names referenced anywhere across the workspace: imports,
+/// type-alias bases, model fields, and query parameters and return types. Used
+/// by the linter's `unused-type-alias` rule.
+pub fn collect_referenced_types(
+    model_files: &[(PathBuf, String)],
+) -> std::collections::BTreeSet<String> {
+    collect_referenced_names(model_files)
+}
+
+/// Every written name referenced by a `.axm` file, from every declaration site
+/// that can name another declaration: imports (original and aliased names),
+/// type-alias bases, model field types, and query parameter and return types.
+///
+/// This is the single scan behind both [`collect_referenced_models`] (the
+/// `dead-model` liveness set) and [`collect_referenced_types`] (the
+/// `unused-type-alias` liveness set). It is a written-name scan, not a
+/// resolution graph: a name counts as referenced whenever it appears at one of
+/// these sites, even if the referring declaration is itself unreferenced.
+fn collect_referenced_names(
     model_files: &[(PathBuf, String)],
 ) -> std::collections::BTreeSet<String> {
     let mut referenced = std::collections::BTreeSet::new();
@@ -871,24 +1198,27 @@ pub fn collect_referenced_models(
                 }
             }
         }
+        for ty in &file.types {
+            collect_type_names(&ty.ty.base, &mut referenced);
+        }
         for model in &file.models {
             for field in &model.fields {
                 collect_type_names(&field.ty.base, &mut referenced);
             }
         }
+        for query in &file.queries {
+            for param in &query.params {
+                collect_type_names(&param.ty, &mut referenced);
+            }
+            match &query.return_type {
+                QueryReturn::Exec => {}
+                QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                    collect_type_names(ty, &mut referenced)
+                }
+            }
+        }
     }
     referenced
-}
-
-fn collect_type_names(ty: &TypeRef, out: &mut std::collections::BTreeSet<String>) {
-    match ty {
-        TypeRef::Named(name) => {
-            out.insert(name.clone());
-        }
-        TypeRef::Array(inner) => collect_type_names(inner, out),
-        TypeRef::Nullable(inner) => collect_type_names(inner, out),
-        _ => {}
-    }
 }
 
 fn hex(hash: &[u8]) -> String {

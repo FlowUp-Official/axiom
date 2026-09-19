@@ -165,6 +165,25 @@ pub(crate) fn query_emitted(query: &QueryDecl, target: Target) -> bool {
     query.target_restriction().is_none_or(|ts| ts.contains(&target))
 }
 
+/// The canonical names of every model emitted for `target`, mirroring
+/// [`emit_plan`]. Includes `@no_codegen` models pulled in by a reference, and
+/// excludes models whose `@target(...)` restriction omits `target`.
+///
+/// Callers use this to verify referential closure: a declaration emitted for
+/// `target` may only reference models present in this set.
+pub fn emitted_model_names(registry: &ModelRegistry, target: Target) -> BTreeSet<String> {
+    emit_plan(registry, target)
+        .into_iter()
+        .map(|(resolved, _)| resolved.model.name.clone())
+        .collect()
+}
+
+/// Whether `query` is emitted for `target` (an unrestricted query is emitted
+/// for every target).
+pub fn query_emitted_for(query: &QueryDecl, target: Target) -> bool {
+    query_emitted(query, target)
+}
+
 /// Add any `@no_codegen` model referenced by `deps` to `emitted`. Returns true
 /// when at least one model was added.
 fn pull_in_no_codegen(

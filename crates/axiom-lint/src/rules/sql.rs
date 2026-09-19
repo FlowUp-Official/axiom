@@ -8,7 +8,7 @@ use sqlparser::ast::{
     ColumnOption, CreateIndex, CreateTable, Expr, IndexColumn, Statement, TableConstraint,
 };
 use sqlparser::dialect::GenericDialect;
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
 
 use crate::runner::{LintContext, LintRule, word_span};
 
@@ -58,6 +58,12 @@ impl LintRule for MissingWhereClause {
 
 /// Flags `SELECT *` projections; explicit column lists are more stable against
 /// schema changes.
+///
+/// The rule scans a context only when it carries a parsed SQL statement list.
+/// The whole-file `.axm` context has no statements, so each `query` body is
+/// analyzed exactly once (from its own body context) instead of once for the
+/// body and once for the enclosing file; `.axm` syntax is never read as SQL,
+/// and standalone `.sql` files are scanned once.
 #[derive(Debug)]
 pub struct SelectStar;
 
@@ -67,37 +73,43 @@ impl LintRule for SelectStar {
     }
 
     fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
-        let Ok(tokens) = Tokenizer::new(&GenericDialect {}, ctx.source).tokenize() else {
+        if ctx.statements.is_none() {
+            return Vec::new();
+        }
+
+        let Ok(tokens) = Tokenizer::new(&GenericDialect {}, ctx.source).tokenize_with_location()
+        else {
             return Vec::new();
         };
 
+        let line_starts = line_starts(ctx.source);
         let mut out = Vec::new();
-        let mut prev: Option<String> = None;
-        let mut last_position: Option<(usize, usize)> = None;
+        // Whether the previous significant token opens a select item: `SELECT`,
+        // a projection comma, or a `DISTINCT`/`ALL` modifier.
+        let mut select_item = false;
         for token in tokens {
-            match &token {
+            match &token.token {
                 Token::Mul => {
-                    let is_star_item = prev.as_deref().is_some_and(|p| p == "SELECT" || p == ",");
-                    if is_star_item {
-                        let span = last_position
-                            .map(|(s, e)| Span::new(s, e))
-                            .unwrap_or_else(|| Span::new(0, 1));
-                        out.push(
-                            Diagnostic::warning(
-                                ctx.file,
-                                "lint.select-star",
-                                "`SELECT *` selects every column; list columns explicitly",
-                            )
-                            .with_help("enumerate the columns instead of `*`")
-                            .with_span(span),
-                        );
+                    if select_item {
+                        let span = token_location_span(ctx.source, &line_starts, &token);
+                        let mut diag = Diagnostic::warning(
+                            ctx.file,
+                            "lint.select-star",
+                            "`SELECT *` selects every column; list columns explicitly",
+                        )
+                        .with_help("enumerate the columns instead of `*`");
+                        if let Some(span) = span {
+                            diag = diag.with_span(span);
+                        }
+                        out.push(diag);
                     }
-                    prev = Some("*".to_string());
+                    select_item = false;
                 }
                 Token::Whitespace(_) | Token::EOF => {}
                 other => {
-                    prev = Some(other.to_string().to_uppercase());
-                    last_position = token_span(&token, ctx.source);
+                    let upper = other.to_string().to_uppercase();
+                    select_item =
+                        matches!(upper.as_str(), "SELECT" | "," | "DISTINCT" | "ALL");
                 }
             }
         }
@@ -166,6 +178,65 @@ impl LintRule for UnindexedForeignKey {
         }
         out
     }
+}
+
+/// Flags `CREATE TABLE` statements that declare no primary key or unique
+/// constraint, leaving rows with no stable identity.
+#[derive(Debug)]
+pub struct MissingPrimaryKey;
+
+impl LintRule for MissingPrimaryKey {
+    fn name(&self) -> &'static str {
+        "missing-primary-key"
+    }
+
+    fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
+        let Some(statements) = &ctx.statements else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for stmt in statements {
+            let Statement::CreateTable(create) = stmt else {
+                continue;
+            };
+            if table_has_key(create) {
+                continue;
+            }
+            let table = create.name.to_string();
+            let mut diag = Diagnostic::warning(
+                ctx.file,
+                "lint.missing-primary-key",
+                format!("table `{table}` has no primary key; rows have no stable identity"),
+            )
+            .with_help("add a PRIMARY KEY (or a UNIQUE constraint) to the table");
+            if let Some(span) = word_span(ctx.source, 0, &table) {
+                diag = diag.with_span(span);
+            }
+            out.push(diag);
+        }
+        out
+    }
+}
+
+/// Whether a `CREATE TABLE` declares a row key: a column-level `PRIMARY KEY`
+/// or `UNIQUE`, or a table-level `PRIMARY KEY`/`UNIQUE` constraint.
+fn table_has_key(create: &CreateTable) -> bool {
+    let column_key = create.columns.iter().any(|column| {
+        column.options.iter().any(|option| {
+            matches!(
+                &option.option,
+                ColumnOption::PrimaryKey(_) | ColumnOption::Unique(_)
+            )
+        })
+    });
+    let table_key = create.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            TableConstraint::PrimaryKey(_) | TableConstraint::Unique(_)
+        )
+    });
+    column_key || table_key
 }
 
 fn collect_table_fks(create: &CreateTable, out: &mut Vec<(String, String)>) {
@@ -269,12 +340,42 @@ fn keyword_span(source: &str, keyword: &str) -> Option<Span> {
     None
 }
 
-/// Best-effort byte span of a token in the source.
-fn token_span(token: &Token, source: &str) -> Option<(usize, usize)> {
-    let text = token.to_string();
-    let lower = source.to_ascii_lowercase();
-    let rel = lower.find(&text.to_ascii_lowercase())?;
-    Some((rel, rel + text.len()))
+/// Byte offset of the start of every line in `source` (the first is always 0).
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (i, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Byte span of a token, using the tokenizer's line/column locations.
+fn token_location_span(source: &str, line_starts: &[usize], token: &TokenWithSpan) -> Option<Span> {
+    let start = location_offset(source, line_starts, token.span.start)?;
+    let end = location_offset(source, line_starts, token.span.end).unwrap_or(start + 1);
+    Some(Span::new(start, end.max(start + 1)))
+}
+
+/// Convert a tokenizer [`Location`] (1-based line/column, columns counted in
+/// characters) into a byte offset into `source`.
+fn location_offset(source: &str, line_starts: &[usize], loc: Location) -> Option<usize> {
+    if loc.line == 0 || loc.column == 0 {
+        return None;
+    }
+    let line_start = *line_starts.get((loc.line - 1) as usize)?;
+    let line_end = source[line_start..]
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(source.len());
+    let line = &source[line_start..line_end];
+    let offset = line
+        .char_indices()
+        .nth((loc.column - 1) as usize)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    Some(line_start + offset)
 }
 
 #[cfg(test)]
@@ -340,6 +441,66 @@ mod tests {
     }
 
     #[test]
+    fn distinct_select_star_is_flagged() {
+        let source = "SELECT DISTINCT * FROM users;";
+        let ws = WorkspaceView::empty();
+        let diags = SelectStar.check(&ctx(source, &ws));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn qualified_select_star_is_not_flagged() {
+        let source = "SELECT users.* FROM users;";
+        let ws = WorkspaceView::empty();
+        assert!(SelectStar.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn select_star_after_comma_is_flagged() {
+        let source = "SELECT id, * FROM users;";
+        let ws = WorkspaceView::empty();
+        let diags = SelectStar.check(&ctx(source, &ws));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn select_star_inside_comment_is_not_flagged() {
+        let source = "-- SELECT * FROM users\nSELECT id FROM users;";
+        let ws = WorkspaceView::empty();
+        assert!(SelectStar.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn select_star_inside_string_literal_is_not_flagged() {
+        let source = "SELECT 'SELECT * FROM users' AS note FROM users;";
+        let ws = WorkspaceView::empty();
+        assert!(SelectStar.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn select_star_span_points_at_star() {
+        let source = "SELECT id, * FROM users;";
+        let ws = WorkspaceView::empty();
+        let diags = SelectStar.check(&ctx(source, &ws));
+        let star = source.find('*').unwrap();
+        assert_eq!(diags[0].span, Some(Span::new(star, star + 1)));
+    }
+
+    #[test]
+    fn select_star_is_skipped_without_parsed_statements() {
+        let ws = WorkspaceView::empty();
+        let ctx = LintContext {
+            file: Path::new("models/user.axm"),
+            source: "query List() -> User[] {\n  SELECT * FROM users\n}",
+            origin: 0,
+            axm: None,
+            statements: None,
+            workspace: &ws,
+        };
+        assert!(SelectStar.check(&ctx).is_empty());
+    }
+
+    #[test]
     fn unindexed_foreign_key_is_flagged() {
         let source = "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id));";
         let ws = WorkspaceView::empty();
@@ -394,5 +555,43 @@ mod tests {
         let source = "CREATE TABLE posts (id INT PRIMARY KEY);\nCREATE TABLE post_analytics (post_id TEXT, PRIMARY KEY (post_id), FOREIGN KEY (post_id) REFERENCES posts(id));";
         let ws = WorkspaceView::empty();
         assert!(UnindexedForeignKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn missing_primary_key_is_flagged() {
+        let source = "CREATE TABLE users (id INT, email TEXT);";
+        let ws = WorkspaceView::empty();
+        let diags = MissingPrimaryKey.check(&ctx(source, &ws));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.missing-primary-key");
+        assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn column_primary_key_is_fine() {
+        let source = "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);";
+        let ws = WorkspaceView::empty();
+        assert!(MissingPrimaryKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn table_level_primary_key_is_fine() {
+        let source = "CREATE TABLE users (id INT, email TEXT, PRIMARY KEY (id));";
+        let ws = WorkspaceView::empty();
+        assert!(MissingPrimaryKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn unique_constraint_satisfies_missing_primary_key() {
+        let source = "CREATE TABLE users (id INT, email TEXT UNIQUE);";
+        let ws = WorkspaceView::empty();
+        assert!(MissingPrimaryKey.check(&ctx(source, &ws)).is_empty());
+    }
+
+    #[test]
+    fn table_level_unique_is_fine() {
+        let source = "CREATE TABLE users (id INT, email TEXT, UNIQUE (email));";
+        let ws = WorkspaceView::empty();
+        assert!(MissingPrimaryKey.check(&ctx(source, &ws)).is_empty());
     }
 }

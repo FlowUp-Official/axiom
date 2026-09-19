@@ -26,8 +26,9 @@ use axiom_diagnostics::Diagnostic;
 pub use diagnostics::{line_of_offset, span_for_line};
 pub use synchronization::{SyncCheck, write_fixed_outputs};
 pub use workspace::{
-    Workspace, check_model_sources, check_models, check_queries, check_schemas,
-    collect_referenced_models, resolve_inputs,
+    Workspace, check_duplicate_fields, check_model_sources, check_models, check_queries,
+    check_schemas, check_target_references, collect_referenced_models, collect_referenced_types,
+    resolve_inputs,
 };
 
 /// The outcome of a full `axiom check` run.
@@ -69,6 +70,16 @@ pub fn check_workspace(
         }
         None => Vec::new(),
     };
+    let duplicate_field_diags = match registry.as_ref() {
+        Some(registry) => workspace::check_duplicate_fields(registry, &workspace.model_files),
+        None => Vec::new(),
+    };
+    let target_reference_diags = match registry.as_ref() {
+        Some(registry) => {
+            workspace::check_target_references(config, registry, &workspace.model_files)
+        }
+        None => Vec::new(),
+    };
 
     let mut sync = synchronization::check_synchronization(
         config,
@@ -94,6 +105,8 @@ pub fn check_workspace(
     diagnostics.extend(schema_diags);
     diagnostics.extend(query_diags);
     diagnostics.extend(source_model_diags);
+    diagnostics.extend(duplicate_field_diags);
+    diagnostics.extend(target_reference_diags);
     diagnostics.extend(model_diags);
     diagnostics.extend(sync.problems);
 

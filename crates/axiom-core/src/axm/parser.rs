@@ -142,11 +142,7 @@ fn is_word_char(c: char) -> bool {
 
 fn ident(input: &mut &str) -> PResult<String> {
     take_while(1.., is_word_char)
-        .verify(|s: &str| {
-            s.chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        })
+        .verify(|s: &str| crate::axm::is_identifier(s))
         .map(|s: &str| s.to_string())
         .parse_next(input)
 }

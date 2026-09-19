@@ -17,16 +17,24 @@ use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::rules::axm::{DeadModel, NamingConvention, RedundantValidator, UnusedImport};
-use crate::rules::sql::{MissingWhereClause, SelectStar, UnindexedForeignKey};
+use crate::rules::axm::{
+    DeadModel, NamingConvention, RedundantValidator, UnusedImport, UnusedQueryParam,
+    UnusedTypeAlias, UnsatisfiableValidator,
+};
+use crate::rules::sql::{
+    MissingPrimaryKey, MissingWhereClause, SelectStar, UnindexedForeignKey,
+};
 
 /// Cross-file information that rules may need.
 ///
-/// Populated by the CLI before running: every model name referenced anywhere
-/// in the workspace (as a field type or an import), used by `dead-model`.
+/// Populated by the CLI before running: every name referenced anywhere in the
+/// workspace (imports, type-alias bases, model fields, and query parameter and
+/// return types). `referenced_models` drives `dead-model`, and
+/// `referenced_types` drives `unused-type-alias`.
 #[derive(Debug, Default)]
 pub struct WorkspaceView {
     pub referenced_models: BTreeSet<String>,
+    pub referenced_types: BTreeSet<String>,
 }
 
 impl WorkspaceView {
@@ -71,12 +79,16 @@ impl LintRunner {
         Self {
             rules: vec![
                 Box::new(UnusedImport),
+                Box::new(UnusedTypeAlias),
                 Box::new(DeadModel),
                 Box::new(RedundantValidator),
+                Box::new(UnsatisfiableValidator),
                 Box::new(NamingConvention),
+                Box::new(UnusedQueryParam),
                 Box::new(MissingWhereClause),
                 Box::new(SelectStar),
                 Box::new(UnindexedForeignKey),
+                Box::new(MissingPrimaryKey),
             ],
         }
     }
@@ -366,5 +378,38 @@ mod tests {
         assert_eq!(diags[0].code, "lint.missing-where-clause");
         assert_eq!(diags[0].span, Some(Span::new(0, "delete".len())));
         assert!(SelectStar.check(body).is_empty());
+    }
+
+    fn select_star_diags(path: &str, src: &str) -> Vec<Diagnostic> {
+        let ws = WorkspaceView::empty();
+        let contexts = build_contexts(Path::new(path), src, &ws);
+        contexts
+            .iter()
+            .flat_map(|ctx| SelectStar.check(ctx))
+            .collect()
+    }
+
+    #[test]
+    fn select_star_reported_once_per_axm_query_body() {
+        let src = "model User { id: UUID }\n\nquery List() -> User[] {\n  SELECT * FROM users\n}\n";
+        let diags = select_star_diags("models/user.axm", src);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.select-star");
+    }
+
+    #[test]
+    fn select_star_reported_once_for_each_of_multiple_queries() {
+        let src = "model User { id: UUID }\n\n\
+                   query A() -> User[] {\n  SELECT * FROM users\n}\n\n\
+                   query B() -> User[] {\n  SELECT * FROM users\n}\n";
+        let diags = select_star_diags("models/user.axm", src);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+    }
+
+    #[test]
+    fn select_star_reported_once_in_standalone_sql_file() {
+        let src = "SELECT *\nFROM users;\n";
+        let diags = select_star_diags("schema.sql", src);
+        assert_eq!(diags.len(), 1, "{diags:?}");
     }
 }

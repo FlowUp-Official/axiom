@@ -415,6 +415,144 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
     );
 }
 
+#[test]
+fn lint_flags_unused_query_param_and_type_alias() {
+    let dir = fixture_dir("run_lint_unused_param_and_alias");
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::write(
+        dir.join("axiom.json"),
+        r#"{
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "project": { "name": "fixture", "dialect": "postgres" },
+  "cache": { "enabled": true, "path": ".axiom.cache" },
+  "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
+  "codegen": {
+    "validation": {
+      "apis": ["safeParse", "parse"],
+      "safeParse": { "errors": "all" }
+    }
+  },
+  "outputs": {
+    "api": { "type": "typescript", "path": "gen/api.ts" },
+    "core": { "type": "rust", "path": "gen/core.rs" }
+  }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("schema.sql"), SCHEMA_SQL).unwrap();
+    std::fs::write(
+        dir.join("models/models.axm"),
+        "model User { id: UUID }\n\ntype Unused = String\n\nquery get_user($id: UUID, $ghost: String) -> User? {\n  SELECT id FROM users WHERE id = $id\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .current_dir(&dir)
+        .arg("--config")
+        .arg("axiom.json")
+        .arg("lint")
+        .output()
+        .expect("failed to run axiom binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "lint should fail on unused query params and aliases: {stderr}"
+    );
+    assert!(
+        stderr.contains("lint.unused-query-param"),
+        "stderr should report unused-query-param: {stderr}"
+    );
+    assert!(
+        stderr.contains("lint.unused-type-alias"),
+        "stderr should report unused-type-alias: {stderr}"
+    );
+}
+
+const LINT_CONFIG_JSON: &str = r#"{
+  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "project": { "name": "fixture", "dialect": "postgres" },
+  "cache": { "enabled": true, "path": ".axiom.cache" },
+  "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
+  "codegen": {
+    "validation": {
+      "apis": ["safeParse", "parse"],
+      "safeParse": { "errors": "all" }
+    }
+  },
+  "outputs": {
+    "api": { "type": "typescript", "path": "gen/api.ts" },
+    "core": { "type": "rust", "path": "gen/core.rs" }
+  }
+}
+"#;
+
+fn write_lint_fixture(dir: &Path, models: &str) {
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::write(dir.join("axiom.json"), LINT_CONFIG_JSON).unwrap();
+    std::fs::write(dir.join("schema.sql"), SCHEMA_SQL).unwrap();
+    std::fs::write(dir.join("models/models.axm"), models).unwrap();
+}
+
+fn run_lint(dir: &Path, rules: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_axiom"));
+    cmd.current_dir(dir)
+        .arg("--config")
+        .arg("axiom.json")
+        .arg("lint");
+    for rule in rules {
+        cmd.arg("--rules").arg(rule);
+    }
+    cmd.output().expect("failed to run axiom binary")
+}
+
+#[test]
+fn lint_dead_model_treats_query_referenced_model_as_live() {
+    let dir = fixture_dir("run_lint_dead_model_query_ref");
+    write_lint_fixture(
+        &dir,
+        "model User { id: UUID }\n\nquery get_user($id: UUID) -> User? {\n  SELECT id FROM users WHERE id = $id\n}\n",
+    );
+
+    let output = run_lint(&dir, &["dead-model"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "expected no dead-model: {stderr}");
+    assert!(!stderr.contains("lint.dead-model"), "{stderr}");
+}
+
+#[test]
+fn lint_select_star_reports_each_query_once() {
+    let dir = fixture_dir("run_lint_select_star_counts");
+    write_lint_fixture(
+        &dir,
+        "model User { id: UUID }\n\nquery A() -> User[] {\n  SELECT * FROM users\n}\n\nquery B() -> User[] {\n  SELECT * FROM users\n}\n",
+    );
+
+    let output = run_lint(&dir, &["select-star"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("lint.select-star").count(),
+        2,
+        "each query must be reported once: {stderr}"
+    );
+}
+
+#[test]
+fn lint_naming_convention_flags_full_identifier_violations() {
+    let dir = fixture_dir("run_lint_naming_convention");
+    write_lint_fixture(
+        &dir,
+        "type user_name = String\nmodel User {\n  id: UUID\n  user_Name: String\n}\n",
+    );
+
+    let output = run_lint(&dir, &["naming-convention"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("lint.naming-convention"), "{stderr}");
+    assert!(stderr.contains("user_name"), "{stderr}");
+    assert!(stderr.contains("user_Name"), "{stderr}");
+}
+
 const APIS_MODELS_AXM: &str = r#"
 model User {
   email: String .email()

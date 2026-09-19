@@ -65,6 +65,53 @@ A [Zed extension](extensions/axiom) is bundled for one-click setup; any editor t
 - Postgres schema synchronization with flexible URL resolution from CLI flags, `.env` files, and environment variables.
 - Release artifacts signed with SHA-256 checksums for both Linux and Windows.
 
+## Linting
+
+`axiom lint` runs static-analysis rules over your `.axm` models and SQL schema inputs — including the SQL body of every `query` declaration. The following table reflects the **actual implementation** in `crates/axiom-lint`, as verified against the source and the test suite; it is not inferred from documentation.
+
+Every rule is enabled by default and can be selected individually with `axiom lint --rules <name>`. Unknown rule names are silently dropped. There is no per-rule `lint` section in `axiom.json` yet; rules only have a severity baked in at compile time (`missing-where-clause` is an error, everything else is a warning). Lint results are cached in the content-addressed `ToolCache`. Note that the in-editor diagnostics come from `axiom check` — **lint rules are not surfaced by `axiom-lsp`**.
+
+| Lint rule / feature | Description | Status | Configuration | Tests |
+| ------------------- | ----------- | ------ | ------------- | ----- |
+| `missing-where-clause` | Errors on `DELETE`/`UPDATE` without a `WHERE` clause, including inside `.axm` query bodies | ✅ Implemented | Enabled by default; `--rules missing-where-clause` | Unit (`crates/axiom-lint/src/rules/sql.rs`) + CLI integration (`cli_integration.rs`) |
+| `unused-import` | Warns on `import { … } from "…"` names never used as a field/parameter/return type in the importing file; aliased imports matched by written name | ✅ Implemented | Enabled by default; `--rules unused-import` | Unit (`rules/axm.rs`, 3 tests) |
+| `redundant-validator` | Warns on duplicate validators or bounds strictly weaker than one already on the same field (e.g. `.min(10) .min(5)`), with custom messages ignored for matching | ✅ Implemented | Enabled by default; `--rules redundant-validator` | Unit (`rules/axm.rs`, 3 tests) |
+| `unindexed-foreign-key` | Warns on foreign-key columns not covered by any `CREATE INDEX` (or a `PRIMARY KEY`/`UNIQUE` on the column); runs over CREATE TABLE/CREATE INDEX statements | ✅ Implemented | Enabled by default; `--rules unindexed-foreign-key` | Unit (`rules/sql.rs`, 7 tests) |
+| `unused-type-alias` | Warns on a `type` alias never referenced by any model, field, query, or other alias anywhere in the workspace | ✅ Implemented | Enabled by default; `--rules unused-type-alias` | Unit (`rules/axm.rs`, 2 tests) + integration (`check_integration.rs`) |
+| `unused-query-param` | Warns on a declared `$param` never referenced by the query's SQL body, whether by name (`$email`), position (`$1`), or as a structured-path base (`$input.field`) | ✅ Implemented | Enabled by default; `--rules unused-query-param` | Unit (`rules/axm.rs`, 2 tests) + CLI integration (`cli_integration.rs`) |
+| `unsatisfiable-validator` | Warns on validator combinations no value can satisfy: contradictory numeric bounds (`.min(10) .max(5)`), contradictory length bounds (`.min_length(10) .max_length(5)`), or `.nonempty()` with `.max_length(0)` | ✅ Implemented | Enabled by default; `--rules unsatisfiable-validator` | Unit (`rules/axm.rs`, 5 tests) |
+| `missing-primary-key` | Warns on a `CREATE TABLE` that declares neither a `PRIMARY KEY` nor a `UNIQUE` constraint, leaving rows with no stable identity | ✅ Implemented | Enabled by default; `--rules missing-primary-key` | Unit (`rules/sql.rs`, 5 tests) |
+| `dead-model` | Warns on models never referenced anywhere in the workspace: as a model field type, an import, a query return or parameter type, or (transitively) a type-alias base | ✅ Implemented | Enabled by default; `--rules dead-model` | Unit (`rules/axm.rs`, 4 tests) + integration (`check_integration.rs`, 3 tests) + CLI (`cli_integration.rs`) |
+| `select-star` | Warns on unqualified `*` projections (`SELECT *`, `SELECT id, *`, `SELECT DISTINCT *`); each parsed SQL body is analyzed exactly once, so an `.axm` query body is never double-reported, `users.*` is not flagged, and comments/string literals containing `SELECT *` are ignored | ✅ Implemented | Enabled by default; `--rules select-star` | Unit (`rules/sql.rs`, 9 tests) + driver integration (`runner.rs`, 3 tests) + CLI (`cli_integration.rs`) |
+| `naming-convention` | Warns when models/type aliases/queries are not PascalCase or fields/parameters are not camelCase, validating the whole identifier (no underscores, correct initial case); quoted field names that deliberately escape the identifier grammar are exempt | ✅ Implemented | Enabled by default; `--rules naming-convention` | Unit (`rules/axm.rs`, 5 tests) + CLI (`cli_integration.rs`) |
+
+No additional lint rule names are referenced anywhere in the codebase or documentation, and no rule name is documented-but-unimplemented. Every rule in this table is also listed in [`docs/guide/lint.md`](docs/guide/lint.md).
+
+### Correctness checks (`axiom-check`)
+
+The lint rules above are line- or file-local. The two capabilities below are **workspace correctness errors** — a violation means the generated output will not compile — so they run under `axiom check`, not `axiom lint`. Both were surfaced by the architecture audit and are now implemented.
+
+| Check | Description | Subsystem | Tests |
+| ----- | ----------- | --------- | ----- |
+| `target-excluded-reference` | A declaration emitted for a target references a model whose `@target(...)` omits that target, so the generated output names a type/`coerce` the target never emitted. Uses `emit_plan`'s per-target model set; type aliases (emitted for every target) and queries are checked too | `axiom-check` (error) | Integration (`crates/axiom-check/tests/check_integration.rs`: direct, transitive, alias, query, and same-target cases) |
+| `duplicate-field` | A model declares the same field name twice; the resolver rejects duplicate declarations but never inspected a single model's field list | `axiom-check` (error) | Integration (`check_integration.rs`: duplicate and triple-duplicate cases) |
+
+All six capabilities surfaced by the architecture audit — the two above plus `unused-query-param`, `unused-type-alias`, `unsatisfiable-validator`, and `missing-primary-key` — are now implemented; none remain in the "missing" state. The remaining ideas below are heuristic or feature-level rather than clear-cut deterministic analysis.
+
+### Potential future ideas
+
+The following are plausible enhancements rather than clear-cut missing static analysis, because they are either configuration/transport features, heuristic, or depend on behavior outside the current parsed inputs:
+
+- **Per-rule config and configurable severities** — there is no `lint` section in `axiom.json`; rule selection is `--rules` only and unknown names are dropped silently. A `lint: { rules: { "…": "error" | "warn" | "off" } }` block would make severities and defaults author-controlled.
+- **Surface lint rules in `axiom-lsp`** — editor diagnostics currently come only from `axiom check`; lint findings never reach the editor.
+- **`optional-field-with-default`** — `field?: T = value` is contradictory (a missing field is filled from the default, so it is never absent); depends on confirming the emitted coercion order in both codegen targets.
+- **`redundant-transform`** — repeated idempotent transforms such as `.trim() .trim()`.
+- **`destructive-schema-change`** — `DROP TABLE`/`DROP COLUMN` in schema inputs, which `axiom push` applies to the database with no migration tracking or confirmation.
+- **`case-collision`** — identifiers differing only by case across files (`User` vs `user`), which Axiom's deliberately case-sensitive namespaces accept but humans frequently confuse.
+- **`unbounded-select`** — a `-> T[]` contract whose body has no `LIMIT`/`ORDER BY`, a pagination and memory footgun.
+- **`reserved-word-identifier` and `duplicate-index`** — schema-level hygiene that needs a reserved-word table / index-signature comparison.
+- **Schema-evolution diffing** — `axiom push` re-applies schema files with no migration history or drift detection; a `diff`/`migrate` workflow is a larger feature, not a rule.
+
 ## Install
 
 Prebuilt binaries are published for `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` on every release.

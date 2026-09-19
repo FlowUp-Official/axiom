@@ -7,8 +7,13 @@
 pub mod rules;
 pub mod runner;
 
-pub use rules::axm::{DeadModel, NamingConvention, RedundantValidator, UnusedImport};
-pub use rules::sql::{MissingWhereClause, SelectStar, UnindexedForeignKey};
+pub use rules::axm::{
+    DeadModel, NamingConvention, RedundantValidator, UnusedImport, UnusedQueryParam,
+    UnusedTypeAlias, UnsatisfiableValidator,
+};
+pub use rules::sql::{
+    MissingPrimaryKey, MissingWhereClause, SelectStar, UnindexedForeignKey,
+};
 pub use runner::{
     LintContext, LintOptions, LintRule, LintRunner, WorkspaceView, build_contexts, hex,
     lint_sources, word_span,
