@@ -412,9 +412,9 @@ fn field_type_span(
     Some(Span::new(word.start, word.end))
 }
 
-/// Collect `-> Type` return-type references from `query` declarations in an
-/// `.axm` file, located by scanning the source text between the query name and
-/// its opening brace.
+/// Collect `-> Type` return-type references from `query` and `transaction`
+/// declarations in an `.axm` file, located by scanning the source text between
+/// the declaration name and its opening brace.
 pub fn query_return_type_refs(
     file: &std::path::Path,
     src: &str,
@@ -426,7 +426,7 @@ pub fn query_return_type_refs(
             axiom_core::query::QueryReturnType::Single(name)
             | axiom_core::query::QueryReturnType::Many(name) => {
                 let name = name.trim().to_string();
-                match axm_return_span(src, &query.name, &name) {
+                match axm_return_span(src, &query.name, &name, &query.kind) {
                     Some(span) => (name, span),
                     None => continue,
                 }
@@ -448,20 +448,24 @@ fn is_axm_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Find the byte span of the return type of `query <name>`: the first word
-/// after `->` within the declaration's header.
-fn axm_return_span(src: &str, query_name: &str, return_name: &str) -> Option<Span> {
-    let needle = "query ";
+/// Find the byte span of the return type of a `query` or `transaction`
+/// declaration named `decl_name`: the first word after `->` within the
+/// declaration's header.
+fn axm_return_span(src: &str, decl_name: &str, return_name: &str, kind: &axiom_core::query::DeclKind) -> Option<Span> {
+    let keyword = match kind {
+        axiom_core::query::DeclKind::Query => "query ",
+        axiom_core::query::DeclKind::Transaction => "transaction ",
+    };
     let mut search = 0usize;
-    while let Some(rel) = src[search..].find(needle) {
+    while let Some(rel) = src[search..].find(keyword) {
         let decl = search + rel;
-        let after = &src[decl + needle.len()..];
+        let after = &src[decl + keyword.len()..];
         let name_len = after
             .find(|c: char| !is_axm_word_char(c))
             .unwrap_or(after.len());
         let name = &after[..name_len];
-        if name == query_name {
-            let header_start = decl + needle.len() + name_len;
+        if name == decl_name {
+            let header_start = decl + keyword.len() + name_len;
             let header = &src[header_start..];
             let header = &header[..header.find('{').unwrap_or(header.len())];
             let arrow = header.find("->")?;
@@ -477,7 +481,7 @@ fn axm_return_span(src: &str, query_name: &str, return_name: &str) -> Option<Spa
             }
             return None;
         }
-        search = decl + needle.len() + name_len;
+        search = decl + keyword.len() + name_len;
     }
     None
 }
@@ -586,6 +590,7 @@ mod tests {
             }],
             return_type: axiom_core::query::QueryReturnType::Single("User".into()),
             validations: Default::default(),
+            kind: axiom_core::query::DeclKind::Query,
         });
         let refs = query_return_type_refs(std::path::Path::new("models/a.axm"), src, &queries);
         assert_eq!(refs.len(), 1);

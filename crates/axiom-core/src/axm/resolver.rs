@@ -3,8 +3,8 @@
 //! The resolver:
 //!
 //! * parses every source file,
-//! * detects duplicate names (models/types share one namespace; queries have
-//!   their own),
+//! * detects duplicate names (models/types share one namespace; queries and
+//!   transactions share their own function namespace),
 //! * links `import { A as B } from "path"` statements to concrete files,
 //! * verifies every referenced type is in scope,
 //! * detects import cycles with a diagnostic chain.
@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::axm::ast::{
-    AnnotatedType, AxmFile, ModelDecl, QueryDecl, QueryReturn, TypeDecl, TypeRef,
+    AnnotatedType, AxmFile, ModelDecl, ParamDecl, QueryDecl, QueryReturn, TransactionDecl,
+    TypeDecl, TypeRef,
 };
 use crate::axm::parser::parse_axm_file;
 use crate::errors::AxiomError;
@@ -48,6 +49,13 @@ pub struct ResolvedQuery {
     pub query: QueryDecl,
 }
 
+/// A transaction together with the file it was declared in.
+#[derive(Debug, Clone)]
+pub struct ResolvedTransaction {
+    pub path: PathBuf,
+    pub transaction: TransactionDecl,
+}
+
 /// The linked set of all declarations across a group of `.axm` files.
 #[derive(Debug, Default)]
 pub struct ModelRegistry {
@@ -63,6 +71,10 @@ pub struct ModelRegistry {
     pub queries: Vec<ResolvedQuery>,
     /// Query name -> index into [`ModelRegistry::queries`].
     pub query_index: BTreeMap<String, usize>,
+    /// Transactions in file/declaration order.
+    pub transactions: Vec<ResolvedTransaction>,
+    /// Transaction name -> index into [`ModelRegistry::transactions`].
+    pub transaction_index: BTreeMap<String, usize>,
     /// For each canonical file path, the written (possibly aliased) name as it
     /// appears in scope -> the canonical declaration name. e.g.
     /// `import { User as DbUser }` records `DbUser -> User`.
@@ -71,7 +83,10 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn is_empty(&self) -> bool {
-        self.models.is_empty() && self.types.is_empty() && self.queries.is_empty()
+        self.models.is_empty()
+            && self.types.is_empty()
+            && self.queries.is_empty()
+            && self.transactions.is_empty()
     }
 
     pub fn model_by_name(&self, name: &str) -> Option<&ResolvedModel> {
@@ -86,6 +101,12 @@ impl ModelRegistry {
         self.query_index.get(name).map(|&i| &self.queries[i])
     }
 
+    pub fn transaction_by_name(&self, name: &str) -> Option<&ResolvedTransaction> {
+        self.transaction_index
+            .get(name)
+            .map(|&i| &self.transactions[i])
+    }
+
     /// The canonical declaration name for a written name in a file, resolving
     /// import aliases (`DbUser` -> `User`). Names that are not aliased resolve
     /// to themselves.
@@ -98,40 +119,77 @@ impl ModelRegistry {
     }
 }
 
-/// Compile every query declaration in a registry into the query catalog the
-/// code generators and `axiom check` consume.
+/// Compile every query and transaction declaration in a registry into the
+/// query catalog the code generators and `axiom check` consume.
 ///
-/// Query parameters carry no validation rules in the `.axm` grammar, so the
-/// catalog's per-parameter rules are always empty.
+/// Transactions share the [`QueryDefinition`] shape (same parameters, return
+/// contract, and SQL body); the catalog entry's `sql` holds the full
+/// multi-statement body. Statements never carry validation rules in the `.axm`
+/// grammar, so the catalog's per-parameter rules are always empty.
 pub fn query_catalog(registry: &ModelRegistry) -> QueryCatalog<'static> {
     let queries = registry
         .queries
         .iter()
         .map(|resolved| query_definition(&resolved.query))
+        .chain(
+            registry
+                .transactions
+                .iter()
+                .map(|resolved| transaction_definition(&resolved.transaction)),
+        )
         .collect();
     QueryCatalog { queries }
 }
 
 /// Compile a single query declaration into its shared [`QueryDefinition`].
 pub fn query_definition(query: &QueryDecl) -> QueryDefinition<'static> {
+    definition(
+        query.name.clone(),
+        &query.sql,
+        &query.params,
+        &query.return_type,
+        crate::query::DeclKind::Query,
+    )
+}
+
+/// Compile a single transaction declaration into its shared
+/// [`QueryDefinition`]. The body is stored verbatim, so a later
+/// statement-splitting pass is what actually isolates each statement.
+pub fn transaction_definition(transaction: &TransactionDecl) -> QueryDefinition<'static> {
+    definition(
+        transaction.name.clone(),
+        &transaction.sql,
+        &transaction.params,
+        &transaction.return_type,
+        crate::query::DeclKind::Transaction,
+    )
+}
+
+fn definition(
+    name: String,
+    sql: &str,
+    params: &[ParamDecl],
+    return_type: &QueryReturn,
+    kind: crate::query::DeclKind,
+) -> QueryDefinition<'static> {
     QueryDefinition {
-        name: Cow::Owned(query.name.clone()),
-        sql: query.sql.clone(),
-        params: query
-            .params
+        name: Cow::Owned(name),
+        sql: sql.to_string(),
+        params: params
             .iter()
             .map(|p| QueryParam {
                 name: Cow::Owned(p.name.clone()),
                 param_type: Cow::Owned(type_ref_name(&p.ty)),
             })
             .collect(),
-        return_type: match &query.return_type {
+        return_type: match return_type {
             QueryReturn::Exec => QueryReturnType::Exec,
             QueryReturn::Single(ty) => QueryReturnType::Single(Cow::Owned(type_ref_name(ty))),
             QueryReturn::Optional(ty) => QueryReturnType::Single(Cow::Owned(type_ref_name(ty))),
             QueryReturn::Many(ty) => QueryReturnType::Many(Cow::Owned(type_ref_name(ty))),
         },
         validations: BTreeMap::new(),
+        kind,
     }
 }
 
@@ -255,15 +313,22 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
 
     let mut query_names: BTreeMap<String, usize> = BTreeMap::new();
     for (file_idx, (path, file)) in files.iter().enumerate() {
-        for query in &file.queries {
-            if let Some(prev) = query_names.get(&query.name) {
+        // Queries and transactions are both emitted as functions, so they
+        // share one function namespace.
+        for name in file
+            .queries
+            .iter()
+            .map(|q| q.name.as_str())
+            .chain(file.transactions.iter().map(|t| t.name.as_str()))
+        {
+            if let Some(prev) = query_names.get(name) {
                 return Err(AxiomError::ModelDuplicate {
-                    name: query.name.clone(),
+                    name: name.to_string(),
                     first: files[*prev].0.display().to_string(),
                     second: path.display().to_string(),
                 });
             }
-            query_names.insert(query.name.clone(), file_idx);
+            query_names.insert(name.to_string(), file_idx);
         }
     }
 
@@ -304,6 +369,21 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             // a table, model, or type alias is checked against the linked
             // catalog in the query-check phase.
         }
+        for transaction in &file.transactions {
+            for param in &transaction.params {
+                check_type_refs(
+                    &param.ty,
+                    scope,
+                    &format!(
+                        "parameter `{}` of transaction `{}`",
+                        param.name, transaction.name
+                    ),
+                    path,
+                )?;
+            }
+            // Transaction return types are checked in the query-check phase,
+            // exactly like query return types.
+        }
     }
 
     let mut registry = ModelRegistry::default();
@@ -330,6 +410,16 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             registry.queries.push(ResolvedQuery {
                 path: path.clone(),
                 query: query.clone(),
+            });
+        }
+        for transaction in &file.transactions {
+            let pos = registry.transactions.len();
+            registry
+                .transaction_index
+                .insert(transaction.name.clone(), pos);
+            registry.transactions.push(ResolvedTransaction {
+                path: path.clone(),
+                transaction: transaction.clone(),
             });
         }
     }
@@ -622,6 +712,71 @@ mod tests {
         .expect_err("duplicate");
         assert!(
             matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "GetUser"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolves_transactions_into_registry() {
+        let registry = resolve_models(&[file(
+            "models/a.axm",
+            "query GetUser($id: UUID) -> User? {\n  SELECT * FROM users WHERE id = $id;\n}\ntransaction CreatePost($userId: UUID) {\n  INSERT INTO posts (user_id) VALUES ($userId);\n  UPDATE users SET post_count = post_count + 1 WHERE id = $userId;\n}",
+        )])
+        .expect("resolve");
+        assert_eq!(registry.queries.len(), 1);
+        assert_eq!(registry.transactions.len(), 1);
+        let txn = registry.transaction_by_name("CreatePost").expect("txn found");
+        assert_eq!(txn.transaction.params.len(), 1);
+        assert_eq!(txn.transaction.sql.matches(';').count(), 2);
+        assert!(registry.transaction_by_name("Nope").is_none());
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn queries_and_transactions_share_function_namespace() {
+        let err = resolve_models(&[file(
+            "models/a.axm",
+            "query MoveFunds($id: UUID) -> User? {\n  SELECT * FROM accounts WHERE id = $id;\n}\ntransaction MoveFunds($id: UUID) {\n  INSERT INTO ledger (id) VALUES ($id);\n  UPDATE accounts SET balance = 0 WHERE id = $id;\n}",
+        )])
+        .expect_err("duplicate");
+        assert!(
+            matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "MoveFunds"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn detects_duplicate_transaction_names() {
+        let err = resolve_models(&[
+            file(
+                "models/a.axm",
+                "transaction Create($id: UUID) {\n  INSERT INTO a (id) VALUES ($id);\n  INSERT INTO b (id) VALUES ($id);\n}",
+            ),
+            file(
+                "models/b.axm",
+                "transaction Create($id: UUID) {\n  INSERT INTO c (id) VALUES ($id);\n  INSERT INTO d (id) VALUES ($id);\n}",
+            ),
+        ])
+        .expect_err("duplicate");
+        assert!(
+            matches!(&err, AxiomError::ModelDuplicate { name, .. } if name == "Create"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn transaction_params_are_type_checked() {
+        let err = resolve_models(&[
+            file("models/a.axm", "model User { id: UUID }"),
+            file(
+                "models/b.axm",
+                "transaction Create($id: Nope) {\n  INSERT INTO a (id) VALUES ($id);\n  INSERT INTO b (id) VALUES ($id);\n}",
+            ),
+        ])
+        .expect_err("unknown type");
+        assert!(
+            matches!(&err, AxiomError::ModelResolutionError { message, .. }
+                if message.contains("unknown type `Nope`") && message.contains("transaction")),
             "{err}"
         );
     }

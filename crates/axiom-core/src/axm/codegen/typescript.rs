@@ -17,7 +17,7 @@ use crate::axm::ast::{AnnotatedType, Literal, QueryReturn, Rule, SafeParseMode, 
 use crate::axm::codegen::{
     ModelEmission, NamedKind, Target, Uses, ValidationOptions, canonical_name, collect_uses,
     effective_fields, effective_safe_parse_mode, emit_plan, inline_annotated, model_name,
-    named_kind, query_emitted,
+    named_kind, query_emitted, transaction_emitted,
 };
 use crate::axm::resolver::ModelRegistry;
 use crate::catalog::TableCatalog;
@@ -72,8 +72,13 @@ pub fn generate_typescript_models_with_options(
         .iter()
         .filter(|resolved| query_emitted(&resolved.query, Target::TypeScript))
         .collect::<Vec<_>>();
+    let emitted_transactions = registry
+        .transactions
+        .iter()
+        .filter(|resolved| transaction_emitted(&resolved.transaction, Target::TypeScript))
+        .collect::<Vec<_>>();
 
-    if !emitted_queries.is_empty() {
+    if !emitted_queries.is_empty() || !emitted_transactions.is_empty() {
         out.push_str("import type { Sql } from 'postgres';\n\n");
     }
 
@@ -113,7 +118,10 @@ pub fn generate_typescript_models_with_options(
     }
 
     for resolved in emitted_queries {
-        emit_query(&mut out, registry, &resolved.path, &resolved.query);
+        emit_query(&mut out, registry, catalog, &resolved.path, &resolved.query);
+    }
+    for resolved in emitted_transactions {
+        emit_transaction(&mut out, registry, catalog, &resolved.path, &resolved.transaction);
     }
 
     out
@@ -593,10 +601,15 @@ fn emit_field(
     field: &crate::axm::codegen::EffectiveField,
 ) {
     let key = util::escape_ts(&field.emitted_name);
+    let record_key = field
+        .db_column
+        .as_ref()
+        .map(|c| util::escape_ts(c))
+        .unwrap_or_else(|| key.clone());
     let _ = writeln!(out, "  {{");
     let _ = writeln!(out, "    const key = '{key}';");
     let _ = writeln!(out, "    const fieldPath: Seg[] = [...path, ['f', key]];");
-    let _ = writeln!(out, "    let raw = record[key];");
+    let _ = writeln!(out, "    let raw = record['{record_key}'];");
 
     match &field.default {
         Some(literal) => {
@@ -796,6 +809,10 @@ fn ts_literal(literal: &Literal) -> String {
 /// interpolations of `params.`. Markers are only substituted outside string
 /// literals, quoted identifiers, and comments (see
 /// [`scan_dotted_placeholders`]); literals keep their `$`.
+///
+/// Nullable parameters are wrapped in a PostgreSQL type cast
+/// (e.g. `${params.cursorTs}::timestamp`) so that when the JS driver sends
+/// `null`, PostgreSQL can still determine the parameter type.
 fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
     let hits = crate::query::scan_dotted_placeholders(sql);
     let mut out = String::with_capacity(sql.len());
@@ -827,17 +844,24 @@ fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
         } else if token.bytes().all(|b| b.is_ascii_digit()) {
             let n: usize = token.parse().unwrap_or(0);
             if n >= 1 && n <= params.len() {
-                let _ = write!(
-                    out,
-                    "${{params.{}}}",
-                    util::ts_field_name(&params[n - 1].name)
-                );
+                let param = &params[n - 1];
+                let ts_name = util::ts_field_name(&param.name);
+                if let Some(pg_type) = pg_type_cast(&param.ty) {
+                    let _ = write!(out, "(${{params.{ts_name}}}::{pg_type})");
+                } else {
+                    let _ = write!(out, "${{params.{ts_name}}}");
+                }
                 continue;
             }
         } else if fields.len() == 1
             && let Some(param) = params.iter().find(|p| p.name == token)
         {
-            let _ = write!(out, "${{params.{}}}", util::ts_field_name(&param.name));
+            let ts_name = util::ts_field_name(&param.name);
+            if let Some(pg_type) = pg_type_cast(&param.ty) {
+                let _ = write!(out, "(${{params.{ts_name}}}::{pg_type})");
+            } else {
+                let _ = write!(out, "${{params.{ts_name}}}");
+            }
             continue;
         }
 
@@ -847,18 +871,38 @@ fn bind_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> String {
     out
 }
 
-fn emit_query(
+/// Map a nullable `TypeRef` to a PostgreSQL type-cast string. Only types
+/// that PostgreSQL cannot infer from context receive an explicit cast.
+fn pg_type_cast(ty: &TypeRef) -> Option<&'static str> {
+    match ty {
+        TypeRef::Nullable(inner) => match inner.as_ref() {
+            TypeRef::String => Some("text"),
+            TypeRef::Int => Some("integer"),
+            TypeRef::BigInt => Some("bigint"),
+            TypeRef::Float => Some("real"),
+            TypeRef::Boolean => Some("boolean"),
+            TypeRef::Uuid => Some("uuid"),
+            TypeRef::Date => Some("date"),
+            TypeRef::DateTime => Some("timestamp"),
+            TypeRef::Bytes => Some("bytea"),
+            TypeRef::Json => Some("json"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn emit_params_types(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
-    query: &crate::axm::ast::QueryDecl,
+    pascal: &str,
+    params: &[crate::axm::ast::ParamDecl],
 ) {
-    let pascal = util::pascal_case(&query.name);
     let params_type = format!("{pascal}Params");
-    let fn_name = util::ts_field_name(&query.name);
 
     let _ = writeln!(out, "export interface {params_type} {{");
-    for param in &query.params {
+    for param in params {
         let field = util::ts_field_name(&param.name);
         let ty = ts_named_type(registry, path, &param.ty);
         let _ = writeln!(out, "  {field}: {ty};");
@@ -870,13 +914,150 @@ fn emit_query(
         "export function validate{pascal}Params(params: {params_type}): ValidationError[] {{"
     );
     out.push_str("  const errors: ValidationError[] = [];\n");
-    for param in &query.params {
+    for param in params {
         emit_param_validation(out, registry, path, param);
     }
     out.push_str("  return errors;\n");
     out.push_str("}\n\n");
+}
 
-    let bound_sql = bind_sql(&query.sql, &query.params);
+/// Whether a SQL string is a SELECT query (possibly wrapped in a CTE).
+fn is_select_query(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    trimmed.starts_with("SELECT")
+        || trimmed.starts_with("WITH")
+        || trimmed.starts_with("(SELECT")
+}
+
+/// Whether a `TypeRef` resolves to a row-shaped (non-scalar) type that
+/// carries model fields and thus needs column aliasing in TS.
+fn ts_is_model_return(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Nullable(inner) | TypeRef::Array(inner) => ts_is_model_return(registry, path, inner),
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Pure(base) => ts_is_model_return(registry, path, &base),
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
+/// Wrap a query's SQL so that its columns are aliased to camelCase, matching
+/// the field names of the TS interface. This is needed because the `postgres`
+/// JS driver returns rows with snake_case column names from the database.
+fn wrap_sql_model(
+    sql: &str,
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    path: &Path,
+    ty_ref: &TypeRef,
+) -> String {
+    let trimmed = sql.trim_end().trim_end_matches(';').trim_end();
+    // Only wrap SELECT queries — UPDATE/DELETE/INSERT with RETURNING
+    // don't expose all model columns, so aliasing would break.
+    if !is_select_query(trimmed) {
+        return trimmed.to_string();
+    }
+    let type_name = ts_unwrap_named_name(registry, path, ty_ref);
+    if let Some(name) = type_name {
+        if let Some(resolved) = registry.model_by_name(&name) {
+            let fields = effective_fields(registry, catalog, path, &resolved.model);
+            return wrap_with_columns(&trimmed, &fields);
+        }
+        if let Some(table) = crate::axm::codegen::resolve_relation(catalog, &name) {
+            let fields: Vec<crate::axm::codegen::EffectiveField> = table
+                .columns
+                .iter()
+                .map(|col| {
+                    let db_name = col.name.to_string();
+                    crate::axm::codegen::EffectiveField {
+                        emitted_name: util::ts_field_name(&db_name),
+                        db_column: Some(db_name),
+                        annotated: AnnotatedType::new(crate::axm::codegen::sql_type_to_type_ref(
+                            &col.data_type,
+                        )),
+                        optional: col.nullable,
+                        default: None,
+                    }
+                })
+                .collect();
+            return wrap_with_columns(&trimmed, &fields);
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Build the `WITH axm_q AS (...) SELECT col AS "field", ... FROM axm_q` wrapper.
+/// Only DB-backed columns (where `db_column` is set) are aliased from their
+/// snake_case name to the emitted field name.
+fn wrap_with_columns(sql: &str, fields: &[crate::axm::codegen::EffectiveField]) -> String {
+    let cols: Vec<String> = fields
+        .iter()
+        .map(|f| {
+            match &f.db_column {
+                Some(db_col) => {
+                    if db_col == &f.emitted_name {
+                        format!("{db_col}")
+                    } else {
+                        format!("{db_col} AS \"{}\"", f.emitted_name)
+                    }
+                }
+                None => f.emitted_name.clone(),
+            }
+        })
+        .collect();
+    format!(
+        "WITH axm_q AS ({sql}) SELECT {} FROM axm_q",
+        cols.join(", ")
+    )
+}
+
+/// Resolve a TypeRef to a named type string (handling Nullable/Array), checking
+/// if it's a model or table.
+fn ts_unwrap_named_name(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+) -> Option<String> {
+    match ty {
+        TypeRef::Nullable(inner) | TypeRef::Array(inner) => {
+            ts_unwrap_named_name(registry, path, inner)
+        }
+        TypeRef::Named(name) => {
+            let effective = registry.effective_name(path, name);
+            if registry.model_by_name(effective).is_some() {
+                Some(effective.to_string())
+            } else {
+                Some(effective.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn emit_query(
+    out: &mut String,
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    path: &Path,
+    query: &crate::axm::ast::QueryDecl,
+) {
+    let pascal = util::pascal_case(&query.name);
+    let params_type = format!("{pascal}Params");
+    let fn_name = util::ts_field_name(&query.name);
+
+    emit_params_types(out, registry, path, &pascal, &query.params);
+
+    let raw_sql = if let Some(ty_ref) = query.return_type.ty_ref() {
+        if ts_is_model_return(registry, path, ty_ref) {
+            wrap_sql_model(&query.sql, registry, catalog, path, ty_ref)
+        } else {
+            query.sql.to_string()
+        }
+    } else {
+        query.sql.to_string()
+    };
+    let bound_sql = bind_sql(&raw_sql, &query.params);
     let (promise_ty, body) = match &query.return_type {
         QueryReturn::Exec => (
             "Promise<void>".to_string(),
@@ -918,6 +1099,84 @@ fn emit_query(
         "  if (errors.length > 0) throw new Error(`Validation failed: ${JSON.stringify(errors)}`);\n",
     );
     let _ = writeln!(out, "  {body}");
+    out.push_str("}\n\n");
+}
+
+fn emit_transaction(
+    out: &mut String,
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    path: &Path,
+    transaction: &crate::axm::ast::TransactionDecl,
+) {
+    let pascal = util::pascal_case(&transaction.name);
+    let params_type = format!("{pascal}Params");
+    let fn_name = util::ts_field_name(&transaction.name);
+
+    emit_params_types(out, registry, path, &pascal, &transaction.params);
+
+    let statements = crate::query::QueryDefinition::split_statements(&transaction.sql);
+
+    let promise_ty = match &transaction.return_type {
+        QueryReturn::Exec => "Promise<void>".to_string(),
+        QueryReturn::Single(ty_ref) => format!("Promise<{}>", ts_named_type(registry, path, ty_ref)),
+        QueryReturn::Optional(ty_ref) => {
+            format!("Promise<{} | null>", ts_named_type(registry, path, ty_ref))
+        }
+        QueryReturn::Many(ty_ref) => {
+            format!("Promise<{}[]>", ts_named_type(registry, path, ty_ref))
+        }
+    };
+
+    let _ = writeln!(out, "export async function {fn_name}(");
+    let _ = writeln!(out, "  sql: Sql,");
+    let _ = writeln!(out, "  params: {params_type}");
+    let _ = writeln!(out, "): {promise_ty} {{");
+    let _ = writeln!(out, "  const errors = validate{pascal}Params(params);");
+    out.push_str(
+        "  if (errors.length > 0) throw new Error(`Validation failed: ${JSON.stringify(errors)}`);\n",
+    );
+    out.push_str("  return await sql.begin(async (tx) => {\n");
+
+    for (index, statement) in statements.iter().enumerate() {
+        let is_last = index == statements.len().saturating_sub(1);
+        let should_wrap = is_last && transaction.return_type.ty_ref().map_or(false, |ty| ts_is_model_return(registry, path, ty));
+        let processed = if should_wrap {
+            wrap_sql_model(statement, registry, catalog, path, transaction.return_type.ty_ref().unwrap())
+        } else {
+            statement.to_string()
+        };
+        let bound_sql = bind_sql(&processed, &transaction.params);
+        match (&transaction.return_type, is_last) {
+            (QueryReturn::Exec, _) => {
+                let _ = writeln!(out, "    await tx`\n{bound_sql}\n`;");
+            }
+            (QueryReturn::Many(ty_ref), true) => {
+                let ty = ts_named_type(registry, path, ty_ref);
+                let _ = writeln!(out, "    return await tx<{ty}[]>`\n{bound_sql}\n`;");
+            }
+            (QueryReturn::Single(ty_ref), true) => {
+                let ty = ts_named_type(registry, path, ty_ref);
+                let _ = writeln!(out, "    const rows = await tx<{ty}[]>`\n{bound_sql}\n`;");
+                let _ = writeln!(out, "    const row = rows[0];");
+                let _ = writeln!(
+                    out,
+                    "    if (row === undefined) throw new Error('{pascal} returned no rows');"
+                );
+                out.push_str("    return row;\n");
+            }
+            (QueryReturn::Optional(ty_ref), true) => {
+                let ty = ts_named_type(registry, path, ty_ref);
+                let _ = writeln!(out, "    const rows = await tx<{ty}[]>`\n{bound_sql}\n`;");
+                out.push_str("    return rows[0] ?? null;\n");
+            }
+            (_, false) => {
+                let _ = writeln!(out, "    await tx`\n{bound_sql}\n`;");
+            }
+        }
+    }
+
+    out.push_str("  });\n");
     out.push_str("}\n\n");
 }
 
@@ -1300,6 +1559,34 @@ query GetActiveUsers() -> User[] {
     }
 
     #[test]
+    fn nullable_params_get_explicit_type_cast_in_ts() {
+        let src = r#"
+query Search($query: String, $limit: Int, $cursor: Float?) -> Post[] {
+  SELECT * FROM posts WHERE $query = 'test' LIMIT $limit OFFSET $cursor;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("${params.cursor}::real"), "{out}");
+        assert!(out.contains("${params.query}"), "{out}");
+        assert!(!out.contains("${params.query}::"), "{out}");
+        assert!(out.contains("${params.limit}"), "{out}");
+        assert!(!out.contains("${params.limit}::"), "{out}");
+    }
+
+    #[test]
+    fn update_returning_query_is_not_wrapped_in_cte() {
+        let src = r#"
+model User extends select<users> { name: String }
+query UpdateName($id: UUID, $name: String) -> users {
+  UPDATE users SET name = $name WHERE id = $id RETURNING id;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(!out.contains("WITH axm_q AS (UPDATE"), "{out}");
+        assert!(out.contains("UPDATE users SET name = ${params.name}"), "{out}");
+    }
+
+    #[test]
     fn target_override_filters_queries() {
         let src = r#"
 @target("typescript")
@@ -1322,6 +1609,42 @@ query Open($id: UUID) -> Int {
     }
 
     #[test]
+    fn model_query_wraps_columns_in_camelcase_aliases() {
+        let catalog = TableCatalog {
+            tables: vec![TableSchema {
+                name: "users".into(),
+                columns: vec![
+                    ColumnSchema {
+                        name: "id".into(),
+                        data_type: "UUID".into(),
+                        nullable: false,
+                        primary_key: true,
+                    },
+                    ColumnSchema {
+                        name: "display_name".into(),
+                        data_type: "VARCHAR(255)".into(),
+                        nullable: true,
+                        primary_key: false,
+                    },
+                ],
+            }],
+        };
+        let src = r#"
+model User extends select<users> {
+  displayName: String
+}
+query GetUser($id: UUID) -> User? {
+  SELECT * FROM users WHERE id = $id;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        assert!(
+            out.contains("WITH axm_q AS (SELECT * FROM users WHERE id = ${params.id}) SELECT id, display_name AS \"displayName\" FROM axm_q"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn target_excluded_queries_do_not_pull_in_sql_import_or_helpers() {
         let src = r#"
 @target("rust")
@@ -1332,6 +1655,77 @@ query OnlyRust($id: UUID) -> Int {
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(!out.contains("Sql"), "no db import for a rust-only query");
         assert!(!out.contains("export async function"));
+    }
+
+    #[test]
+    fn transaction_emits_begin_commit_and_per_statement_binds() {
+        let src = r#"
+model User { id: UUID }
+transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
+  UPDATE accounts SET balance = balance - $amount WHERE id = $from;
+  UPDATE accounts SET balance = balance + $amount WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface TransferParams {"));
+        assert!(out.contains("export async function transfer(\n  sql: Sql,\n  params: TransferParams"));
+        assert!(out.contains("): Promise<User> {"));
+        assert!(out.contains("return await sql.begin(async (tx) => {"));
+        assert!(out.contains("await tx`"));
+        assert!(out.contains("${params.from}"));
+        assert!(out.contains("${params.to}"));
+        assert!(out.contains("${params.amount}"));
+        assert!(out.contains("const rows = await tx<User[]>`"));
+        assert!(out.contains("Transfer returned no rows"));
+    }
+
+    #[test]
+    fn transaction_exec_returns_void_from_begin() {
+        let src = r#"
+transaction Cleanup($olderThan: String) {
+  DELETE FROM events WHERE created_at < $olderThan;
+  DELETE FROM audit WHERE created_at < $olderThan;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("): Promise<void> {"));
+        assert!(out.contains("return await sql.begin(async (tx) => {"));
+        assert!(!out.contains("tx<User"), "exec transaction must not query rows");
+    }
+
+    #[test]
+    fn transaction_returns_array_from_last_statement() {
+        let src = r#"
+model User { id: UUID }
+transaction Batch($emails: String[]) -> User[] {
+  DELETE FROM pending WHERE email = ANY($emails);
+  SELECT * FROM users WHERE email = ANY($emails);
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("): Promise<User[]> {"));
+        assert!(out.contains("return await tx<User[]>`"));
+        assert!(out.contains("${params.emails}"));
+    }
+
+    #[test]
+    fn transaction_emitted_respects_target_override_in_ts() {
+        let src = r#"
+@target("rust")
+transaction RsOnly($a: Int) -> Int {
+  UPDATE t SET x = 1;
+  SELECT 1;
+}
+@target("typescript")
+transaction TsOnly($a: Int) -> Int {
+  UPDATE t SET x = 1;
+  SELECT 1;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export async function tsOnly("));
+        assert!(!out.contains("rsOnly"));
     }
 
     #[test]

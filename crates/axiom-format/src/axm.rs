@@ -6,7 +6,7 @@
 
 use axiom_core::axm::ast::{
     AnnotatedType, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
-    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TypeDecl, TypeRef,
+    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TransactionDecl, TypeDecl, TypeRef,
 };
 use axiom_core::axm::parser::parse_axm_file;
 
@@ -26,7 +26,8 @@ pub fn format_axm(src: &str) -> Result<String, String> {
         .map(|i| vec![format_import(i)])
         .chain(file.types.iter().map(|t| vec![format_type_decl(t)]))
         .chain(file.models.iter().map(format_model))
-        .chain(file.queries.iter().map(format_query))
+         .chain(file.queries.iter().map(format_query))
+         .chain(file.transactions.iter().map(format_transaction))
     {
         if !first_item {
             lines.push_blank();
@@ -153,6 +154,31 @@ fn dedent_lines(body: &str) -> Vec<String> {
             l.chars().skip(leading.min(min_indent)).collect()
         })
         .collect()
+}
+
+/// Render a full transaction declaration. Mirrors [`format_query`] but emits
+/// the `transaction` keyword; the SQL body, params, return type, and `@`
+/// decorators are formatted identically.
+fn format_transaction(transaction: &TransactionDecl) -> Vec<String> {
+    let params = transaction
+        .params
+        .iter()
+        .map(format_param)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &transaction.return_type {
+        QueryReturn::Exec => String::new(),
+        QueryReturn::Single(ty) => format!(" -> {}", format_type(ty)),
+        QueryReturn::Optional(ty) => format!(" -> {}?", format_type(ty)),
+        QueryReturn::Many(ty) => format!(" -> {}[]", format_type(ty)),
+    };
+    let mut out: Vec<String> = transaction.overrides.iter().map(format_override).collect();
+    out.push(format!("transaction {}({params}){ret} {{", transaction.name));
+    for body_line in dedent_lines(&transaction.sql) {
+        out.push(format!("{}{body_line}", indent(1)));
+    }
+    out.push("}".to_string());
+    out
 }
 
 fn format_param(param: &ParamDecl) -> String {
@@ -499,6 +525,63 @@ query CreateUser($input: NewUser) {
         let out = fmt(src);
         assert!(out.contains(".nonempty(\"required\")"), "{out}");
         assert!(out.contains(".min_length(3, \"too short\")"), "{out}");
+    }
+
+     #[test]
+    fn formats_transaction_declarations() {
+        let src = r#"transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
+  UPDATE accounts SET balance = balance - $amount WHERE id = $from;
+  UPDATE accounts SET balance = balance + $amount WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+    }
+
+    #[test]
+    fn formats_transaction_decorators_and_return_shapes() {
+        let src = r#"@target("typescript")
+transaction CreatePost($userId: UUID) -> Post {
+  INSERT INTO posts (user_id) VALUES ($userId);
+  SELECT * FROM posts WHERE user_id = $userId;
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("@target(\"typescript\")\ntransaction CreatePost("), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+
+        let src = r#"transaction T($id: UUID) {
+  UPDATE a SET x = 1 WHERE id = $id;
+  UPDATE b SET y = 2 WHERE id = $id;
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("transaction T($id: UUID) {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+
+        let src = r#"transaction Many($id: UUID) -> Post[] {
+  INSERT INTO posts (user_id) VALUES ($id);
+  SELECT * FROM posts WHERE user_id = $id;
+}"#;
+        let out = fmt(src);
+        assert!(out.contains("-> Post[]"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+    }
+
+    #[test]
+    fn formats_transaction_multiline_body_without_drift() {
+        let src = r#"transaction Transfer($from: UUID, $to: UUID) -> User {
+  UPDATE accounts
+    SET balance = balance - 1
+    WHERE id = $from;
+  UPDATE accounts
+    SET balance = balance + 1
+    WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}"#;
+        let once = fmt(src);
+        let twice = fmt(&once);
+        assert_eq!(once, twice, "formatting must be idempotent");
+        assert!(once.contains("  UPDATE accounts\n    SET balance = balance - 1\n    WHERE id = $from;"), "{once}");
     }
 
     #[test]

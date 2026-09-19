@@ -300,6 +300,7 @@ fn bind_sql(query: &QueryDefinition) -> String {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnSchema, TableSchema};
+    use crate::query::DeclKind;
     use std::borrow::Cow;
 
     fn no_queries() -> QueryCatalog<'static> {
@@ -382,6 +383,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            kind: DeclKind::Query,
         };
         let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("/^[a-z0-9-]+$/.test(params.slug)"));
@@ -412,6 +414,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            kind: DeclKind::Query,
         };
         QueryCatalog { queries: vec![q] }
     }
@@ -459,6 +462,7 @@ mod tests {
             ],
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("WHERE email = ${params.email} AND id < ${params.maxId}"));
@@ -482,6 +486,7 @@ mod tests {
             ],
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(
@@ -502,6 +507,7 @@ mod tests {
             }],
             return_type: QueryReturnType::Single(Cow::Borrowed("users")),
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_typescript(
             &TableCatalog { tables: vec![t] },
@@ -524,6 +530,7 @@ mod tests {
             }],
             return_type: QueryReturnType::Single(Cow::Borrowed("Users")),
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_typescript(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("): Promise<Users | null> {"));

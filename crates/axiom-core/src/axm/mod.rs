@@ -13,14 +13,17 @@ pub mod resolver;
 
 pub use ast::{
     AxmFile, FieldDecl, ModelDecl, ModelOverride, QueryDecl, Rule, SafeParseMode, Target,
-    Transform, TypeRef,
+    TransactionDecl, Transform, TypeRef,
 };
 pub use codegen::{
     generate_rust_models, generate_rust_models_with_options, generate_typescript_models,
     generate_typescript_models_with_options, ValidationOptions,
 };
 pub use parser::parse_axm_file;
-pub use resolver::{ModelRegistry, query_catalog, query_definition, resolve_models, type_ref_name};
+pub use resolver::{
+    ModelRegistry, query_catalog, query_definition, resolve_models, transaction_definition,
+    type_ref_name,
+};
 
 /// Whether `name` matches Axiom's bare-identifier grammar: an ASCII letter or
 /// `_`, followed by zero or more ASCII alphanumerics or `_`.
@@ -37,13 +40,19 @@ pub fn is_identifier(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Compile the query declarations of a single parsed file into a catalog.
+/// Compile the query and transaction declarations of a single parsed file into
+/// a catalog.
 pub fn queries_in_file(file: &AxmFile) -> crate::query::QueryCatalog<'static> {
     crate::query::QueryCatalog {
         queries: file
             .queries
             .iter()
             .map(crate::axm::query_definition)
+            .chain(
+                file.transactions
+                    .iter()
+                    .map(crate::axm::transaction_definition),
+            )
             .collect(),
     }
 }

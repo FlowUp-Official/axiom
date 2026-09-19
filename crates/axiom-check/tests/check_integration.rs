@@ -200,15 +200,15 @@ fn projected_column_must_be_a_return_field() {
 }
 
 #[test]
-fn multi_statement_contract_checks_the_last_statement() {
+fn multi_statement_transaction_contract_checks_the_last_statement() {
     let schema = vec![file(
         "schema.sql",
         "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
     )];
-    // Last statement is a row-returning SELECT; no contract error.
+    // Transaction with a row-returning last statement: no contract error.
     let models = vec![file(
         "models/queries.axm",
-        "model User { id: Int, email: String }\n\nquery list_users() -> User {\n  DELETE FROM users;\n  SELECT id, email FROM users\n}",
+        "model User { id: Int, email: String }\n\ntransaction list_users() -> User {\n  DELETE FROM users;\n  SELECT id, email FROM users\n}",
     )];
     let (catalog, _) = check_schemas(&schema);
     let registry = registry_from(&models);
@@ -219,11 +219,57 @@ fn multi_statement_contract_checks_the_last_statement() {
     // Exec contract with a trailing SELECT: flagged as wrong contract.
     let models = vec![file(
         "models/queries.axm",
-        "query reset_users() {\n  DELETE FROM users;\n  SELECT id FROM users\n}",
+        "transaction reset_users() {\n  DELETE FROM users;\n  SELECT id FROM users\n}",
     )];
     let registry = registry_from(&models);
     let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
     assert!(codes(&diags).contains(&"check.query-contract"), "{diags:?}");
+}
+
+#[test]
+fn multi_statement_query_is_rejected_with_transaction_hint() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+    )];
+    let models = vec![file(
+        "models/queries.axm",
+        "model User { id: Int, email: String }\n\nquery list_users() -> User {\n  DELETE FROM users;\n  SELECT id, email FROM users\n}",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&models);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    assert!(
+        codes(&diags).contains(&"check.query-multi-statement"),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.help.as_deref().is_some_and(|h| h.contains("transaction"))),
+        "expected a suggestion to use a transaction"
+    );
+}
+
+#[test]
+fn single_statement_transaction_is_rejected() {
+    let schema = vec![file(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+    )];
+    let models = vec![file(
+        "models/queries.axm",
+        "model User { id: Int, email: String }\n\ntransaction single() -> User {\n  SELECT id, email FROM users\n}",
+    )];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&models);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    assert!(
+        codes(&diags).contains(&"check.transaction-statement-count"),
+        "{diags:?}"
+    );
 }
 
 #[test]

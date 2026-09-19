@@ -8,16 +8,18 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 use axiom_core::axm::ast::{
-    AnnotatedType, QueryDecl, QueryReturn, Rule, Target, Transform, TypeRef,
+    AnnotatedType, ParamDecl, QueryReturn, Rule, Target, Transform, TypeRef,
 };
-use axiom_core::axm::codegen::{emitted_model_names, query_emitted_for, resolve_relation};
+use axiom_core::axm::codegen::{emitted_model_names, query_emitted_for, transaction_emitted_for, resolve_relation};
 use axiom_core::axm::parser::parse_axm_file;
 use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
 use axiom_core::cache::{ToolCache, compute_content_hash};
 use axiom_core::catalog::{TableCatalog, parse_sql_catalog};
 use axiom_core::config::{AxiomConfig, resolve_glob_paths};
 use axiom_core::errors::AxiomError;
-use axiom_core::query::{Placeholder, QueryCatalog, scan_dotted_placeholders, scan_placeholders};
+use axiom_core::query::{
+    Placeholder, QueryCatalog, QueryDefinition, scan_dotted_placeholders, scan_placeholders,
+};
 use axiom_diagnostics::{Diagnostic, Span};
 
 use crate::diagnostics::{find_span, line_of_offset, parse_error};
@@ -57,11 +59,11 @@ pub fn check_schemas<'a>(files: &'a [(PathBuf, String)]) -> (TableCatalog<'a>, V
     (catalog, diags)
 }
 
-/// Compile every `query` declaration in the linked registry into the shared
-/// query catalog and verify each one against the schema catalog: referenced
-/// tables must exist, column references must resolve, the declared return
-/// type must match a table, model, or type alias, and the SQL body must honor
-/// the declared return contract (rows vs. execution).
+/// Compile every `query` and `transaction` declaration in the linked registry
+/// into the shared query catalog and verify each one against the schema
+/// catalog: referenced tables must exist, column references must resolve, the
+/// declared return type must match a table, model, or type alias, and the SQL
+/// body must honor the declared return contract (rows vs. execution).
 ///
 /// Queries are parsed once by [`resolve_models`]; this phase only validates
 /// and compiles, so no per-file re-parsing happens. Per-file results are
@@ -81,15 +83,33 @@ pub fn check_queries(
         .map(|(p, s)| (p.clone(), s.clone()))
         .collect();
 
-    let mut per_file: BTreeMap<PathBuf, Vec<&QueryDecl>> = BTreeMap::new();
+    let mut per_file: BTreeMap<PathBuf, Vec<DeclaredStmt>> = BTreeMap::new();
     for resolved in &registry.queries {
         per_file
             .entry(resolved.path.clone())
             .or_default()
-            .push(&resolved.query);
+            .push(DeclaredStmt {
+                kind: DeclKind::Query,
+                name: &resolved.query.name,
+                params: &resolved.query.params,
+                return_type: &resolved.query.return_type,
+                sql: &resolved.query.sql,
+            });
+    }
+    for resolved in &registry.transactions {
+        per_file
+            .entry(resolved.path.clone())
+            .or_default()
+            .push(DeclaredStmt {
+                kind: DeclKind::Transaction,
+                name: &resolved.transaction.name,
+                params: &resolved.transaction.params,
+                return_type: &resolved.transaction.return_type,
+                sql: &resolved.transaction.sql,
+            });
     }
 
-    for (path, queries) in &per_file {
+    for (path, statements) in &per_file {
         let src = src_by_path.get(path).map(String::as_str).unwrap_or("");
         let file_hash = compute_content_hash(src.as_bytes());
         let key = format!("check:query:{}:{}", hex(schema_hash), hex(&file_hash));
@@ -100,9 +120,9 @@ pub fn check_queries(
         {
             cached
         } else {
-            let computed: Vec<Diagnostic> = queries
+            let computed: Vec<Diagnostic> = statements
                 .iter()
-                .flat_map(|q| check_declared_query(path, src, q, catalog, registry))
+                .flat_map(|stmt| check_declared_statement(path, src, stmt, catalog, registry))
                 .collect();
             if let Some(cache) = cache.as_mut()
                 && let Ok(payload) = serde_json::to_vec(&computed)
@@ -330,6 +350,42 @@ pub fn check_target_references(
                 }
             }
         }
+
+        for resolved in &registry.transactions {
+            if !transaction_emitted_for(&resolved.transaction, target) {
+                continue;
+            }
+            let src = src_by_path
+                .get(&resolved.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let owner = format!("transaction `{}`", resolved.transaction.name);
+            let txn_start = decl_keyword_start(src, "transaction", &resolved.transaction.name);
+            for param in &resolved.transaction.params {
+                let mut refs = Vec::new();
+                collect_excluded_refs(registry, &resolved.path, &param.ty, &emitted, &mut refs);
+                for reference in refs {
+                    let span = txn_start
+                        .and_then(|from| param_type_span(src, from, &param.name, &reference.written));
+                    push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+                }
+            }
+            let return_ty = match &resolved.transaction.return_type {
+                QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                    Some(ty)
+                }
+                QueryReturn::Exec => None,
+            };
+            if let Some(ty) = return_ty {
+                let mut refs = Vec::new();
+                collect_excluded_refs(registry, &resolved.path, ty, &emitted, &mut refs);
+                for reference in refs {
+                    let span = txn_start
+                        .and_then(|from| word_span_from(src, &reference.written, from));
+                    push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
+                }
+            }
+        }
     }
 
     diags
@@ -469,49 +525,120 @@ fn field_decl_span(source: &str, name: &str, occurrence: usize) -> Option<Span> 
     None
 }
 
-/// Validate a single `query` declaration: placeholders must resolve to a
-/// declared parameter, the return type must refer to a known table, model, or
-/// type alias, and the SQL body must match the declared return contract.
-fn check_declared_query(
+/// Which statement-style declaration is being checked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclKind {
+    Query,
+    Transaction,
+}
+
+impl DeclKind {
+    fn keyword(self) -> &'static str {
+        match self {
+            DeclKind::Query => "query",
+            DeclKind::Transaction => "transaction",
+        }
+    }
+}
+
+/// A resolved `query` or `transaction` declaration, normalized for checking.
+struct DeclaredStmt<'a> {
+    kind: DeclKind,
+    name: &'a str,
+    params: &'a [ParamDecl],
+    return_type: &'a QueryReturn,
+    sql: &'a str,
+}
+
+/// Validate a single `query`/`transaction` declaration: placeholders must
+/// resolve to a declared parameter, the return type must refer to a known
+/// table, model, or type alias, and the SQL body must match the declared
+/// return contract. `query` bodies must stay a single statement while
+/// `transaction` bodies must contain at least two.
+fn check_declared_statement(
     path: &Path,
     src: &str,
-    query: &QueryDecl,
+    statement: &DeclaredStmt,
     catalog: &TableCatalog<'_>,
     registry: &ModelRegistry,
 ) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    diags.extend(check_query_body(path, query.sql.trim(), catalog));
 
-    let body_start = src.find(&query.sql).unwrap_or(0);
-    for (start, _, kind) in scan_placeholders(&query.sql) {
+    let body_statements = QueryDefinition::split_statements(statement.sql);
+    match statement.kind {
+        DeclKind::Query if body_statements.len() > 1 => {
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.query-multi-statement",
+                    format!(
+                        "query `{}` contains {} statements, but a `query` may only contain one",
+                        statement.name,
+                        body_statements.len()
+                    ),
+                )
+                .with_help(
+                    "split each statement into its own `query`, or use a transaction for a multi-statement body",
+                ),
+            );
+        }
+        DeclKind::Transaction if body_statements.len() < 2 => {
+            diags.push(
+                Diagnostic::error(
+                    path,
+                    "check.transaction-statement-count",
+                    format!(
+                        "transaction `{}` contains {} statement{}, but a transaction requires at least 2",
+                        statement.name,
+                        body_statements.len(),
+                        if body_statements.len() == 1 { "" } else { "s" },
+                    ),
+                )
+                .with_help(
+                    "a transaction groups multiple statements that run atomically; use `query` for a single statement",
+                ),
+            );
+        }
+        _ => {}
+    }
+
+    diags.extend(check_query_body(path, statement.sql.trim(), catalog));
+
+    let body_start = src.find(statement.sql).unwrap_or(0);
+    for (start, _, kind) in scan_placeholders(statement.sql) {
         let span = line_of_offset(src, body_start + start);
         match kind {
-            Placeholder::Positional(n) if n > query.params.len() => {
+            Placeholder::Positional(n) if n > statement.params.len() => {
                 diags.push(
                     Diagnostic::error(
                         path,
                         "check.query-placeholder",
                         format!(
-                            "query `{}` uses placeholder `${n}`, but only {} parameter{} are declared",
-                            query.name,
-                            query.params.len(),
-                            if query.params.len() == 1 { "is" } else { "s" },
+                            "{} `{}` uses placeholder `${n}`, but only {} parameter{} are declared",
+                            statement.kind.keyword(),
+                            statement.name,
+                            statement.params.len(),
+                            if statement.params.len() == 1 { "is" } else { "s" },
                         ),
                     )
                     .with_span(span),
                 );
             }
-            Placeholder::Named(name) if query.params.iter().all(|p| p.name != name) => {
+            Placeholder::Named(name) if statement.params.iter().all(|p| p.name != name) => {
                 diags.push(
                     Diagnostic::error(
                         path,
                         "check.query-placeholder",
                         format!(
-                            "query `{}` uses placeholder `${name}`, which is not declared in the `query` signature",
-                            query.name
+                            "{} `{}` uses placeholder `${name}`, which is not declared in the `{}` signature",
+                            statement.kind.keyword(),
+                            statement.name,
+                            statement.kind.keyword(),
                         ),
                     )
-                    .with_help("add the parameter to the `query` declaration, or fix the placeholder")
+                    .with_help(
+                        "add the parameter to the declaration, or fix the placeholder",
+                    )
                     .with_span(span),
                 );
             }
@@ -519,12 +646,12 @@ fn check_declared_query(
         }
     }
 
-    for (start, _, dotted) in scan_dotted_placeholders(&query.sql) {
+    for (start, _, dotted) in scan_dotted_placeholders(statement.sql) {
         let span = line_of_offset(src, body_start + start);
         let Some((base, field)) = dotted.split_once('.') else {
             continue;
         };
-        let Some(param) = query.params.iter().find(|p| p.name == base) else {
+        let Some(param) = statement.params.iter().find(|p| p.name == base) else {
             // An undeclared base parameter is already reported above.
             continue;
         };
@@ -534,8 +661,9 @@ fn check_declared_query(
                     path,
                     "check.query-placeholder",
                     format!(
-                        "query `{}` uses placeholder `${dotted}` to address fields of `${base}`, but `${base}` is not a model parameter (its type is `{}`)",
-                        query.name,
+                        "{} `{}` uses placeholder `${dotted}` to address fields of `${base}`, but `${base}` is not a model parameter (its type is `{}`)",
+                        statement.kind.keyword(),
+                        statement.name,
                         axiom_core::axm::type_ref_name(&param.ty),
                     ),
                 )
@@ -553,8 +681,9 @@ fn check_declared_query(
                     path,
                     "check.query-placeholder",
                     format!(
-                        "query `{}` uses placeholder `${dotted}`, but model `{model_name}` has no field `{field}`",
-                        query.name
+                        "{} `{}` uses placeholder `${dotted}`, but model `{model_name}` has no field `{field}`",
+                        statement.kind.keyword(),
+                        statement.name
                     ),
                 )
                 .with_help("add the field to the model or fix the placeholder")
@@ -563,7 +692,7 @@ fn check_declared_query(
         }
     }
 
-    match &query.return_type {
+    match &statement.return_type {
         QueryReturn::Exec => {}
         QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
             let name = axiom_core::axm::type_ref_name(ty);
@@ -573,8 +702,9 @@ fn check_declared_query(
                         path,
                         "check.query-return-type",
                         format!(
-                            "query `{}` returns `{name}`, but no such table, model, or type exists",
-                            query.name
+                            "{} `{}` returns `{name}`, but no such table, model, or type exists",
+                            statement.kind.keyword(),
+                            statement.name
                         ),
                     )
                     .with_help(
@@ -585,7 +715,7 @@ fn check_declared_query(
         }
     }
 
-    diags.extend(check_return_contract(path, query, catalog, registry));
+    diags.extend(check_return_contract(path, statement, catalog, registry));
     diags
 }
 
@@ -608,23 +738,23 @@ fn known_return_type(catalog: &TableCatalog<'_>, registry: &ModelRegistry, name:
 /// row type.
 fn check_return_contract(
     path: &Path,
-    query: &QueryDecl,
+    statement: &DeclaredStmt,
     catalog: &TableCatalog<'_>,
     registry: &ModelRegistry,
 ) -> Vec<Diagnostic> {
-    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, &query.sql) else {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, statement.sql) else {
         return Vec::new(); // body parse errors are already reported
     };
-    // For multi-statement query bodies the return contract describes the rows
-    // a caller receives, which is the result of the LAST statement.
-    let Some(statement) = statements.into_iter().next_back() else {
+    // The return contract describes the rows a caller receives, which is the
+    // result of the LAST statement of the body.
+    let Some(statement_ref) = statements.into_iter().next_back() else {
         return Vec::new();
     };
 
-    let produces_rows = statement_produces_rows(&statement);
-    let expects_rows = !matches!(query.return_type, QueryReturn::Exec);
+    let produces_rows = statement_produces_rows(&statement_ref);
+    let expects_rows = !matches!(statement.return_type, QueryReturn::Exec);
 
-    let prefix = format!("query `{}`", query.name);
+    let prefix = format!("{} `{}`", statement.kind.keyword(), statement.name);
     if expects_rows && !produces_rows {
         return vec![
             Diagnostic::error(
@@ -653,12 +783,12 @@ fn check_return_contract(
     }
 
     let (QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty)) =
-        &query.return_type
+        &statement.return_type
     else {
         return Vec::new();
     };
     let row_name = axiom_core::axm::type_ref_name(ty);
-    let Some(select) = single_select(&statement) else {
+    let Some(select) = single_select(&statement_ref) else {
         return Vec::new();
     };
     let projected = projection_identifiers(select);
@@ -668,10 +798,10 @@ fn check_return_contract(
 
     if let Some(model) = registry.model_by_name(&row_name) {
         let field_names: Vec<String> = model.model.fields.iter().map(|f| f.name.clone()).collect();
-        projection_vs_fields(path, query, &row_name, &projected, &field_names, true)
+        projection_vs_fields(path, statement.name, &row_name, &projected, &field_names, true)
     } else if let Some(table) = catalog.table_by_name(&row_name) {
         let field_names: Vec<String> = table.columns.iter().map(|c| c.name.to_string()).collect();
-        projection_vs_fields(path, query, &row_name, &projected, &field_names, false)
+        projection_vs_fields(path, statement.name, &row_name, &projected, &field_names, false)
     } else {
         Vec::new() // unresolved row type already reported
     }
@@ -679,7 +809,7 @@ fn check_return_contract(
 
 fn projection_vs_fields(
     path: &Path,
-    query: &QueryDecl,
+    name: &str,
     row_name: &str,
     projected: &[String],
     field_names: &[String],
@@ -698,8 +828,7 @@ fn projection_vs_fields(
                     path,
                     "check.query-contract",
                     format!(
-                        "query `{}` projects column `{ident}`, which is not a field of the declared `{row_name}` type",
-                        query.name
+                        "`{name}` projects column `{ident}`, which is not a field of the declared `{row_name}` type"
                     ),
                 )
                 .with_help("align the SQL projection with the declared return type's fields"),

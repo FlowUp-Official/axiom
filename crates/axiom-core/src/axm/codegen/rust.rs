@@ -26,7 +26,7 @@ use crate::axm::ast::{
 use crate::axm::codegen::{
     ModelEmission, NamedKind, Target, Uses, ValidationOptions, collect_model_deps, collect_uses,
     effective_fields, effective_safe_parse_mode, emit_plan, inline_annotated, model_name,
-    named_kind, query_emitted, rule_message,
+    named_kind, query_emitted, rule_message, transaction_emitted,
 };
 use crate::axm::resolver::{ModelRegistry, ResolvedModel};
 use crate::catalog::TableCatalog;
@@ -74,8 +74,13 @@ pub fn generate_rust_models_with_options(
         .iter()
         .filter(|resolved| query_emitted(&resolved.query, Target::Rust))
         .collect::<Vec<_>>();
+    let emitted_transactions = registry
+        .transactions
+        .iter()
+        .filter(|resolved| transaction_emitted(&resolved.transaction, Target::Rust))
+        .collect::<Vec<_>>();
 
-    if !emitted_queries.is_empty() {
+    if !emitted_queries.is_empty() || !emitted_transactions.is_empty() {
         emit_db_helpers(&mut out);
     }
 
@@ -125,6 +130,9 @@ pub fn generate_rust_models_with_options(
     }
     for resolved in emitted_queries {
         emit_query(&mut out, registry, &resolved.path, &resolved.query);
+    }
+    for resolved in emitted_transactions {
+        emit_transaction(&mut out, registry, &resolved.path, &resolved.transaction);
     }
 
     if uses.regex {
@@ -1187,22 +1195,20 @@ fn wrap_sql(sql: &str, model_row: bool) -> String {
     }
 }
 
-fn emit_query(
+fn emit_params_struct(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
-    query: &crate::axm::ast::QueryDecl,
+    pascal: &str,
+    params: &[crate::axm::ast::ParamDecl],
 ) {
-    let pascal = util::pascal_case(&query.name);
     let params_type = format!("{pascal}Params");
-    let fn_name = util::rust_field_name(&query.name);
-
     let _ = writeln!(
         out,
         "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"
     );
     let _ = writeln!(out, "pub struct {params_type} {{");
-    for param in &query.params {
+    for param in params {
         let field = util::rust_field_ident(&param.name);
         let ty = rust_named_type(registry, path, &param.ty);
         let _ = writeln!(out, "    pub {field}: {ty},");
@@ -1214,13 +1220,13 @@ fn emit_query(
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    let has_checks = query.params.iter().any(|p| {
+    let has_checks = params.iter().any(|p| {
         let inlined = inline_annotated(registry, path, &AnnotatedType::new(p.ty.clone()));
         !inlined.rules.is_empty() || !inlined.transforms.is_empty()
     });
     if has_checks {
         out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
-        for param in &query.params {
+        for param in params {
             emit_param_validation(out, registry, path, param);
         }
         out.push_str("        if errors.is_empty() {\n");
@@ -1234,6 +1240,185 @@ fn emit_query(
     }
     out.push_str("    }\n");
     out.push_str("}\n\n");
+}
+
+fn emit_transaction(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    transaction: &crate::axm::ast::TransactionDecl,
+) {
+    let pascal = util::pascal_case(&transaction.name);
+    let fn_name = util::rust_field_name(&transaction.name);
+
+    emit_params_struct(out, registry, path, &pascal, &transaction.params);
+
+    // Bound SQL for each statement, with the bind range each statement owns.
+    let statements = crate::query::QueryDefinition::split_statements(&transaction.sql);
+    let mut binds: Vec<String> = Vec::new();
+    let mut next = 1usize;
+    let mut bound_sql: Vec<(String, usize, usize)> = Vec::new();
+    for statement in &statements {
+        let before = binds.len();
+        let sql = driver_sql_shared(statement, &transaction.params, &mut binds, &mut next);
+        bound_sql.push((sql, before, binds.len()));
+    }
+
+    let ret_ty = match &transaction.return_type {
+        QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, ty_ref)),
+        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, ty_ref),
+        QueryReturn::Optional(ty_ref) => {
+            format!("Option<{}>", rust_named_type(registry, path, ty_ref))
+        }
+        QueryReturn::Exec => "()".to_string(),
+    };
+
+    let _ = writeln!(out, "pub async fn {fn_name}(");
+    let _ = writeln!(out, "    client: &mut tokio_postgres::Client,");
+    let _ = writeln!(out, "    params: {pascal}Params,");
+    let _ = writeln!(out, ") -> Result<{ret_ty}, Box<dyn std::error::Error>> {{");
+    out.push_str(
+        "    params.validate().map_err(|errors| format!(\"validation failed: {errors:?}\"))?;\n",
+    );
+
+    for (index, bind) in binds.iter().enumerate() {
+        let _ = writeln!(out, "    let bind{index} = {bind}.to_axm_text();");
+    }
+    let last = bound_sql.len().saturating_sub(1);
+    for (k, (_, from, to)) in bound_sql.iter().enumerate() {
+        let slice = if from == to {
+            "Vec::new()".to_string()
+        } else {
+            let refs: Vec<String> = (*from..*to).map(|i| format!("&bind{i}")).collect();
+            format!("vec![{}]", refs.join(", "))
+        };
+        let _ = writeln!(
+            out,
+            "    let binds{k}: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = {slice};"
+        );
+    }
+
+    out.push_str("    let txn = client.transaction().await?;\n");
+    let _ = writeln!(out, "    let result: Result<{ret_ty}, Box<dyn std::error::Error>> = async {{");
+
+    for (k, (sql, _, _)) in bound_sql[..last].iter().enumerate() {
+        let sql_plain = sql.trim_end().trim_end_matches(';').trim_end();
+        let _ = writeln!(out, "        txn.execute({}, &binds{k}).await?;", rust_raw_string(sql_plain));
+    }
+
+    if bound_sql.is_empty() {
+        out.push_str("        Ok(())\n");
+    } else {
+        let (sql, _, _) = &bound_sql[last];
+        emit_transaction_last(out, registry, path, transaction, sql, &pascal, last);
+    }
+
+    out.push_str("    }.await;\n");
+    out.push_str("    match result {\n");
+    out.push_str("        Ok(value) => {\n");
+    out.push_str("            txn.commit().await?;\n");
+    out.push_str("            Ok(value)\n");
+    out.push_str("        }\n");
+    out.push_str("        Err(e) => {\n");
+    out.push_str("            let _ = txn.rollback().await;\n");
+    out.push_str("            Err(e)\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+/// Emit the final statement of a transaction body: the statement that produces
+/// the declared return value, executed against the transaction handle.
+fn emit_transaction_last(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    transaction: &crate::axm::ast::TransactionDecl,
+    sql: &str,
+    pascal: &str,
+    last: usize,
+) {
+    let binds_var = format!("binds{last}");
+
+    match &transaction.return_type {
+        QueryReturn::Many(ty_ref) => {
+            let ty = rust_named_type(registry, path, ty_ref);
+            if is_model_return(registry, path, ty_ref) {
+                let sql_wrapped = wrap_sql(sql, true);
+                let _ = writeln!(out, "        let rows = txn.query({}, &{binds_var}).await?;", rust_raw_string(&sql_wrapped));
+                let _ = writeln!(out, "        let mut result: Vec<{ty}> = Vec::with_capacity(rows.len());");
+                out.push_str("        for row in rows {\n");
+                out.push_str("            let js: String = row.try_get(0)?;\n");
+                out.push_str("            let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "            result.push(serde_json::from_value::<{ty}>(value)?);");
+                out.push_str("        }\n");
+                out.push_str("        Ok(result)\n");
+            } else {
+                let sql_scalar = wrap_sql(sql, false);
+                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                let _ = writeln!(out, "        let rows = txn.query({}, &{binds_var}).await?;", rust_raw_string(&sql_scalar));
+                let _ = writeln!(out, "        let mut result: Vec<{ty}> = Vec::with_capacity(rows.len());");
+                out.push_str("        for row in rows {\n");
+                out.push_str("            let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "            result.push({conv});");
+                out.push_str("        }\n");
+                out.push_str("        Ok(result)\n");
+            }
+        }
+        QueryReturn::Optional(ty_ref) => {
+            let ty = rust_named_type(registry, path, ty_ref);
+            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, ty_ref));
+            let _ = writeln!(out, "        let row = txn.query_opt({}, &{binds_var}).await?;", rust_raw_string(&sql_wrapped));
+            out.push_str("        match row {\n");
+            out.push_str("            Some(row) => {\n");
+            if is_model_return(registry, path, ty_ref) {
+                out.push_str("                let js: String = row.try_get(0)?;\n");
+                out.push_str("                let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "                let parsed = serde_json::from_value::<{ty}>(value)?;");
+                out.push_str("                Ok(Some(parsed))\n");
+            } else {
+                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                out.push_str("                let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "                Ok(Some({conv}))");
+            }
+            out.push_str("            }\n");
+            out.push_str("            None => Ok(None),\n");
+            out.push_str("        }\n");
+        }
+        QueryReturn::Single(ty_ref) => {
+            let ty = rust_named_type(registry, path, ty_ref);
+            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, ty_ref));
+            let _ = writeln!(out, "        let row = txn.query_opt({}, &{binds_var}).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_wrapped));
+            if is_model_return(registry, path, ty_ref) {
+                out.push_str("        let js: String = row.try_get(0)?;\n");
+                out.push_str("        let value: serde_json::Value = serde_json::from_str(&js)?;\n");
+                let _ = writeln!(out, "        let parsed = serde_json::from_value::<{ty}>(value)?;");
+                out.push_str("        Ok(parsed)\n");
+            } else {
+                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                out.push_str("        let text: String = row.try_get::<_, String>(0)?;\n");
+                let _ = writeln!(out, "        Ok({conv})");
+            }
+        }
+        QueryReturn::Exec => {
+            let sql_plain = sql.trim_end().trim_end_matches(';').trim_end();
+            let _ = writeln!(out, "        txn.execute({}, &{binds_var}).await?;", rust_raw_string(sql_plain));
+            out.push_str("        Ok(())\n");
+        }
+    }
+}
+
+fn emit_query(
+    out: &mut String,
+    registry: &ModelRegistry,
+    path: &Path,
+    query: &crate::axm::ast::QueryDecl,
+) {
+    let pascal = util::pascal_case(&query.name);
+    let params_type = format!("{pascal}Params");
+    let fn_name = util::rust_field_name(&query.name);
+
+    emit_params_struct(out, registry, path, &pascal, &query.params);
 
     let (sql, binds) = driver_sql(&query.sql, &query.params);
     let sql_wrapped = wrap_sql(&sql, true);
@@ -1379,10 +1564,23 @@ fn emit_param_validation(
 /// string literals, quoted identifiers, and comments (see
 /// [`scan_dotted_placeholders`]).
 fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<String>) {
-    let hits = crate::query::scan_dotted_placeholders(sql);
-    let mut out = String::with_capacity(sql.len());
     let mut binds = Vec::new();
     let mut next = 1usize;
+    let sql = driver_sql_shared(sql, params, &mut binds, &mut next);
+    (sql, binds)
+}
+
+/// Like [`driver_sql`], but accumulates into a shared bind list and position
+/// counter so a multi-statement transaction body yields one contiguous `$n`
+/// sequence and one bind list across all of its statements.
+fn driver_sql_shared(
+    sql: &str,
+    params: &[crate::axm::ast::ParamDecl],
+    binds: &mut Vec<String>,
+    next: &mut usize,
+) -> String {
+    let hits = crate::query::scan_dotted_placeholders(sql);
+    let mut out = String::with_capacity(sql.len());
     let mut last = 0usize;
     for (start, len, token) in hits {
         out.push_str(&sql[last..start]);
@@ -1401,7 +1599,7 @@ fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<
             if token.bytes().all(|b| b.is_ascii_digit()) {
                 let n: usize = token.parse().unwrap_or(1).max(1);
                 let param = params.get(n - 1)?;
-                next = next.max(n + 1);
+                *next = (*next).max(n + 1);
                 return Some(format!("params.{}", util::rust_field_ident(&param.name)));
             }
             if fields.len() == 1 {
@@ -1415,7 +1613,7 @@ fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<
             Some(bind) => {
                 let _ = write!(out, "${next}");
                 binds.push(bind);
-                next += 1;
+                *next += 1;
             }
             None => {
                 out.push_str(&sql[start..start + len]);
@@ -1423,7 +1621,7 @@ fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<
         }
     }
     out.push_str(&sql[last..]);
-    (out, binds)
+    out
 }
 
 /// Wrap SQL in a raw string literal, bumping the number of `#` delimiters if
@@ -1834,5 +2032,82 @@ query GetUser($id: UUID) -> User {
         assert!(out.contains("-> Result<User, Box<dyn std::error::Error>>"));
         assert!(out.contains("GetUser returned no rows"));
         assert!(out.contains("serde_json::from_value::<User>(value)?)"));
+    }
+
+    #[test]
+    fn transaction_emits_commit_and_rollback_with_per_statement_binds() {
+        let src = r#"
+model User { id: UUID }
+transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
+  UPDATE accounts SET balance = balance - $amount WHERE id = $from;
+  UPDATE accounts SET balance = balance + $amount WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub async fn transfer("));
+        assert!(out.contains("-> Result<User, Box<dyn std::error::Error>>"));
+        assert!(out.contains("client: &mut tokio_postgres::Client,"));
+        assert!(out.contains("let txn = client.transaction().await?;"));
+        assert!(out.contains("txn.commit().await?;"));
+        assert!(out.contains("let _ = txn.rollback().await;"));
+        assert!(out.contains("let result: Result<User, Box<dyn std::error::Error>> = async {"));
+        assert!(out.contains("txn.execute("));
+        assert!(out.contains("txn.query_opt("));
+        assert!(out.contains("$1"));
+        assert!(out.contains("params.from.to_axm_text()"));
+        assert!(out.contains("params.to.to_axm_text()"));
+        assert!(out.contains("params.amount.to_axm_text()"));
+    }
+
+    #[test]
+    fn transaction_exec_return_wraps_entire_body() {
+        let src = r#"
+transaction Cleanup($olderThan: String) {
+  DELETE FROM events WHERE created_at < $olderThan;
+  DELETE FROM audit WHERE created_at < $olderThan;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("-> Result<(), Box<dyn std::error::Error>>"));
+        assert!(out.contains("txn.execute("));
+        assert!(out.contains("let _ = txn.rollback().await;"));
+        assert!(!out.contains("txn.query_opt"));
+        assert!(!out.contains("txn.query("));
+    }
+
+    #[test]
+    fn transaction_returns_vec_from_last_statement() {
+        let src = r#"
+model User { id: UUID }
+transaction Batch($emails: String[]) -> User[] {
+  DELETE FROM pending WHERE email = ANY($emails);
+  SELECT * FROM users WHERE email = ANY($emails);
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("-> Result<Vec<User>, Box<dyn std::error::Error>>"));
+        assert!(out.contains("txn.query("));
+        assert!(out.contains("serde_json::from_value::<User>(value)?)"));
+        assert!(out.contains("txn.commit().await?;"));
+    }
+
+    #[test]
+    fn transaction_emitted_respects_target_override() {
+        let src = r#"
+@target("typescript")
+transaction TsOnly($a: Int) -> Int {
+  UPDATE t SET x = 1;
+  SELECT 1;
+}
+@target("rust")
+transaction RsOnly($a: Int) -> Int {
+  UPDATE t SET x = 1;
+  SELECT 1;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub async fn rs_only("));
+        assert!(!out.contains("ts_only"));
     }
 }

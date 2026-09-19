@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use axiom_core::axm::ast::{
-    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, QueryDecl, Rule, TypeRef,
+    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ModelDecl, ParamDecl, QueryDecl, Rule,
+    TransactionDecl, TypeRef,
 };
 use axiom_core::axm::is_identifier;
 use axiom_core::query::{Placeholder, scan_placeholders};
@@ -230,22 +231,46 @@ impl LintRule for NamingConvention {
                     decl_name_span(ctx.source, "query", &query.name),
                 );
             }
-            for param in &query.params {
-                if violates_camel_case(&param.name) {
-                    push_naming(
-                        ctx,
-                        &mut out,
-                        "parameter",
-                        &param.name,
-                        "camelCase",
-                        param_span(ctx.source, &param.name),
-                    );
-                }
-            }
-        }
-        out
-    }
-}
+                 for param in &query.params {
+                     if violates_camel_case(&param.name) {
+                         push_naming(
+                             ctx,
+                             &mut out,
+                             "parameter",
+                             &param.name,
+                             "camelCase",
+                             param_span(ctx.source, &param.name),
+                         );
+                     }
+                 }
+         }
+         for transaction in &file.transactions {
+             if violates_pascal_case(&transaction.name) {
+                 push_naming(
+                     ctx,
+                     &mut out,
+                     "transaction",
+                     &transaction.name,
+                     "PascalCase",
+                     decl_name_span(ctx.source, "transaction", &transaction.name),
+                 );
+             }
+             for param in &transaction.params {
+                 if violates_camel_case(&param.name) {
+                     push_naming(
+                         ctx,
+                         &mut out,
+                         "parameter",
+                         &param.name,
+                         "camelCase",
+                         param_span(ctx.source, &param.name),
+                     );
+                 }
+             }
+         }
+         out
+     }
+ }
 
 /// Whether `name` is a bare identifier that violates Axiom's PascalCase
 /// convention for models, type aliases, and queries.
@@ -357,6 +382,18 @@ fn collect_named_types(file: &AxmFile) -> Vec<String> {
         }
         use axiom_core::axm::ast::QueryReturn;
         match &query.return_type {
+            QueryReturn::Exec => {}
+            QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                collect_type_refs(ty, &mut names)
+            }
+        }
+    }
+    for transaction in &file.transactions {
+        for param in &transaction.params {
+            collect_type_refs(&param.ty, &mut names);
+        }
+        use axiom_core::axm::ast::QueryReturn;
+        match &transaction.return_type {
             QueryReturn::Exec => {}
             QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
                 collect_type_refs(ty, &mut names)
@@ -634,22 +671,74 @@ impl LintRule for UnusedQueryParam {
                 out.push(diag);
             }
         }
+        for transaction in &file.transactions {
+            let used = used_param_indices(transaction);
+            for (index, param) in transaction.params.iter().enumerate() {
+                if used.contains(&index) {
+                    continue;
+                }
+                let span = param_span(ctx.source, &param.name);
+                let mut diag = Diagnostic::warning(
+                    ctx.file,
+                    "lint.unused-query-param",
+                    format!(
+                        "parameter `${}` of transaction `{}` is never used in its SQL body",
+                        param.name, transaction.name
+                    ),
+                )
+                .with_help(format!(
+                    "remove the parameter or reference `${}` in the transaction body",
+                    param.name
+                ));
+                if let Some(span) = span {
+                    diag = diag.with_span(span);
+                }
+                out.push(diag);
+            }
+        }
         out
     }
 }
 
-/// The 0-based indices of parameters referenced by `query.sql`, whether by name
+/// A declaration that owns a `params` list and a `sql` body — shared by
+/// [`QueryDecl`] and [`TransactionDecl`] so the unused-parameter lint can cover
+/// both without duplication.
+trait QueryLike {
+    fn params(&self) -> &[ParamDecl];
+    fn sql(&self) -> &str;
+}
+
+impl QueryLike for QueryDecl {
+    fn params(&self) -> &[ParamDecl] {
+        &self.params
+    }
+    fn sql(&self) -> &str {
+        &self.sql
+    }
+}
+
+impl QueryLike for TransactionDecl {
+    fn params(&self) -> &[ParamDecl] {
+        &self.params
+    }
+    fn sql(&self) -> &str {
+        &self.sql
+    }
+}
+
+/// The 0-based indices of parameters referenced by the SQL body, whether by name
 /// (`$email`), by position (`$1`), or as the base of a structured path
 /// (`$input.email`).
-fn used_param_indices(query: &QueryDecl) -> BTreeSet<usize> {
+fn used_param_indices(decl: &impl QueryLike) -> BTreeSet<usize> {
     let mut used = BTreeSet::new();
-    for (_, _, kind) in scan_placeholders(&query.sql) {
+    let params = decl.params();
+    for (_, _, kind) in scan_placeholders(decl.sql()) {
         match kind {
-            Placeholder::Positional(n) if n >= 1 && n <= query.params.len() => {
+            Placeholder::Positional(n) if n >= 1 && n <= params.len() => {
                 used.insert(n - 1);
             }
             Placeholder::Named(name) => {
-                if let Some(index) = query.params.iter().position(|p| p.name == name) {
+                if let Some(index) = params.iter().position(|p| p.name == name) {
                     used.insert(index);
                 }
             }
@@ -950,6 +1039,51 @@ mod tests {
         assert_eq!(diags[0].code, "lint.unused-query-param");
         assert!(diags[0].message.contains("ghost"));
         assert!(diags[0].span.is_some());
+    }
+
+    #[test]
+    fn naming_convention_flags_transaction_names_and_params() {
+        let source = r#"transaction badName($BadParam: Int) -> User? {
+  UPDATE t SET x = 1;
+  SELECT * FROM users WHERE id = $BadParam;
+}"#;
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = NamingConvention.check(&c);
+        let kinds: Vec<&str> = diags
+            .iter()
+            .map(|d| d.message.split(' ').next().unwrap())
+            .collect();
+        assert!(diags.iter().all(|d| d.code == "lint.naming-convention"), "{diags:?}");
+        assert!(kinds.contains(&"transaction"), "{kinds:?}");
+        assert!(kinds.contains(&"parameter"), "{kinds:?}");
+        assert!(diags.iter().all(|d| d.span.is_some()));
+    }
+
+    #[test]
+    fn naming_convention_passes_canonical_transaction_names() {
+        let source = r#"transaction TransferFunds($from: UUID, $to: UUID) -> User[] {
+  UPDATE a SET x = 1;
+  SELECT * FROM users;
+}"#;
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        assert!(NamingConvention.check(&c).is_empty());
+    }
+
+    #[test]
+    fn unused_query_param_is_reported_for_transactions() {
+        let source = r#"transaction Transfer($from: UUID, $ghost: String) -> User? {
+  UPDATE a SET x = 1;
+  SELECT id FROM users WHERE id = $from;
+}"#;
+        let ws = WorkspaceView::empty();
+        let c = ctx(source, &ws);
+        let diags = UnusedQueryParam.check(&c);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, "lint.unused-query-param");
+        assert!(diags[0].message.contains("transaction"), "{}", diags[0].message);
+        assert!(diags[0].message.contains("ghost"), "{}", diags[0].message);
     }
 
     #[test]

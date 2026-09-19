@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! file           := item*
-//! item           := override* (model | query) | import | type_decl
+//! item           := override* (model | query | transaction) | import | type_decl
 //! import         := "import" "{" name ("," name)* "}" "from" string [";"]
 //! name           := ident ("as" ident)?
 //! type_decl      := "type" ident "=" annotated_type [";"]
@@ -16,6 +16,7 @@
 //! annotated_type := type_ref call*
 //! call           := "." ident "(" args? ")"
 //! query          := "query" ident "(" param* ")" ("->" type_ref)? "{" sql_body "}"
+//! transaction    := "transaction" ident "(" param* ")" ("->" type_ref)? "{" sql_body "}"
 //! param          := "$"? ident ":" type_ref
 //! type_ref       := base ("?" | "[]")*
 //! base           := "String" | "Int" | "BigInt" | "Float" | "Boolean"
@@ -23,9 +24,11 @@
 //! ```
 //!
 //! Semicolons are **optional** on `import` and `type` declarations. A `;`
-//! after the closing `}` of a `model` or `query` block is never accepted.
-//! Inside `query {}` blocks, multiple SQL statements are separated by `;`
-//! (the trailing `;` on the last statement is optional).
+//! after the closing `}` of a `model`, `query`, or `transaction` block is never
+//! accepted. Inside `query {}` and `transaction {}` blocks, multiple SQL
+//! statements are separated by `;` (the trailing `;` on the last statement is
+//! optional). The statement-count rules are enforced by `axiom check`: a
+//! `query` body holds exactly one statement, a `transaction` body two or more.
 //!
 //! Rule and transformation calls are classified into strongly typed AST
 //! variants (`Rule` / `Transform`) at parse time rather than being stored as
@@ -33,15 +36,16 @@
 //! `max_length` (the `min_len` / `max_len` aliases are rejected). Axiom
 //! identifiers are never case-canonicalized here.
 //!
-//! Model and query decorators: a `model` or `query` may be preceded by
-//! `@target(...)` (restrict codegen to the listed targets, quoted or bare
-//! words), which applies to both. `@no_codegen` (never emit a standalone
-//! validation API) applies to `model` declarations only and is rejected on
-//! `query` and `type` declarations. `@target` and `@no_codegen` are mutually
-//! exclusive on a model, each decorator may appear at most once per
-//! declaration, and an unknown decorator name or target is rejected.
-//! `@target` accepts either quote style: `@target("typescript", "rust")` and
-//! `@target('rust', 'typescript')`.
+//! Model, query, and transaction decorators: a decoration-eligible declaration
+//! may be preceded by `@target(...)` (restrict codegen to the listed targets,
+//! quoted or bare words), which applies to all three. `@no_codegen` (never emit
+//! a standalone validation API) applies to `model` declarations only and is
+//! rejected on `query`, `transaction`, and `type` declarations. The same is
+//! true of the model-only `@parse` and `@safeParse(...)` decorators. `@target`
+//! and `@no_codegen` are mutually exclusive on a model, each decorator may
+//! appear at most once per declaration, and an unknown decorator name or target
+//! is rejected. `@target` accepts either quote style: `@target("typescript",
+//! "rust")` and `@target('rust', 'typescript')`.
 
 use std::fmt;
 
@@ -58,8 +62,8 @@ type PResult<T> = winnow::ModalResult<T, ContextError>;
 
 use crate::axm::ast::{
     AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
-    ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target, Transform,
-    TypeDecl, TypeRef,
+    ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target, TransactionDecl,
+    Transform, TypeDecl, TypeRef,
 };
 
 /// A failed `.axm` parse with a human-readable message.
@@ -740,36 +744,61 @@ fn query_decl(input: &mut &str) -> PResult<QueryDecl> {
     ws(input)?;
     let name = ident.parse_next(input)?;
     ws(input)?;
+    let (params, return_type) = decl_header(input)?;
+    ws(input)?;
+    let sql = scan_sql_body.parse_next(input)?;
+
+    Ok(QueryDecl {
+        name,
+        params,
+        return_type: return_contract(return_type),
+        sql,
+        overrides: Vec::new(),
+    })
+}
+
+fn transaction_decl(input: &mut &str) -> PResult<TransactionDecl> {
+    kw("transaction").parse_next(input)?;
+    ws(input)?;
+    let name = ident.parse_next(input)?;
+    ws(input)?;
+    let (params, return_type) = decl_header(input)?;
+    ws(input)?;
+    let sql = scan_sql_body.parse_next(input)?;
+
+    Ok(TransactionDecl {
+        name,
+        params,
+        return_type: return_contract(return_type),
+        sql,
+        overrides: Vec::new(),
+    })
+}
+
+/// Parse the shared `($param: Type, ...) (-> Type)?` header of a `query` or
+/// `transaction` declaration.
+fn decl_header(input: &mut &str) -> PResult<(Vec<ParamDecl>, Option<TypeRef>)> {
     let params: Vec<ParamDecl> = delimited(
         ('(', ws).map(|(c, _): (char, ())| c),
         separated(0.., param_decl, (ws, ',')),
         (ws, ')').map(|(_, c): ((), char)| c),
     )
     .parse_next(input)?;
-
     let return_type = opt((ws, "->", ws, type_ref))
         .parse_next(input)?
         .map(|(_, _, _, ty)| ty);
+    Ok((params, return_type))
+}
 
-    ws(input)?;
-    let sql = scan_sql_body.parse_next(input)?;
-
-    let return_type = match return_type {
+/// Normalize the raw `-> Type` header into a [`QueryReturn`]: `-> T` is one
+/// value, `-> T?` zero or one, and `-> T[]` zero or more.
+fn return_contract(ty: Option<TypeRef>) -> QueryReturn {
+    match ty {
         None => QueryReturn::Exec,
-        Some(ty) => match ty {
-            TypeRef::Array(inner) => QueryReturn::Many(*inner),
-            TypeRef::Nullable(inner) => QueryReturn::Optional(*inner),
-            other => QueryReturn::Single(other),
-        },
-    };
-
-    Ok(QueryDecl {
-        name,
-        params,
-        return_type,
-        sql,
-        overrides: Vec::new(),
-    })
+        Some(TypeRef::Array(inner)) => QueryReturn::Many(*inner),
+        Some(TypeRef::Nullable(inner)) => QueryReturn::Optional(*inner),
+        Some(other) => QueryReturn::Single(other),
+    }
 }
 
 /// Scan a raw SQL body between braces. Handles single/double-quoted strings,
@@ -887,12 +916,13 @@ enum Item {
     Type(TypeDecl),
     Model(ModelDecl),
     Query(QueryDecl),
+    Transaction(TransactionDecl),
 }
 
 /// A single top-level declaration, optionally preceded by decorators. A
-/// decorator (or decorators) may precede a `model` or a `query` declaration;
-/// `@no_codegen` is rejected on `query` (it only applies to `model`), and
-/// decorators cannot decorate a `type` or `import`.
+/// decorator (or decorators) may precede a `model`, `query`, or `transaction`
+/// declaration; `@no_codegen` is rejected on `query` and `transaction` (it only
+/// applies to `model`), and decorators cannot decorate a `type` or `import`.
 fn item(input: &mut &str) -> PResult<Item> {
     let overrides: Vec<ModelOverride> = repeat(0.., model_override).parse_next(input)?;
     if overrides.is_empty() {
@@ -901,12 +931,14 @@ fn item(input: &mut &str) -> PResult<Item> {
             type_decl.map(Item::Type),
             model_decl.map(Item::Model),
             query_decl.map(Item::Query),
+            transaction_decl.map(Item::Transaction),
         ))
         .parse_next(input)
     } else {
         ws(input)?;
-        // Decorators may introduce a `model` or a `query`; peek at the keyword
-        // so both are recognized and each validates its own decorator rules.
+        // Decorators may introduce a `model`, `query`, or `transaction`; peek
+        // at the keyword so each is recognized and validates its own decorator
+        // rules.
         if peek(kw("model")).parse_next(input).is_ok() {
             let mut model = model_decl.parse_next(input)?;
             validate_override_combination(input, &overrides)?;
@@ -917,11 +949,17 @@ fn item(input: &mut &str) -> PResult<Item> {
             let mut query = query_decl.parse_next(input)?;
             query.overrides = overrides;
             Ok(Item::Query(query))
+        } else if peek(kw("transaction")).parse_next(input).is_ok() {
+            validate_query_overrides(input, &overrides)?;
+            let mut transaction = transaction_decl.parse_next(input)?;
+            transaction.overrides = overrides;
+            Ok(Item::Transaction(transaction))
         } else {
             Err(ErrMode::Cut(ContextError::from_external_error(
                 input,
                 RuleError(
-                    "`@...` decorators must precede a `model` or `query` declaration".into(),
+                    "`@...` decorators must precede a `model`, `query`, or `transaction` declaration"
+                        .into(),
                 ),
             )))
         }
@@ -929,7 +967,8 @@ fn item(input: &mut &str) -> PResult<Item> {
 }
 
 /// `@no_codegen`, `@parse`, and `@safeParse` apply to `model` declarations
-/// only; a decorated query still honors duplicate-`@target` rejection.
+/// only; a decorated `query` or `transaction` still honors
+/// duplicate-`@target` rejection.
 fn validate_query_overrides(input: &mut &str, overrides: &[ModelOverride]) -> PResult<()> {
     for override_ in overrides {
         let message = match override_ {
@@ -954,12 +993,14 @@ fn axm_file(input: &mut &str) -> PResult<AxmFile> {
     let mut types = Vec::new();
     let mut models = Vec::new();
     let mut queries = Vec::new();
+    let mut transactions = Vec::new();
     for item in items {
         match item {
             Item::Import(i) => imports.push(i),
             Item::Type(t) => types.push(t),
             Item::Model(m) => models.push(m),
             Item::Query(q) => queries.push(q),
+            Item::Transaction(t) => transactions.push(t),
         }
     }
     Ok(AxmFile {
@@ -967,6 +1008,7 @@ fn axm_file(input: &mut &str) -> PResult<AxmFile> {
         types,
         models,
         queries,
+        transactions,
     })
 }
 
@@ -1139,7 +1181,7 @@ model User extends select<users> {
         parse_err("@no_codegen\ntype Email = String;");
         parse_err("@target(\"rust\")\nimport { User } from \"./users\";");
         let err = parse_err("@target(\"rust\")\ntype Email = String;");
-        assert!(err.contains("must precede a `model` or `query`"), "{err}");
+        assert!(err.contains("must precede a `model`"), "{err}");
     }
 
     #[test]
@@ -1533,6 +1575,84 @@ query GetUser($id: UUID) -> User? {
             q.sql,
             "SELECT id, email\n    FROM users\n    WHERE id = $id;\n    DELETE FROM users WHERE id = $id;"
         );
+    }
+
+    #[test]
+    fn parses_transaction_with_params_and_return_type() {
+        let file = parse(
+            r#"transaction CreatePost($userId: UUID, $content: String) -> Post {
+    INSERT INTO posts (user_id, content) VALUES ($userId, $content);
+    UPDATE users SET post_count = post_count + 1 WHERE id = $userId;
+    SELECT id, user_id, content FROM posts WHERE user_id = $userId ORDER BY id DESC LIMIT 1;
+}"#,
+        );
+        assert!(file.queries.is_empty());
+        let t = &file.transactions[0];
+        assert_eq!(t.name, "CreatePost");
+        assert_eq!(t.params.len(), 2);
+        assert_eq!(t.params[0].name, "userId");
+        assert_eq!(t.params[1].name, "content");
+        assert_eq!(t.return_type, QueryReturn::Single(TypeRef::Named("Post".into())));
+        assert_eq!(t.sql.matches(';').count(), 3);
+    }
+
+    #[test]
+    fn parses_transaction_return_shape_variants() {
+        let file = parse("transaction T1() -> User { SELECT * FROM users; SELECT * FROM users; }");
+        assert_eq!(file.transactions[0].return_type, QueryReturn::Single(TypeRef::Named("User".into())));
+
+        let file = parse("transaction T2() -> User? { SELECT 1; SELECT * FROM users; }");
+        assert_eq!(file.transactions[0].return_type, QueryReturn::Optional(TypeRef::Named("User".into())));
+
+        let file = parse("transaction T3() -> User[] { SELECT 1; SELECT * FROM users; }");
+        assert_eq!(file.transactions[0].return_type, QueryReturn::Many(TypeRef::Named("User".into())));
+
+        let file = parse("transaction T4() { UPDATE a SET x = 1; UPDATE b SET y = 2; }");
+        assert_eq!(file.transactions[0].return_type, QueryReturn::Exec);
+    }
+
+    #[test]
+    fn transaction_target_decorator_is_valid() {
+        let file = parse(
+            r#"@target("typescript")
+transaction CreatePost($userId: UUID) {
+    INSERT INTO posts (user_id) VALUES ($userId);
+    UPDATE users SET post_count = post_count + 1 WHERE id = $userId;
+}"#,
+        );
+        let t = &file.transactions[0];
+        assert_eq!(
+            t.target_restriction(),
+            Some([Target::TypeScript].as_slice())
+        );
+    }
+
+    #[test]
+    fn model_only_decorators_are_rejected_on_transaction() {
+        for decorator in ["@no_codegen", "@parse", "@safeParse(\"all\")"] {
+            let err = parse_err(&format!(
+                "{decorator}\ntransaction T($id: UUID) {{ UPDATE a SET x = 1; UPDATE b SET y = 2; }}"
+            ));
+            assert!(err.contains("only applies to `model`"), "{err}");
+        }
+    }
+
+    #[test]
+    fn transaction_keyword_requires_word_boundary_for_query() {
+        // `transaction` must not shadow `query` or `model` matching.
+        let file = parse(
+            r#"
+model User { id: UUID }
+transaction T($id: UUID) {
+    UPDATE users SET x = 1 WHERE id = $id;
+    UPDATE users SET y = 2 WHERE id = $id;
+}
+query GetUser($id: UUID) -> User? { SELECT * FROM users WHERE id = $id; }
+"#,
+        );
+        assert_eq!(file.models.len(), 1);
+        assert_eq!(file.queries.len(), 1);
+        assert_eq!(file.transactions.len(), 1);
     }
 
     #[test]

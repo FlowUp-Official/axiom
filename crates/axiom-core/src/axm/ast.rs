@@ -19,6 +19,7 @@ pub struct AxmFile {
     pub types: Vec<TypeDecl>,
     pub models: Vec<ModelDecl>,
     pub queries: Vec<QueryDecl>,
+    pub transactions: Vec<TransactionDecl>,
 }
 
 impl AxmFile {
@@ -34,6 +35,10 @@ impl AxmFile {
         self.queries.iter().find(|q| q.name == name)
     }
 
+    pub fn transaction_by_name(&self, name: &str) -> Option<&TransactionDecl> {
+        self.transactions.iter().find(|t| t.name == name)
+    }
+
     /// Every top-level declaration name in declaration order.
     pub fn declarations(&self) -> impl Iterator<Item = &str> {
         self.types
@@ -41,6 +46,7 @@ impl AxmFile {
             .map(|t| t.name.as_str())
             .chain(self.models.iter().map(|m| m.name.as_str()))
             .chain(self.queries.iter().map(|q| q.name.as_str()))
+            .chain(self.transactions.iter().map(|t| t.name.as_str()))
     }
 }
 
@@ -288,6 +294,37 @@ impl QueryDecl {
     }
 }
 
+/// A transaction declaration: a first-class, atomic multi-statement database
+/// contract.
+///
+/// ```text
+/// transaction CreateOrder($userId: UUID, $items: Item[]) -> Order { ...SQL... }
+/// ```
+///
+/// Syntax, parameter rules, decorators, and return types mirror [`QueryDecl`]
+/// exactly; the semantic difference is that the SQL body holds **two or more**
+/// statements that are executed atomically (committed together, or all rolled
+/// back on any failure). The LAST statement drives the return value, exactly
+/// as for a multi-statement query body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionDecl {
+    pub name: String,
+    pub params: Vec<ParamDecl>,
+    pub return_type: QueryReturn,
+    pub sql: String,
+    /// The `@...` decorators applied to this transaction, in source order.
+    pub overrides: Vec<ModelOverride>,
+}
+
+impl TransactionDecl {
+    /// The explicit `@target(...)` restriction, if any. Transactions cannot
+    /// carry `@no_codegen` (rejected at parse time), so a `None` restriction
+    /// means the transaction is emitted for every target.
+    pub fn target_restriction(&self) -> Option<&[Target]> {
+        target_restriction(&self.overrides)
+    }
+}
+
 /// A single query parameter, e.g. `$id: UUID`. Parameter names are `camelCase`
 /// (the leading `$` is not part of the identifier).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +344,16 @@ pub enum QueryReturn {
     Optional(TypeRef),
     /// `-> T[]` — zero or more values.
     Many(TypeRef),
+}
+
+impl QueryReturn {
+    /// The `TypeRef` of the return value, if this is not an `Exec` query.
+    pub fn ty_ref(&self) -> Option<&TypeRef> {
+        match self {
+            QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => Some(ty),
+            QueryReturn::Exec => None,
+        }
+    }
 }
 
 /// A type reference. Primitives are strictly case-sensitive `PascalCase`

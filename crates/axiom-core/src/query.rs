@@ -78,6 +78,18 @@ pub struct QueryDefinition<'a> {
     pub params: Vec<QueryParam<'a>>,
     pub return_type: QueryReturnType<'a>,
     pub validations: BTreeMap<Cow<'a, str>, Vec<ValidationRule<'a>>>,
+    /// Whether this definition originated from a `query` or `transaction`
+    /// declaration, so consumers (LSP, check) can treat them differently.
+    pub kind: DeclKind,
+}
+
+/// The kind of top-level `.axm` declaration that produced a
+/// [`QueryDefinition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeclKind {
+    #[default]
+    Query,
+    Transaction,
 }
 
 /// All queries parsed from one or more `.axm` files.
@@ -229,6 +241,104 @@ impl<'a> QueryDefinition<'a> {
             .map(|i| i + 1)
     }
 
+    /// Split a SQL body into top-level statements at `;`, dropping empty
+    /// segments. Markers, quoted identifiers, dollar-quoted strings, and
+    /// comments are respected, so a `;` inside a literal never splits a
+    /// statement. Each returned statement is trimmed.
+    ///
+    /// This is the statement boundary used by transactions (each statement
+    /// executes on the driver's transaction handle) and by `axiom check` to
+    /// enforce the query/transaction statement-count rules.
+    pub fn split_statements(sql: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes = sql.as_bytes();
+        let n = bytes.len();
+        let mut i = 0usize;
+        let mut segment = 0usize;
+
+        macro_rules! push_segment {
+            ($end:expr) => {{
+                let trimmed = sql[segment..$end].trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+            }};
+        }
+
+        while i < n {
+            let c = sql[i..].chars().next().unwrap_or('\0');
+            match c {
+                '\'' | '"' => i = Self::skip_quote(bytes, i, c as u8),
+                '$' => {
+                    if let Some(end) = Self::dollar_quote_end(sql, i) {
+                        i = end;
+                    } else {
+                        i += 1;
+                    }
+                }
+                '-' if sql[i..].starts_with("--") => {
+                    while i < n && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                '/' if sql[i..].starts_with("/*") => match sql[i + 2..].find("*/") {
+                    Some(off) => i = i + 2 + off + 2,
+                    None => i = n,
+                },
+                ';' => {
+                    push_segment!(i);
+                    segment = i + 1;
+                    i += 1;
+                }
+                _ => i += c.len_utf8(),
+            }
+        }
+        if segment < n {
+            push_segment!(n);
+        }
+        out
+    }
+
+    /// Skip over a single or double-quoted string body starting at `open`
+    /// (the index of the opening quote), returning the offset just past the
+    /// closing quote. Standard SQL doubling (`''`) and backslash escapes are
+    /// handled.
+    fn skip_quote(bytes: &[u8], open: usize, quote: u8) -> usize {
+        let n = bytes.len();
+        let mut i = open + 1;
+        while i < n {
+            if bytes[i] == b'\\' && i + 1 < n {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == quote {
+                if i + 1 < n && bytes[i + 1] == quote {
+                    i += 2;
+                    continue;
+                }
+                return i + 1;
+            }
+            i += 1;
+        }
+        n
+    }
+
+    /// For a `$` at `open`, return the offset just past the matching closing
+    /// `$tag$ ... $tag$` when this starts a dollar-quoted string; `None` when
+    /// it is a placeholder (`$1`, `$name`).
+    fn dollar_quote_end(sql: &str, open: usize) -> Option<usize> {
+        let rest = &sql[open + 1..];
+        let close_ix = rest.find('$')?;
+        let tag = &rest[..close_ix];
+        if !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        let delimiter_end = open + 1 + close_ix + 1;
+        let closer = format!("${tag}$");
+        let pos = sql[delimiter_end..].find(&closer)?;
+        Some(delimiter_end + pos + closer.len())
+    }
+
     /// The SQL body with every named placeholder rewritten to a positional
     /// `$N` marker, where `N` is the parameter's declared index, so the body
     /// is valid for drivers that only understand positional placeholders.
@@ -288,6 +398,7 @@ mod tests {
                 .collect(),
             return_type: QueryReturnType::Exec,
             validations: BTreeMap::new(),
+            kind: DeclKind::Query,
         }
     }
 
@@ -349,5 +460,37 @@ mod tests {
         );
         assert_eq!(q.param_index("email"), Some(1));
         assert_eq!(q.to_driver_sql(), "SELECT id FROM users WHERE email = $1");
+    }
+
+    #[test]
+    fn split_statements_respects_literals_and_comments() {
+        let stmts = QueryDefinition::split_statements(
+            "SELECT ';' AS semicolon; -- ; not a split\nUPDATE t SET y = 2; /* ; */ SELECT 3;",
+        );
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(stmts[0], "SELECT ';' AS semicolon");
+        // Semicolons inside line and block comments never split; a segment is a
+        // raw slice, so a leading comment is preserved verbatim.
+        assert!(stmts[1].ends_with("UPDATE t SET y = 2"));
+        assert!(stmts[2].ends_with("SELECT 3"));
+    }
+
+    #[test]
+    fn split_statements_handles_dollar_quotes_and_dropped_empties() {
+        let stmts = QueryDefinition::split_statements(
+            "DO $$ BEGIN SELECT 1; SELECT 2; END $$; SELECT 3;;",
+        );
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0], "DO $$ BEGIN SELECT 1; SELECT 2; END $$");
+        assert_eq!(stmts[1], "SELECT 3");
+    }
+
+    #[test]
+    fn split_statements_trailing_semicolon_keeps_body() {
+        let stmts = QueryDefinition::split_statements("SELECT 1;");
+        assert_eq!(stmts, vec!["SELECT 1"]);
+
+        let stmts = QueryDefinition::split_statements("UPDATE a SET x = 1; UPDATE b SET y = 2;");
+        assert_eq!(stmts.len(), 2);
     }
 }

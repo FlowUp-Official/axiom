@@ -827,6 +827,7 @@ const IS_ALPHANUMERIC_HELPER: &str = r#"fn is_alphanumeric(value: &str) -> bool 
 mod tests {
     use super::*;
     use crate::catalog::{ColumnSchema, TableSchema};
+    use crate::query::DeclKind;
     use std::borrow::Cow;
 
     fn no_queries() -> QueryCatalog<'static> {
@@ -916,6 +917,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            kind: DeclKind::Query,
         };
         let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains("fn regex_is_match"));
@@ -956,6 +958,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            kind: DeclKind::Query,
         };
         QueryCatalog { queries: vec![q] }
     }
@@ -995,6 +998,7 @@ mod tests {
             }],
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(out.contains(") -> Result<(), Box<dyn std::error::Error>> {"));
@@ -1021,6 +1025,7 @@ mod tests {
             }],
             return_type: QueryReturnType::Exec,
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_rust(&TableCatalog::default(), &QueryCatalog { queries: vec![q] });
         assert!(
@@ -1042,6 +1047,7 @@ mod tests {
             }],
             return_type: QueryReturnType::Single(Cow::Borrowed("users")),
             validations: Default::default(),
+            kind: DeclKind::Query,
         };
         let out = generate_rust(
             &TableCatalog { tables: vec![t] },

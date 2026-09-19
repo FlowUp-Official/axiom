@@ -181,6 +181,9 @@ impl OutputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TypeScriptOutput {
     pub path: PathBuf,
+    /// Emit `// @ts-nocheck` at the top of the generated file.
+    #[serde(default)]
+    pub suppress_type_errors: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -281,6 +284,7 @@ impl AxiomConfig {
                     "api".to_string(),
                     OutputConfig::TypeScript(TypeScriptOutput {
                         path: PathBuf::from("./gen/api.ts"),
+                        suppress_type_errors: false,
                     }),
                 ),
                 (
@@ -380,6 +384,29 @@ mod tests {
     fn valid_config_passes_json_schema_validation() {
         let value = valid_config();
         assert_eq!(validate_config_json(&value), Ok(()));
+    }
+
+    #[test]
+    fn suppress_type_errors_defaults_to_false() {
+        let value = valid_config();
+        let cfg: AxiomConfig = serde_json::from_value(value).unwrap();
+        let ts = match &cfg.outputs["api"] {
+            OutputConfig::TypeScript(ts) => ts,
+            _ => panic!("expected typescript output"),
+        };
+        assert!(!ts.suppress_type_errors);
+    }
+
+    #[test]
+    fn suppress_type_errors_parses_when_true() {
+        let mut value = valid_config();
+        value["outputs"]["api"]["suppress_type_errors"] = true.into();
+        let cfg: AxiomConfig = serde_json::from_value(value).unwrap();
+        let ts = match &cfg.outputs["api"] {
+            OutputConfig::TypeScript(ts) => ts,
+            _ => panic!("expected typescript output"),
+        };
+        assert!(ts.suppress_type_errors);
     }
 
     #[test]

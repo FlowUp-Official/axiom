@@ -271,7 +271,7 @@ async fn run_generate(
         .outputs
         .iter()
         .map(|(name, output)| match output {
-            OutputConfig::TypeScript(_) => {
+            OutputConfig::TypeScript(ts) => {
                 let mut code = generate_typescript(&catalog, &QueryCatalog::default());
                 if let Some(registry) = &model_registry {
                     code.push_str(&generate_typescript_models_with_options(
@@ -279,6 +279,9 @@ async fn run_generate(
                         &catalog,
                         &validation_options,
                     ));
+                }
+                if ts.suppress_type_errors {
+                    code.insert_str(0, "// @ts-nocheck\n");
                 }
                 (name.clone(), code)
             }

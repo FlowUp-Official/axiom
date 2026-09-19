@@ -21,7 +21,7 @@ use std::path::Path;
 
 use crate::axm::ast::{
     AnnotatedType, Literal, ModelDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target,
-    TypeRef,
+    TransactionDecl, TypeRef,
 };
 use crate::axm::resolver::{ModelRegistry, ResolvedModel};
 use crate::catalog::{TableCatalog, TableSchema};
@@ -138,6 +138,22 @@ pub(crate) fn emit_plan(
             }
             added |= pull_in_no_codegen(registry, &deps, &mut emitted);
         }
+        for resolved in &registry.transactions {
+            if !transaction_emitted(&resolved.transaction, target) {
+                continue;
+            }
+            let mut deps = BTreeSet::new();
+            for param in &resolved.transaction.params {
+                collect_model_deps(registry, &resolved.path, &param.ty, &mut deps);
+            }
+            match &resolved.transaction.return_type {
+                QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                    collect_model_deps(registry, &resolved.path, ty, &mut deps);
+                }
+                QueryReturn::Exec => {}
+            }
+            added |= pull_in_no_codegen(registry, &deps, &mut emitted);
+        }
 
         if !added {
             break;
@@ -165,6 +181,15 @@ pub(crate) fn query_emitted(query: &QueryDecl, target: Target) -> bool {
     query.target_restriction().is_none_or(|ts| ts.contains(&target))
 }
 
+/// Whether a transaction's `@target(...)` restriction includes `target`.
+/// Transactions carry no `@no_codegen`, so an unrestricted transaction is
+/// emitted everywhere.
+pub(crate) fn transaction_emitted(transaction: &TransactionDecl, target: Target) -> bool {
+    transaction
+        .target_restriction()
+        .is_none_or(|ts| ts.contains(&target))
+}
+
 /// The canonical names of every model emitted for `target`, mirroring
 /// [`emit_plan`]. Includes `@no_codegen` models pulled in by a reference, and
 /// excludes models whose `@target(...)` restriction omits `target`.
@@ -182,6 +207,12 @@ pub fn emitted_model_names(registry: &ModelRegistry, target: Target) -> BTreeSet
 /// for every target).
 pub fn query_emitted_for(query: &QueryDecl, target: Target) -> bool {
     query_emitted(query, target)
+}
+
+/// Whether `transaction` is emitted for `target` (an unrestricted transaction is
+/// emitted for every target).
+pub fn transaction_emitted_for(transaction: &TransactionDecl, target: Target) -> bool {
+    transaction_emitted(transaction, target)
 }
 
 /// Add any `@no_codegen` model referenced by `deps` to `emitted`. Returns true
@@ -345,6 +376,20 @@ pub(crate) fn collect_uses(
             QueryReturn::Exec => {}
         }
     }
+    for resolved in &registry.transactions {
+        if !transaction_emitted(&resolved.transaction, target) {
+            continue;
+        }
+        for param in &resolved.transaction.params {
+            uses.add_type(&param.ty);
+        }
+        match &resolved.transaction.return_type {
+            QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
+                uses.add_type(ty);
+            }
+            QueryReturn::Exec => {}
+        }
+    }
     uses
 }
 
@@ -391,6 +436,12 @@ pub(crate) struct EffectiveField {
     /// lookup. For declared fields this is the declared name; for unrefined
     /// database columns it is the camelCase form.
     pub emitted_name: String,
+    /// The original database column name (snake_case) for fields that
+    /// originate from a table column. When this is set, the `record[key]`
+    /// lookup in the TS coerce function should use this name instead of
+    /// `emitted_name`, because the `postgres` JS driver returns object keys
+    /// matching the raw database column names.
+    pub db_column: Option<String>,
     pub annotated: AnnotatedType,
     pub optional: bool,
     pub default: Option<Literal>,
@@ -461,6 +512,7 @@ pub(crate) fn effective_fields(
                 }
                 out.push(EffectiveField {
                     emitted_name: field.name.clone(),
+                    db_column: Some(column.name.to_string()),
                     annotated,
                     optional: field.optional || column.nullable,
                     default: field.default.clone(),
@@ -474,6 +526,7 @@ pub(crate) fn effective_fields(
                 };
                 out.push(EffectiveField {
                     emitted_name: db_name,
+                    db_column: Some(column.name.to_string()),
                     annotated: AnnotatedType::new(base),
                     optional: column.nullable,
                     default: None,
@@ -487,6 +540,7 @@ pub(crate) fn effective_fields(
             }
             out.push(EffectiveField {
                 emitted_name: field.name.clone(),
+                db_column: None,
                 annotated: inline_annotated(registry, path, &field.ty),
                 optional: field.optional,
                 default: field.default.clone(),
@@ -500,6 +554,7 @@ pub(crate) fn effective_fields(
         .iter()
         .map(|field| EffectiveField {
             emitted_name: field.name.clone(),
+            db_column: None,
             annotated: inline_annotated(registry, path, &field.ty),
             optional: field.optional,
             default: field.default.clone(),
