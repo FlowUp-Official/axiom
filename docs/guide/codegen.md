@@ -17,6 +17,10 @@ A TypeScript module that pairs with the `postgres` driver:
   a `.axm` file, taking the `Sql` client and a typed params object. Positional
   (`$1`) and named (`$email`) placeholders are rewritten to postgres.js
   parameter syntax, and params are validated before the query executes.
+- **Transaction functions** — one `export async function` per `transaction`
+  declaration. Each body runs inside `sql.begin(async (tx) => { ... })`; the
+  function returns the result of the last statement and rolls back automatically
+  on any error.
 
 Declarations flagged `@target("rust")` (models **or** queries) are skipped by
 the TypeScript generator — a filtered-out query emits neither its function nor
@@ -59,6 +63,11 @@ A Rust module that pairs with `tokio-postgres`:
   file, taking `&tokio_postgres::Client` and a typed params struct. Parameter
   validation runs before the query executes; params are bound as text so
   Postgres coerces them to the target column types at runtime.
+- **Transaction functions** — one `pub async fn` per `transaction` declaration.
+  Each body acquires a `tokio_postgres::Transaction` via
+  `client.transaction().await?`, executes every statement against it, commits on
+  success with `txn.commit().await?`, and rolls back with `txn.rollback()` on
+  any error.
 
 Declarations flagged `@target("typescript")` (models **or** queries) are
 skipped by the Rust generator; models flagged `@no_codegen` get the `pub
@@ -95,7 +104,9 @@ pub async fn get_user(
   per target in both generators; `@no_codegen` (models only) suppresses the
   standalone parse API; `@parse` is a no-op marker; `@safeParse("first")` /
   `@safeParse("all")` (models only) select fail-fast vs. collect-all error
-  handling for the standalone parse API. Models referenced only by emitted
+  handling for the standalone parse API. Transactions accept the same
+  `@target(...)` decorator as queries; `@no_codegen` and `@safeParse(...)` are
+  only valid on models. Models referenced only by emitted
   declarations are pulled in with just their type and coercion logic.
 - **Only what you use** — validation helpers (e.g. regex presets for email/UUID)
   are emitted lazily, so unused rules do not bloat the output.

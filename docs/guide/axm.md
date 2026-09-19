@@ -2,8 +2,9 @@
 
 `.axm` files layer a typed application contract on top of your SQL schema.
 A file contains `import`s, `type` aliases, `model` declarations, and `query`
-declarations. Everything is compiled into the generated TypeScript and Rust
-clients as real, runnable code — no runtime config, no duplicated logic.
+and `transaction` declarations. Everything is compiled into the generated
+TypeScript and Rust clients as real, runnable code — no runtime config, no
+duplicated logic.
 
 Identifiers are **strictly case-sensitive**: `User` and `user` are distinct
 names. Primitive types are `PascalCase` keywords (`String`, `UUID`, `Int`, `...`),
@@ -73,11 +74,12 @@ model User extends select<users> {
 
 ## Model decorators
 
-A model or query may be preceded by `@` decorators that override how **that one
-declaration** is generated. They apply to `model` and `query` declarations
-only, never to `type` aliases or imports. `@target(...)` works for both models
-and queries; `@no_codegen`, `@parse`, and `@safeParse(...)` apply to models
-only (using any of them on a query is a parse error).
+A model, query, or transaction may be preceded by `@` decorators that override
+how **that one** declaration is generated. They apply to `model`, `query`, and
+`transaction` declarations only, never to `type` aliases or imports.
+`@target(...)` works for models, queries, and transactions; `@no_codegen`,
+`@parse`, and `@safeParse(...)` apply to models only (using any of them on a
+query or transaction is a parse error).
 
 ### `@target(...)` — restrict code generation
 
@@ -273,6 +275,58 @@ block.
 See [Query Functions](/guide/query-functions) for the full contract syntax,
 placeholder rules, and verification.
 
+## Transactions
+
+A `transaction` declaration groups multiple SQL statements into a single
+database transaction. The body uses the same syntax as a `query` body — a
+brace-balanced SQL snippet — but every statement runs inside one transaction
+that is committed on success and rolled back on any error:
+
+```axm
+transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
+  UPDATE accounts SET balance = balance - $amount WHERE id = $from;
+  UPDATE accounts SET balance = balance + $amount WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}
+```
+
+### Return contract
+
+A `transaction` follows the same return contracts as a [query](#queries):
+
+| Declaration | Contract | Generated client |
+| ----------- | -------- | ---------------- |
+| *(no `->`)* | Execution; no rows | `Promise<void>` / `Result<(), _>` |
+| `-> T`      | Exactly one row | `T \| null` / `Option<T>` |
+| `-> T?`     | Zero or one row  | `T \| null` / `Option<T>` |
+| `-> T[]`    | Zero or more rows | `T[]` / `Vec<T>` |
+
+The contract applies to the **last** statement in the body — the result set a
+caller receives. Statements before the last are executed against the
+transaction handle and must be command statements (`INSERT`/`UPDATE`/`DELETE`);
+they do not produce return rows.
+
+### Transaction vs. query decorators
+
+Transactions accept the same decorator set as queries:
+
+- `@target("typescript", "rust")` — restricts the generated function to the
+  named targets (same semantics as on queries).
+- `@parse` — no-op marker (same semantics as on queries).
+- `@safeParse("first")` / `@safeParse("all")` — only meaningful on `model`
+  declarations; using them on a transaction is a parse error.
+- `@no_codegen` — only meaningful on models; using it on a transaction is a
+  parse error.
+
+### Generated code shape
+
+**TypeScript:** each transaction becomes an `export async function` that calls
+`sql.begin(async (tx) => { ... })`, returning the last statement's result.
+
+**Rust:** each transaction becomes a `pub async fn` that calls
+`client.transaction().await?`, executes each statement against the `txn` handle,
+and calls `txn.commit().await?` on success or `txn.rollback().await` on error.
+
 ## Resolution
 
 On every command, `.axm` files are parsed and *resolved*: imports are linked,
@@ -281,3 +335,6 @@ checked. Query return types are resolved against the full catalog — a table
 declared in `schema.sql` is a valid return type even though it is invisible to
 `.axm` import resolution. Errors surface as `check.model-*` diagnostics from
 `axiom check` and inline in the editor via `axiom-lsp`.
+
+A `transaction` block shares the same SQL parsing and contract semantics as
+a `query`; both must honor the declared return contract.

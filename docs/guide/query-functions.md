@@ -21,6 +21,10 @@ query ListUsers($limit: Int) -> User[] {
 Axiom turns each `query` declaration into a typed, async function in the
 generated client based on the SQL body and the declared return contract.
 
+A `transaction` declaration is a multi-statement variant: its body runs
+inside a single database transaction (committed on success, rolled back on
+error). See [Transactions](/guide/axm#transactions) for the full contract.
+
 ## Query syntax
 
 ```text

@@ -1,9 +1,9 @@
 # `axiom lint`
 
 `axiom lint` runs a set of static-analysis rules over your `.axm` models and
-SQL schema inputs — including the SQL body of every `query` declaration — and
-reports problems before they reach the database or your generated clients.
-Warnings do not fail the command; errors do.
+SQL schema inputs — including the SQL body of every `query` and `transaction`
+declaration — and reports problems before they reach the database or your
+generated clients. Warnings do not fail the command; errors do.
 
 ```sh
 axiom lint                      # run every configured rule
@@ -23,7 +23,7 @@ Rules are grouped by the file type they analyze. Their names are stable and can
 be passed individually to `--rules`.
 
 SQL rules run over `.sql` schema inputs and the SQL body of every `query`
-declaration in a `.axm` file:
+and `transaction` declaration in a `.axm` file:
 
 | Rule | Severity | What it reports |
 | ---- | -------- | --------------- |
@@ -36,13 +36,13 @@ declaration in a `.axm` file:
 
 | Rule | Severity | What it reports |
 | ---- | -------- | --------------- |
-| `unused-import` | warning | An `import` whose names are never referenced by a model, field, parameter, or return type; aliased imports are matched by the name written at the use site |
-| `unused-type-alias` | warning | A `type` alias that is never referenced by any model, field, query, or other alias anywhere in the workspace |
-| `dead-model` | warning | A model that is never referenced anywhere in the workspace — by a model field, an import, a query parameter or return type, or a type-alias base (directly or transitively) |
+| `unused-import` | warning | An `import` whose names are never referenced by a model, field, transaction parameter, or return type; aliased imports are matched by the name written at the use site |
+| `unused-type-alias` | warning | A `type` alias that is never referenced by any model, field, query, or transaction anywhere in the workspace |
+| `dead-model` | warning | A model that is never referenced anywhere in the workspace — by a model field, an import, a query or transaction parameter or return type, or a type-alias base (directly or transitively) |
 | `redundant-validator` | warning | A duplicate validator, or a bound strictly weaker than one already established on the same field (e.g. `.min(10) .min(5)`); custom messages are ignored when matching |
 | `unsatisfiable-validator` | warning | Validator combinations no value can satisfy: contradictory numeric bounds (`.min(10) .max(5)`), contradictory length bounds (`.min_length(10) .max_length(5)`), or `.nonempty()` with `.max_length(0)` |
-| `naming-convention` | warning | Models, type aliases, and queries that are not PascalCase, or fields/parameters that are not camelCase; the whole identifier is validated (`user_name` is reported, not just a bad first letter). Quoted field names are exempt |
-| `unused-query-param` | warning | A query parameter that the query's SQL body never references, whether by name (`$email`), position (`$1`), or as a structured-path base (`$input.field`) |
+| `naming-convention` | warning | Models, type aliases, queries, and transactions that are not PascalCase, or fields/parameters that are not camelCase; the whole identifier is validated (`user_name` is reported, not just a bad first letter). Quoted field names are exempt |
+| `unused-query-param` | warning | A query or transaction parameter that the declaration's SQL body never references, whether by name (`$email`), position (`$1`), or as a structured-path base (`$input.field`) |
 
 ## Example
 
