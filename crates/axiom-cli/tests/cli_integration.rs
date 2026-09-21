@@ -443,7 +443,7 @@ fn lint_flags_unused_query_param_and_type_alias() {
     std::fs::write(dir.join("schema.sql"), SCHEMA_SQL).unwrap();
     std::fs::write(
         dir.join("models/models.axm"),
-        "model User { id: UUID }\n\ntype Unused = String\n\nquery get_user($id: UUID, $ghost: String) -> User? {\n  SELECT id FROM users WHERE id = $id\n}\n",
+        "model User { id: UUID }\n\nmodel Unused = String\n\nquery get_user($id: UUID, $ghost: String) -> User? {\n  SELECT id FROM users WHERE id = $id\n}\n",
     )
     .unwrap();
 
@@ -464,8 +464,8 @@ fn lint_flags_unused_query_param_and_type_alias() {
         "stderr should report unused-query-param: {stderr}"
     );
     assert!(
-        stderr.contains("lint.unused-type-alias"),
-        "stderr should report unused-type-alias: {stderr}"
+        stderr.contains("lint.dead-model"),
+        "stderr should report dead-model: {stderr}"
     );
 }
 
@@ -542,7 +542,7 @@ fn lint_naming_convention_flags_full_identifier_violations() {
     let dir = fixture_dir("run_lint_naming_convention");
     write_lint_fixture(
         &dir,
-        "type user_name = String\nmodel User {\n  id: UUID\n  user_Name: String\n}\n",
+        "model user_name = String\nmodel User {\n  id: UUID\n  user_Name: String\n}\n",
     );
 
     let output = run_lint(&dir, &["naming-convention"]);

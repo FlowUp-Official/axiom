@@ -5,11 +5,12 @@
 //!
 //! ```text
 //! file           := item*
-//! item           := override* (model | query | transaction) | import | type_decl
+//! item           := override* (model | query | transaction) | import
 //! import         := "import" "{" name ("," name)* "}" "from" string [";"]
 //! name           := ident ("as" ident)?
-//! type_decl      := "type" ident "=" annotated_type [";"]
-//! model          := "model" ident ("extends" "select<" db_ident ">")? "{" field* "}"
+//! model          := "model" ident model_body
+//! model_body     := "=" annotated_type [";"]
+//!                  | ("extends" "select<" db_ident ">")? "{" field* "}"
 //! override       := "@" ident ("(" word ("," word)* ")")?
 //! word           := string | ident
 //! field          := (ident | string) "?"? ":" annotated_type ("=" literal)?
@@ -23,9 +24,9 @@
 //!                  | "UUID" | "Date" | "DateTime" | "Json" | "Bytes" | ident
 //! ```
 //!
-//! Semicolons are **optional** on `import` and `type` declarations. A `;`
-//! after the closing `}` of a `model`, `query`, or `transaction` block is never
-//! accepted. Inside `query {}` and `transaction {}` blocks, multiple SQL
+//! Semicolons are **optional** on `import` and alias-style `model` declarations.
+//! A `;` after the closing `}` of a `model`, `query`, or `transaction` block is
+//! never accepted. Inside `query {}` and `transaction {}` blocks, multiple SQL
 //! statements are separated by `;` (the trailing `;` on the last statement is
 //! optional). The statement-count rules are enforced by `axiom check`: a
 //! `query` body holds exactly one statement, a `transaction` body two or more.
@@ -38,10 +39,12 @@
 //!
 //! Model, query, and transaction decorators: a decoration-eligible declaration
 //! may be preceded by `@target(...)` (restrict codegen to the listed targets,
-//! quoted or bare words), which applies to all three. `@no_codegen` (never emit
-//! a standalone validation API) applies to `model` declarations only and is
-//! rejected on `query`, `transaction`, and `type` declarations. The same is
-//! true of the model-only `@parse` and `@safeParse(...)` decorators. `@target`
+//! quoted or bare words), which applies to all model, query, and transaction
+//! declarations. `@no_codegen` (never emit a standalone validation API)
+//! applies to `model` declarations only and is rejected on `query`,
+//! `transaction`, and alias-style `model` declarations. The same is true of the
+//! model-only `@parse` and `@safeParse(...)` decorators.
+//! `@target`
 //! and `@no_codegen` are mutually exclusive on a model, each decorator may
 //! appear at most once per declaration, and an unknown decorator name or target
 //! is rejected. `@target` accepts either quote style: `@target("typescript",
@@ -63,7 +66,7 @@ type PResult<T> = winnow::ModalResult<T, ContextError>;
 use crate::axm::ast::{
     AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
     ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target, TransactionDecl,
-    Transform, TypeDecl, TypeRef,
+    Transform, TypeRef,
 };
 
 /// A failed `.axm` parse with a human-readable message.
@@ -495,22 +498,24 @@ fn imported_name(input: &mut &str) -> PResult<ImportedName> {
     Ok(ImportedName { name, alias })
 }
 
-fn type_decl(input: &mut &str) -> PResult<TypeDecl> {
-    kw("type").parse_next(input)?;
-    ws(input)?;
-    let name = ident.parse_next(input)?;
-    ws(input)?;
-    '='.parse_next(input)?;
-    ws(input)?;
-    let ty = annotated_type.parse_next(input)?;
-    opt(';').parse_next(input)?;
-    Ok(TypeDecl { name, ty })
-}
-
 fn model_decl(input: &mut &str) -> PResult<ModelDecl> {
     kw("model").parse_next(input)?;
     ws(input)?;
     let name = ident.parse_next(input)?;
+
+    // Alias form: `model Name = <type>`
+    if opt((ws, '='.map(|c: char| c))).parse_next(input)?.is_some() {
+        ws(input)?;
+        let ty = annotated_type.parse_next(input)?;
+        opt(';').parse_next(input)?;
+        return Ok(ModelDecl {
+            name,
+            source: None,
+            fields: Vec::new(),
+            alias: Some(ty),
+            overrides: Vec::new(),
+        });
+    }
 
     let source = opt((ws, kw("extends"), ws, kw("select"), '<', db_ident, '>'))
         .parse_next(input)?
@@ -534,6 +539,7 @@ fn model_decl(input: &mut &str) -> PResult<ModelDecl> {
         name,
         source,
         fields,
+        alias: None,
         overrides: Vec::new(),
     })
 }
@@ -913,7 +919,6 @@ fn scan_sql_body(input: &mut &str) -> PResult<String> {
 
 enum Item {
     Import(ImportStmt),
-    Type(TypeDecl),
     Model(ModelDecl),
     Query(QueryDecl),
     Transaction(TransactionDecl),
@@ -922,13 +927,12 @@ enum Item {
 /// A single top-level declaration, optionally preceded by decorators. A
 /// decorator (or decorators) may precede a `model`, `query`, or `transaction`
 /// declaration; `@no_codegen` is rejected on `query` and `transaction` (it only
-/// applies to `model`), and decorators cannot decorate a `type` or `import`.
+/// applies to `model`), and decorators cannot decorate an `import`.
 fn item(input: &mut &str) -> PResult<Item> {
     let overrides: Vec<ModelOverride> = repeat(0.., model_override).parse_next(input)?;
     if overrides.is_empty() {
         alt((
             import_stmt.map(Item::Import),
-            type_decl.map(Item::Type),
             model_decl.map(Item::Model),
             query_decl.map(Item::Query),
             transaction_decl.map(Item::Transaction),
@@ -990,14 +994,12 @@ fn axm_file(input: &mut &str) -> PResult<AxmFile> {
     let items: Vec<Item> = repeat(0.., terminated(item, ws)).parse_next(input)?;
 
     let mut imports = Vec::new();
-    let mut types = Vec::new();
     let mut models = Vec::new();
     let mut queries = Vec::new();
     let mut transactions = Vec::new();
     for item in items {
         match item {
             Item::Import(i) => imports.push(i),
-            Item::Type(t) => types.push(t),
             Item::Model(m) => models.push(m),
             Item::Query(q) => queries.push(q),
             Item::Transaction(t) => transactions.push(t),
@@ -1005,7 +1007,6 @@ fn axm_file(input: &mut &str) -> PResult<AxmFile> {
     }
     Ok(AxmFile {
         imports,
-        types,
         models,
         queries,
         transactions,
@@ -1178,10 +1179,7 @@ model User extends select<users> {
         assert!(err.contains("`@parse` only applies to `model`"), "{err}");
         let err = parse_err("@safeParse(\"first\")\nquery Log($msg: String) { SELECT $msg }");
         assert!(err.contains("`@safeParse` only applies to `model`"), "{err}");
-        parse_err("@no_codegen\ntype Email = String;");
         parse_err("@target(\"rust\")\nimport { User } from \"./users\";");
-        let err = parse_err("@target(\"rust\")\ntype Email = String;");
-        assert!(err.contains("must precede a `model`"), "{err}");
     }
 
     #[test]
@@ -1369,19 +1367,20 @@ model User extends select<users> {
     fn parses_type_alias_declaration() {
         let file = parse(
             r#"
-type Email = String.email().max_length(320);
-type Username = String
+model Email = String.email().max_length(320);
+model Username = String
     .min_length(3)
     .max_length(32);
 "#,
         );
-        assert_eq!(file.types.len(), 2);
-        assert_eq!(file.types[0].name, "Email");
-        assert_eq!(file.types[0].ty.base, TypeRef::String);
-        assert_eq!(file.types[0].ty.rules.len(), 2);
-        assert_eq!(file.types[1].name, "Username");
-        assert_eq!(file.types[1].ty.rules.len(), 2);
-        assert_eq!(file.types[1].ty.rules[0], Rule::MinLength(3, None));
+        assert_eq!(file.models.len(), 2);
+        assert_eq!(file.models[0].name, "Email");
+        assert!(file.models[0].is_alias());
+        assert_eq!(file.models[0].alias.as_ref().unwrap().base, TypeRef::String);
+        assert_eq!(file.models[0].alias.as_ref().unwrap().rules.len(), 2);
+        assert_eq!(file.models[1].name, "Username");
+        assert_eq!(file.models[1].alias.as_ref().unwrap().rules.len(), 2);
+        assert_eq!(file.models[1].alias.as_ref().unwrap().rules[0], Rule::MinLength(3, None));
     }
 
     #[test]
@@ -1522,19 +1521,19 @@ query CreateUser($id: BigInt, $tags: String[]) -> User {
         let file = parse(
             r#"
 import { User, Email as ContactEmail } from "./users"
-type Email = String.email().max_length(320)
-type NonEmptyString = String.nonempty().trim()
+model Email = String.email().max_length(320)
+model NonEmptyString = String.nonempty().trim()
 import { Address } from "./geo";
-type UserId = BigInt;
+model UserId = BigInt;
 "#,
         );
         assert_eq!(file.imports.len(), 2);
         assert_eq!(file.imports[0].source, "./users");
         assert_eq!(file.imports[1].source, "./geo");
-        assert_eq!(file.types.len(), 3);
-        assert_eq!(file.types[0].name, "Email");
-        assert_eq!(file.types[1].name, "NonEmptyString");
-        assert_eq!(file.types[2].name, "UserId");
+        assert_eq!(file.models.len(), 3);
+        assert_eq!(file.models[0].name, "Email");
+        assert_eq!(file.models[1].name, "NonEmptyString");
+        assert_eq!(file.models[2].name, "UserId");
     }
 
     #[test]
@@ -1673,8 +1672,8 @@ query GetUser($id: UUID) -> User? { SELECT * FROM users WHERE id = $id; }
         let file = parse(
             r#"
 import { User, Email as ContactEmail } from "./users"
-type Email = String.email().max_length(320)
-type NonEmptyString = String.nonempty().trim()
+model Email = String.email().max_length(320)
+model NonEmptyString = String.nonempty().trim()
 model User extends select<users> {
     id: UUID,
     email: String.email().max_length(320),
@@ -1693,8 +1692,7 @@ query ListUsers($limit: Int) -> User[] {
 "#,
         );
         assert_eq!(file.imports.len(), 1);
-        assert_eq!(file.types.len(), 2);
-        assert_eq!(file.models.len(), 1);
+        assert_eq!(file.models.len(), 3);
         assert_eq!(file.queries.len(), 2);
         // Multi-statement query has two semicolons.
         assert_eq!(file.queries[0].sql.matches(';').count(), 2);
@@ -1801,15 +1799,15 @@ query ListUsers($limit: Int) -> User[] {
         let file = parse(
             r#"
 // This is an Axiom comment
-type Email = String.email(); // trailing comment
+model Email = String.email(); // trailing comment
 // another
 model User extends select<users> {
     email: Email,
 }
 "#,
         );
-        assert_eq!(file.types.len(), 1);
-        assert!(file.models[0].source.is_some());
+        assert_eq!(file.models.len(), 2);
+        assert!(file.models[1].source.is_some());
     }
 
     #[test]
@@ -1824,7 +1822,7 @@ model User extends select<users> {
     fn combined_file_parses() {
         let file = parse(
             r#"
-type Email = String.email().max_length(320);
+model Email = String.email().max_length(320);
 
 model User extends select<users> {
     email: Email,
@@ -1840,8 +1838,7 @@ query ListUsers($limit: Int) -> User[] {
 }
 "#,
         );
-        assert_eq!(file.types.len(), 1);
-        assert_eq!(file.models.len(), 1);
+        assert_eq!(file.models.len(), 2);
         assert_eq!(file.queries.len(), 2);
         assert_eq!(
             file.declarations().collect::<Vec<_>>(),

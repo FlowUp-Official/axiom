@@ -26,7 +26,6 @@ pub fn run(args: LintArgs, config: &AxiomConfig, config_path: &Path) -> Result<i
 
     let mut view = WorkspaceView::empty();
     view.referenced_models = axiom_check::collect_referenced_models(&workspace.model_files);
-    view.referenced_types = axiom_check::collect_referenced_types(&workspace.model_files);
 
     let cache_path = resolve_path(&base, &config.cache.path);
 

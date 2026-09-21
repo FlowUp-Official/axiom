@@ -84,13 +84,14 @@ pub fn generate_typescript_models_with_options(
 
     emit_helpers(&mut out, &uses, fail_fast);
 
-    for resolved in &registry.types {
+    for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
+        let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         emit_type_alias_for(
             &mut out,
             registry,
             &resolved.path,
-            &resolved.ty.name,
-            &resolved.ty.ty,
+            &resolved.model.name,
+            ann,
         );
     }
 
@@ -107,13 +108,14 @@ pub fn generate_typescript_models_with_options(
         );
     }
 
-    for resolved in &registry.types {
+    for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
+        let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         emit_alias_coerce(
             &mut out,
             registry,
             &resolved.path,
-            &resolved.ty.name,
-            &resolved.ty.ty,
+            &resolved.model.name,
+            ann,
         );
     }
 
@@ -1404,7 +1406,7 @@ model User {
     #[test]
     fn recursive_array_validation() {
         let out = generate_typescript_models(
-            &registry("type Address = String .nonempty()\nmodel User {\n  history: Address[]\n}"),
+            &registry("model Address = String .nonempty()\nmodel User {\n  history: Address[]\n}"),
             &no_catalog(),
         );
         assert!(out.contains("history: Address[];"));
@@ -1486,7 +1488,7 @@ model Account {
 
     #[test]
     fn type_aliases_fold_and_emit() {
-        let src = "type Email = String .email() .max_length(320)\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
+        let src = "model Email = String .email() .max_length(320)\nmodel UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(out.contains("export type Email = string;"));
         assert!(out.contains("export type UserId = bigint;"));

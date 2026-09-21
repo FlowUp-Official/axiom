@@ -9,7 +9,7 @@ pub mod runner;
 
 pub use rules::axm::{
     DeadModel, NamingConvention, RedundantValidator, UnusedImport, UnusedQueryParam,
-    UnusedTypeAlias, UnsatisfiableValidator,
+    UnsatisfiableValidator,
 };
 pub use rules::sql::{
     MissingPrimaryKey, MissingWhereClause, SelectStar, UnindexedForeignKey,

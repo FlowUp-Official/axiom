@@ -91,6 +91,9 @@ pub(crate) fn emit_plan(
     let mut public: BTreeSet<String> = BTreeSet::new();
     for resolved in &registry.models {
         let model = &resolved.model;
+        if model.alias.is_some() {
+            continue;
+        }
         let emitted_for_target = match model.target_restriction() {
             Some(targets) => targets.contains(&target),
             None => !model.is_no_codegen(),
@@ -117,9 +120,14 @@ pub(crate) fn emit_plan(
             }
             added |= pull_in_no_codegen(registry, &deps, &mut emitted);
         }
-        for resolved in &registry.types {
+        for resolved in &registry.models {
+            if resolved.model.alias.is_none() {
+                continue;
+            }
             let mut deps = BTreeSet::new();
-            collect_model_deps(registry, &resolved.path, &resolved.ty.ty.base, &mut deps);
+            if let Some(ann) = &resolved.model.alias {
+                collect_model_deps(registry, &resolved.path, &ann.base, &mut deps);
+            }
             added |= pull_in_no_codegen(registry, &deps, &mut emitted);
         }
         for resolved in &registry.queries {
@@ -359,8 +367,10 @@ pub(crate) fn collect_uses(
             uses.add_annotated(&field.annotated);
         }
     }
-    for resolved in &registry.types {
-        uses.add_annotated(&inline_annotated(registry, &resolved.path, &resolved.ty.ty));
+    for resolved in &registry.models {
+        if let Some(ann) = &resolved.model.alias {
+            uses.add_annotated(&inline_annotated(registry, &resolved.path, ann));
+        }
     }
     for resolved in &registry.queries {
         if !query_emitted(&resolved.query, target) {
@@ -587,23 +597,24 @@ fn inline_alias(
     match &ann.base {
         TypeRef::Named(name) => {
             let effective = registry.effective_name(path, name);
-            if let Some(resolved) = registry.type_by_name(effective) {
-                if depth >= MAX_ALIAS_DEPTH {
-                    return ann.clone();
+            if let Some(resolved) = registry.model_by_name(&effective) {
+                if let Some(inner_ann) = &resolved.model.alias {
+                    if depth >= MAX_ALIAS_DEPTH {
+                        return ann.clone();
+                    }
+                    let inner = inline_alias(registry, &resolved.path, inner_ann, depth + 1);
+                    let mut transforms = inner.transforms;
+                    transforms.extend(ann.transforms.iter().cloned());
+                    let mut rules = inner.rules;
+                    rules.extend(ann.rules.iter().cloned());
+                    return AnnotatedType {
+                        base: inner.base,
+                        transforms,
+                        rules,
+                    };
                 }
-                let inner = inline_alias(registry, &resolved.path, &resolved.ty.ty, depth + 1);
-                let mut transforms = inner.transforms;
-                transforms.extend(ann.transforms.iter().cloned());
-                let mut rules = inner.rules;
-                rules.extend(ann.rules.iter().cloned());
-                AnnotatedType {
-                    base: inner.base,
-                    transforms,
-                    rules,
-                }
-            } else {
-                ann.clone()
             }
+            ann.clone()
         }
         TypeRef::Array(inner) => {
             let mut cloned = ann.clone();
@@ -623,19 +634,19 @@ fn inline_element(registry: &ModelRegistry, path: &Path, ty: &TypeRef, depth: us
     match ty {
         TypeRef::Named(name) => {
             let effective = registry.effective_name(path, name);
-            match registry.type_by_name(effective) {
-                Some(resolved) if depth < MAX_ALIAS_DEPTH => {
-                    let inner = inline_alias(registry, &resolved.path, &resolved.ty.ty, depth + 1);
-                    if inner.transforms.is_empty() && inner.rules.is_empty() {
-                        inner.base
-                    } else {
+            if let Some(resolved) = registry.model_by_name(&effective) {
+                if let Some(ann) = &resolved.model.alias {
+                    if depth < MAX_ALIAS_DEPTH {
+                        let inner = inline_alias(registry, &resolved.path, ann, depth + 1);
+                        if inner.transforms.is_empty() && inner.rules.is_empty() {
+                            return inner.base;
+                        }
                         // Rules live on the element; a runtime coerce function
                         // is generated for the alias, so keep the reference.
-                        ty.clone()
                     }
                 }
-                _ => ty.clone(),
             }
+            ty.clone()
         }
         TypeRef::Array(inner) => {
             TypeRef::Array(Box::new(inline_element(registry, path, inner, depth)))
@@ -664,21 +675,22 @@ pub(crate) enum NamedKind {
 /// Classify a written `Named` reference for code emission.
 pub(crate) fn named_kind(registry: &ModelRegistry, path: &Path, name: &str) -> NamedKind {
     let effective = registry.effective_name(path, name);
-    if let Some(resolved) = registry.type_by_name(effective) {
-        let inlined = inline_alias(registry, &resolved.path, &resolved.ty.ty, 0);
-        if inlined.transforms.is_empty() && inlined.rules.is_empty() {
-            let base = if let TypeRef::Named(inline_name) = &inlined.base {
-                // The alias chains to another alias; resolve one final step.
-                resolve_pure(registry, path, inline_name, inlined.base.clone(), 0)
+    if let Some(resolved) = registry.model_by_name(&effective) {
+        if let Some(ann) = &resolved.model.alias {
+            let inlined = inline_alias(registry, &resolved.path, ann, 0);
+            if inlined.transforms.is_empty() && inlined.rules.is_empty() {
+                let base = if let TypeRef::Named(inline_name) = &inlined.base {
+                    resolve_pure(registry, path, inline_name, inlined.base.clone(), 0)
+                } else {
+                    inlined.base
+                };
+                NamedKind::Pure(base)
             } else {
-                inlined.base
-            };
-            NamedKind::Pure(base)
+                NamedKind::AliasFun(effective.to_string())
+            }
         } else {
-            NamedKind::AliasFun(effective.to_string())
+            NamedKind::Model(effective.to_string())
         }
-    } else if registry.model_by_name(effective).is_some() {
-        NamedKind::Model(effective.to_string())
     } else {
         NamedKind::Unknown(effective.to_string())
     }
@@ -692,23 +704,25 @@ fn resolve_pure(
     depth: usize,
 ) -> TypeRef {
     let effective = registry.effective_name(path, written);
-    if let Some(resolved) = registry.type_by_name(effective) {
-        if depth >= MAX_ALIAS_DEPTH {
-            return fallback;
-        }
-        let inlined = inline_alias(registry, &resolved.path, &resolved.ty.ty, 0);
-        if inlined.transforms.is_empty() && inlined.rules.is_empty() {
-            match &inlined.base {
-                TypeRef::Named(next) => {
-                    return resolve_pure(
-                        registry,
-                        &resolved.path,
-                        next,
-                        inlined.base.clone(),
-                        depth + 1,
-                    );
+    if let Some(resolved) = registry.model_by_name(&effective) {
+        if let Some(ann) = resolved.model.alias.as_ref() {
+            if depth >= MAX_ALIAS_DEPTH {
+                return fallback;
+            }
+            let inlined = inline_alias(registry, &resolved.path, ann, 0);
+            if inlined.transforms.is_empty() && inlined.rules.is_empty() {
+                match &inlined.base {
+                    TypeRef::Named(next) => {
+                        return resolve_pure(
+                            registry,
+                            &resolved.path,
+                            next,
+                            inlined.base.clone(),
+                            depth + 1,
+                        );
+                    }
+                    _ => return inlined.base,
                 }
-                _ => return inlined.base,
             }
         }
     }

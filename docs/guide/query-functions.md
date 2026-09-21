@@ -56,7 +56,7 @@ query <Name>($<param>: <Type>, ...) [-> <Return>] {
 | `-> T[]`    | Zero or more rows | `T[]` / `Vec<T>` |
 
 The row type `T` is matched against the SQL catalog (case-insensitive) and the
-linked `.axm` models and type aliases (case-sensitive). `-> users`, `-> Users`,
+linked `.axm` models and model aliases (case-sensitive). `-> users`, `-> Users`,
 and `-> User` all resolve to the canonical type.
 
 ### Placeholders
@@ -78,7 +78,7 @@ syntax, so both styles call one typed function.
 ### Parameter types
 
 Parameters map to the natural type in each generated language (`String`, `Int`,
-`UUID`, ...), and can also reference a model or type alias. They become typed
+`UUID`, ...), and can also reference a model or model alias. They become typed
 struct fields / interfaces validated before the query runs.
 
 ### Multi-statement bodies

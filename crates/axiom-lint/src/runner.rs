@@ -19,7 +19,7 @@ use sqlparser::parser::Parser;
 
 use crate::rules::axm::{
     DeadModel, NamingConvention, RedundantValidator, UnusedImport, UnusedQueryParam,
-    UnusedTypeAlias, UnsatisfiableValidator,
+    UnsatisfiableValidator,
 };
 use crate::rules::sql::{
     MissingPrimaryKey, MissingWhereClause, SelectStar, UnindexedForeignKey,
@@ -28,13 +28,12 @@ use crate::rules::sql::{
 /// Cross-file information that rules may need.
 ///
 /// Populated by the CLI before running: every name referenced anywhere in the
-/// workspace (imports, type-alias bases, model fields, and query parameter and
-/// return types). `referenced_models` drives `dead-model`, and
-/// `referenced_types` drives `unused-type-alias`.
+/// workspace (imports, model field types, type-alias bases, and query parameter
+/// and return types). `referenced_models` drives `dead-model` (which covers both
+/// block models and model aliases, since both share the same liveness set).
 #[derive(Debug, Default)]
 pub struct WorkspaceView {
     pub referenced_models: BTreeSet<String>,
-    pub referenced_types: BTreeSet<String>,
 }
 
 impl WorkspaceView {
@@ -79,7 +78,6 @@ impl LintRunner {
         Self {
             rules: vec![
                 Box::new(UnusedImport),
-                Box::new(UnusedTypeAlias),
                 Box::new(DeadModel),
                 Box::new(RedundantValidator),
                 Box::new(UnsatisfiableValidator),

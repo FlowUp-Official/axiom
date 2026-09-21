@@ -8,7 +8,7 @@ use axiom_core::config::AxiomConfig;
 use axiom_check::workspace::aggregate_hash;
 use axiom_check::{
     Workspace, check_duplicate_fields, check_model_sources, check_models, check_queries,
-    check_schemas, check_target_references, collect_referenced_models, collect_referenced_types,
+    check_schemas, check_target_references, collect_referenced_models,
 };
 
 fn file(path: &str, src: &str) -> (PathBuf, String) {
@@ -354,7 +354,7 @@ fn referenced_models_include_query_returns_params_and_alias_bases() {
         ),
         file(
             "models/b.axm",
-            "type Base = Aliased\ntype Wrapper = Base\n\
+            "model Base = Aliased\nmodel Wrapper = Base\n\
              query Q($p: Parameter) -> Returned? {\n  SELECT id FROM a\n}",
         ),
     ];
@@ -571,12 +571,12 @@ fn reference_within_the_same_target_is_clean() {
 fn type_alias_reference_to_target_excluded_model_is_reported() {
     let files = vec![file(
         "models/models.axm",
-        "@target(\"rust\")\nmodel OnlyRust {\n  x: String\n}\n\ntype Alias = OnlyRust",
+        "@target(\"rust\")\nmodel OnlyRust {\n  x: String\n}\n\nmodel Alias = OnlyRust",
     )];
     let registry = registry_from(&files);
     let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
     assert!(
-        diags.iter().any(|d| d.message.contains("type `Alias`")),
+        diags.iter().any(|d| d.message.contains("model `Alias`")),
         "{diags:?}"
     );
 }
@@ -596,11 +596,11 @@ fn query_reference_to_target_excluded_model_is_reported() {
 }
 
 #[test]
-fn referenced_types_include_fields_aliases_queries_and_imports() {
+fn referenced_models_include_fields_aliases_queries_and_imports() {
     let files = vec![
         file(
             "models/a.axm",
-            "type Email = String\nmodel User {\n  email: Email\n}",
+            "model Email = String\nmodel User {\n  email: Email\n}",
         ),
         file(
             "models/b.axm",
@@ -608,20 +608,20 @@ fn referenced_types_include_fields_aliases_queries_and_imports() {
         ),
         file(
             "models/c.axm",
-            "type Id = String\nquery Get($id: Id) -> Id[] {\n  SELECT id FROM t\n}",
+            "model Id = String\nquery Get($id: Id) -> Id[] {\n  SELECT id FROM t\n}",
         ),
     ];
-    let referenced = collect_referenced_types(&files);
+    let referenced = collect_referenced_models(&files);
     assert!(referenced.contains("Email"), "{referenced:?}");
     assert!(referenced.contains("Id"), "{referenced:?}");
 }
 
 #[test]
-fn unreferenced_type_alias_is_absent_from_referenced_types() {
+fn unreferenced_model_is_absent_from_referenced_models() {
     let files = vec![file(
         "models/a.axm",
-        "type Unused = String\nmodel User {\n  name: String\n}",
+        "model Unused = String\nmodel User {\n  name: String\n}",
     )];
-    let referenced = collect_referenced_types(&files);
+    let referenced = collect_referenced_models(&files);
     assert!(!referenced.contains("Unused"), "{referenced:?}");
 }

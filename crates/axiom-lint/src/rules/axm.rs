@@ -82,9 +82,7 @@ impl LintRule for DeadModel {
                 "lint.dead-model",
                 format!("model `{}` is never referenced", model.name),
             )
-            .with_help(
-                "reference it from a model field, query, type alias, or import, or remove it",
-            );
+            .with_help("reference it from a model field, query, model alias, or import, or remove it");
             if let Some(span) = span {
                 diag = diag.with_span(span);
             }
@@ -207,17 +205,9 @@ impl LintRule for NamingConvention {
                     push_naming(ctx, &mut out, "field", &field.name, "camelCase", span);
                 }
             }
-        }
-        for ty in &file.types {
-            if violates_pascal_case(&ty.name) {
-                push_naming(
-                    ctx,
-                    &mut out,
-                    "type",
-                    &ty.name,
-                    "PascalCase",
-                    decl_name_span(ctx.source, "type", &ty.name),
-                );
+            if let Some(ann) = &model.alias {
+                let _ = ann;
+                // alias models already checked above
             }
         }
         for query in &file.queries {
@@ -231,46 +221,46 @@ impl LintRule for NamingConvention {
                     decl_name_span(ctx.source, "query", &query.name),
                 );
             }
-                 for param in &query.params {
-                     if violates_camel_case(&param.name) {
-                         push_naming(
-                             ctx,
-                             &mut out,
-                             "parameter",
-                             &param.name,
-                             "camelCase",
-                             param_span(ctx.source, &param.name),
-                         );
-                     }
-                 }
-         }
-         for transaction in &file.transactions {
-             if violates_pascal_case(&transaction.name) {
-                 push_naming(
-                     ctx,
-                     &mut out,
-                     "transaction",
-                     &transaction.name,
-                     "PascalCase",
-                     decl_name_span(ctx.source, "transaction", &transaction.name),
-                 );
-             }
-             for param in &transaction.params {
-                 if violates_camel_case(&param.name) {
-                     push_naming(
-                         ctx,
-                         &mut out,
-                         "parameter",
-                         &param.name,
-                         "camelCase",
-                         param_span(ctx.source, &param.name),
-                     );
-                 }
-             }
-         }
-         out
-     }
- }
+            for param in &query.params {
+                if violates_camel_case(&param.name) {
+                    push_naming(
+                        ctx,
+                        &mut out,
+                        "parameter",
+                        &param.name,
+                        "camelCase",
+                        param_span(ctx.source, &param.name),
+                    );
+                }
+            }
+        }
+        for transaction in &file.transactions {
+            if violates_pascal_case(&transaction.name) {
+                push_naming(
+                    ctx,
+                    &mut out,
+                    "transaction",
+                    &transaction.name,
+                    "PascalCase",
+                    decl_name_span(ctx.source, "transaction", &transaction.name),
+                );
+            }
+            for param in &transaction.params {
+                if violates_camel_case(&param.name) {
+                    push_naming(
+                        ctx,
+                        &mut out,
+                        "parameter",
+                        &param.name,
+                        "camelCase",
+                        param_span(ctx.source, &param.name),
+                    );
+                }
+            }
+        }
+        out
+    }
+}
 
 /// Whether `name` is a bare identifier that violates Axiom's PascalCase
 /// convention for models, type aliases, and queries.
@@ -368,10 +358,10 @@ fn param_span(source: &str, name: &str) -> Option<Span> {
 /// alias bases, and query parameters and return types.
 fn collect_named_types(file: &AxmFile) -> Vec<String> {
     let mut names = Vec::new();
-    for ty in &file.types {
-        collect_annotated(&ty.ty, &mut names);
-    }
     for model in &file.models {
+        if let Some(ann) = &model.alias {
+            collect_annotated(ann, &mut names);
+        }
         for field in &model.fields {
             collect_annotated(&field.ty, &mut names);
         }
@@ -489,42 +479,6 @@ fn rule_span(source: &str, field: &str, text: &str) -> Option<Span> {
     Some(Span::new(line_start + rel, line_start + rel + text.len()))
 }
 
-/// Flags `type` aliases that no model, field, query, or other alias references
-/// anywhere in the workspace.
-#[derive(Debug)]
-pub struct UnusedTypeAlias;
-
-impl LintRule for UnusedTypeAlias {
-    fn name(&self) -> &'static str {
-        "unused-type-alias"
-    }
-
-    fn check(&self, ctx: &LintContext<'_>) -> Vec<Diagnostic> {
-        let Some(file) = &ctx.axm else {
-            return Vec::new();
-        };
-
-        let mut out = Vec::new();
-        for ty in &file.types {
-            if ctx.workspace.referenced_types.contains(&ty.name) {
-                continue;
-            }
-            let span = decl_name_span(ctx.source, "type", &ty.name);
-            let mut diag = Diagnostic::warning(
-                ctx.file,
-                "lint.unused-type-alias",
-                format!("type alias `{}` is never referenced", ty.name),
-            )
-            .with_help("reference it from a model, query, or another type alias, or remove it");
-            if let Some(span) = span {
-                diag = diag.with_span(span);
-            }
-            out.push(diag);
-        }
-        out
-    }
-}
-
 /// Flags validator combinations that no value can satisfy: contradictory
 /// numeric bounds (`.min(10) .max(5)`), contradictory length bounds
 /// (`.min_length(10) .max_length(5)`), or `.nonempty()` combined with
@@ -555,10 +509,10 @@ impl LintRule for UnsatisfiableValidator {
                     &mut out,
                 );
             }
-        }
-        for ty in &file.types {
-            let span = decl_name_span(ctx.source, "type", &ty.name);
-            self.check_type(ctx, &ty.ty, span, &format!("type `{}`", ty.name), &mut out);
+            if let Some(ann) = &model.alias {
+                let span = decl_name_span(ctx.source, "model", &model.name);
+                self.check_type(ctx, ann, span, &format!("model `{}`", model.name), &mut out);
+            }
         }
         out
     }
@@ -590,9 +544,8 @@ impl UnsatisfiableValidator {
         }
 
         let mut push = |message: String, help: &str| {
-            let mut diag =
-                Diagnostic::warning(ctx.file, "lint.unsatisfiable-validator", message)
-                    .with_help(help);
+            let mut diag = Diagnostic::warning(ctx.file, "lint.unsatisfiable-validator", message)
+                .with_help(help);
             if let Some(span) = span {
                 diag = diag.with_span(span);
             }
@@ -873,7 +826,7 @@ mod tests {
 
     #[test]
     fn naming_convention_flags_bad_identifiers() {
-        let source = "type email_address = String\ntype ValidEmail = String\nmodel user {\n  Name: String\n  email: String\n}\nquery listUsers($User: Int) -> user[] {\n  SELECT id FROM users\n}\n";
+        let source = "model email_address = String\nmodel ValidEmail = String\nmodel user {\n  Name: String\n  email: String\n}\nquery listUsers($User: Int) -> user[] {\n  SELECT id FROM users\n}\n";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         let diags = NamingConvention.check(&c);
@@ -882,7 +835,7 @@ mod tests {
             .map(|d| d.message.split(' ').next().unwrap())
             .collect();
         assert!(diags.iter().all(|d| d.code == "lint.naming-convention"));
-        assert!(kinds.contains(&"type"), "{kinds:?}");
+        println!("{kinds:?}");
         assert!(kinds.contains(&"model"), "{kinds:?}");
         assert!(kinds.contains(&"query"), "{kinds:?}");
         assert!(kinds.contains(&"field"), "{kinds:?}");
@@ -892,7 +845,7 @@ mod tests {
 
     #[test]
     fn naming_convention_passes_canonical_names() {
-        let source = "type EmailAddress = String\nmodel User {\n  displayName: String\n}\nquery ListUsers($limit: Int) -> User[] {\n  SELECT id FROM users\n}\n";
+        let source = "model EmailAddress = String\nmodel User {\n  displayName: String\n}\nquery ListUsers($limit: Int) -> User[] {\n  SELECT id FROM users\n}\n";
         let ws = WorkspaceView::empty();
         let c = ctx(source, &ws);
         assert!(NamingConvention.check(&c).is_empty());
@@ -907,9 +860,9 @@ mod tests {
 
     #[test]
     fn naming_convention_rejects_underscores_and_wrong_initial_case() {
-        let source = "type user_name = String\n\
-                      type User_name = String\n\
-                      type UserProfile_name = String\n\
+        let source = "model user_name = String\n\
+                      model User_name = String\n\
+                      model UserProfile_name = String\n\
                       model user {\n  ok: String\n}\n\
                       model User {\n  user_Name: String\n}\n\
                       query userName() {\n  SELECT id FROM users\n}";
@@ -935,13 +888,16 @@ mod tests {
             );
         }
         let spanless: Vec<_> = diags.iter().filter(|d| d.span.is_none()).collect();
-        assert!(spanless.is_empty(), "diagnostics without spans: {spanless:?}");
+        assert!(
+            spanless.is_empty(),
+            "diagnostics without spans: {spanless:?}"
+        );
     }
 
     #[test]
     fn naming_convention_accepts_acronyms_digits_and_camel_case() {
-        let source = "type EmailAddress = String\n\
-                      type UUID = String\n\
+        let source = "model EmailAddress = String\n\
+                      model UUID = String\n\
                       model UserProfile {\n  userName: String\n  user: String\n  user2: String\n}\n\
                       query ListUsers($userId: UUID, $id: String) -> UserProfile[] {\n  SELECT userName FROM users\n}";
         let ws = WorkspaceView::empty();
@@ -957,27 +913,6 @@ mod tests {
         let c = ctx(source, &ws);
         let diags = NamingConvention.check(&c);
         assert!(diags.is_empty(), "{diags:?}");
-    }
-
-    #[test]
-    fn unused_type_alias_is_reported() {
-        let source = "type Email = String\nmodel User {\n  name: String\n}";
-        let ws = WorkspaceView::empty();
-        let c = ctx(source, &ws);
-        let diags = UnusedTypeAlias.check(&c);
-        assert_eq!(diags.len(), 1, "{diags:?}");
-        assert_eq!(diags[0].code, "lint.unused-type-alias");
-        assert!(diags[0].message.contains("Email"));
-        assert!(diags[0].span.is_some());
-    }
-
-    #[test]
-    fn referenced_type_alias_is_not_reported() {
-        let source = "type Email = String\nmodel User {\n  email: Email\n}";
-        let mut ws = WorkspaceView::empty();
-        ws.referenced_types.insert("Email".to_string());
-        let c = ctx(source, &ws);
-        assert!(UnusedTypeAlias.check(&c).is_empty());
     }
 
     #[test]
@@ -1054,7 +989,10 @@ mod tests {
             .iter()
             .map(|d| d.message.split(' ').next().unwrap())
             .collect();
-        assert!(diags.iter().all(|d| d.code == "lint.naming-convention"), "{diags:?}");
+        assert!(
+            diags.iter().all(|d| d.code == "lint.naming-convention"),
+            "{diags:?}"
+        );
         assert!(kinds.contains(&"transaction"), "{kinds:?}");
         assert!(kinds.contains(&"parameter"), "{kinds:?}");
         assert!(diags.iter().all(|d| d.span.is_some()));
@@ -1082,7 +1020,11 @@ mod tests {
         let diags = UnusedQueryParam.check(&c);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].code, "lint.unused-query-param");
-        assert!(diags[0].message.contains("transaction"), "{}", diags[0].message);
+        assert!(
+            diags[0].message.contains("transaction"),
+            "{}",
+            diags[0].message
+        );
         assert!(diags[0].message.contains("ghost"), "{}", diags[0].message);
     }
 

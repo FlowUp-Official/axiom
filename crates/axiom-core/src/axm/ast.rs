@@ -1,32 +1,31 @@
 //! The `.axm` language AST.
 //!
 //! An `.axm` file is a typed application contract layered on top of a database
-//! schema. It may contain `import`s, `type` declarations, `model`
-//! declarations, and `query` declarations. The AST is language-independent and
+//! schema. It may contain `import`s, `model` declarations, `query`
+//! and `transaction` declarations. The AST is language-independent and
 //! strongly typed: rules and transformations are dedicated enum variants
 //! rather than generic string lists, so code generators can rely on structure
 //! instead of parsing names.
 //!
+//! A `model` is either a typed shape with fields (`model User { ... }`) or a
+//! named alias for a refined primitive type (`model Email = String.email()`).
+//! There is no separate "type alias" syntax — aliases are models too.
+//!
 //! Axiom identifiers are strictly case-sensitive. Primitive type names use
-//! `PascalCase` (`String`, `UUID`, `Int`, ...); model, type, and query names
-//! use `PascalCase`; query parameters and fields use `camelCase`. The parser
+//! `PascalCase` (`String`, `UUID`, `Int`, ...), model names use `PascalCase`,
+//! and fields and query parameters use `camelCase`. The parser
 //! never canonicalizes identifiers.
 
 /// A parsed `.axm` source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxmFile {
     pub imports: Vec<ImportStmt>,
-    pub types: Vec<TypeDecl>,
     pub models: Vec<ModelDecl>,
     pub queries: Vec<QueryDecl>,
     pub transactions: Vec<TransactionDecl>,
 }
 
 impl AxmFile {
-    pub fn type_by_name(&self, name: &str) -> Option<&TypeDecl> {
-        self.types.iter().find(|t| t.name == name)
-    }
-
     pub fn model_by_name(&self, name: &str) -> Option<&ModelDecl> {
         self.models.iter().find(|m| m.name == name)
     }
@@ -41,10 +40,9 @@ impl AxmFile {
 
     /// Every top-level declaration name in declaration order.
     pub fn declarations(&self) -> impl Iterator<Item = &str> {
-        self.types
+        self.models
             .iter()
-            .map(|t| t.name.as_str())
-            .chain(self.models.iter().map(|m| m.name.as_str()))
+            .map(|m| m.name.as_str())
             .chain(self.queries.iter().map(|q| q.name.as_str()))
             .chain(self.transactions.iter().map(|t| t.name.as_str()))
     }
@@ -66,14 +64,6 @@ pub struct ImportStmt {
 pub struct ImportedName {
     pub name: String,
     pub alias: Option<String>,
-}
-
-/// A `type <Name> = <annotated type>;` declaration — a reusable, named
-/// refinement of a primitive or existing type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeDecl {
-    pub name: String,
-    pub ty: AnnotatedType,
 }
 
 /// A base type plus the refinement/validation calls chained onto it, e.g.
@@ -99,15 +89,21 @@ impl AnnotatedType {
 
 /// A top-level `model` declaration.
 ///
-/// The canonical database-backed form is:
+/// A model is either a typed shape with fields or a named alias for a refined
+/// primitive/existing type. The two forms are:
 ///
 /// ```text
-/// model User extends select<users> { ... }
+/// model User extends select<users> {
+///   id: UUID
+/// }
+///
+/// model Email = String.email().max_length(320)
 /// ```
 ///
-/// where `select<users>` is a *database-derived source expression* (the
-/// relation's DB identifier, not an Axiom type). Bare models (no `source`)
-/// remain valid as pure application models with no database backing.
+/// The canonical database-backed form uses `extends select<users>` (a
+/// *database-derived source expression* — the relation's DB identifier, not an
+/// Axiom type). Bare models with no `source` remain valid as pure application
+/// models with no database backing. Alias models carry no fields or source.
 ///
 /// A model may be preceded by `@` decorators that override code generation for
 /// just that model, e.g. `@target("typescript")` or `@no_codegen`.
@@ -115,13 +111,22 @@ impl AnnotatedType {
 pub struct ModelDecl {
     pub name: String,
     /// The `select<...>` source expression, when the model is database-backed.
+    /// `None` for bare application models and for alias models.
     pub source: Option<ModelSource>,
     pub fields: Vec<FieldDecl>,
+    /// When `Some`, this model is an alias (`model Email = String.email()`):
+    /// the value is the refined type, and `fields` is always empty.
+    pub alias: Option<AnnotatedType>,
     /// The `@...` decorators applied to this model, in source order.
     pub overrides: Vec<ModelOverride>,
 }
 
 impl ModelDecl {
+    /// Whether this model is an alias (`model Name = <type>`).
+    pub fn is_alias(&self) -> bool {
+        self.alias.is_some()
+    }
+
     /// The explicit `@target(...)` restriction, if any.
     pub fn target_restriction(&self) -> Option<&[Target]> {
         target_restriction(&self.overrides)

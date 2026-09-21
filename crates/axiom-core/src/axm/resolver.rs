@@ -3,8 +3,8 @@
 //! The resolver:
 //!
 //! * parses every source file,
-//! * detects duplicate names (models/types share one namespace; queries and
-//!   transactions share their own function namespace),
+//! * detects duplicate names (models and aliases share one namespace; queries
+//!   and transactions share their own function namespace),
 //! * links `import { A as B } from "path"` statements to concrete files,
 //! * verifies every referenced type is in scope,
 //! * detects import cycles with a diagnostic chain.
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::axm::ast::{
     AnnotatedType, AxmFile, ModelDecl, ParamDecl, QueryDecl, QueryReturn, TransactionDecl,
-    TypeDecl, TypeRef,
+    TypeRef,
 };
 use crate::axm::parser::parse_axm_file;
 use crate::errors::AxiomError;
@@ -33,13 +33,6 @@ use crate::query::{QueryCatalog, QueryDefinition, QueryParam, QueryReturnType};
 pub struct ResolvedModel {
     pub path: PathBuf,
     pub model: ModelDecl,
-}
-
-/// A type alias together with the file it was declared in.
-#[derive(Debug, Clone)]
-pub struct ResolvedType {
-    pub path: PathBuf,
-    pub ty: TypeDecl,
 }
 
 /// A query together with the file it was declared in.
@@ -59,14 +52,10 @@ pub struct ResolvedTransaction {
 /// The linked set of all declarations across a group of `.axm` files.
 #[derive(Debug, Default)]
 pub struct ModelRegistry {
-    /// Models in file/declaration order.
+    /// Models (and aliases) in file/declaration order.
     pub models: Vec<ResolvedModel>,
     /// Model name -> index into [`ModelRegistry::models`].
     pub index: BTreeMap<String, usize>,
-    /// Type aliases in file/declaration order.
-    pub types: Vec<ResolvedType>,
-    /// Type alias name -> index into [`ModelRegistry::types`].
-    pub type_index: BTreeMap<String, usize>,
     /// Queries in file/declaration order.
     pub queries: Vec<ResolvedQuery>,
     /// Query name -> index into [`ModelRegistry::queries`].
@@ -84,7 +73,6 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
-            && self.types.is_empty()
             && self.queries.is_empty()
             && self.transactions.is_empty()
     }
@@ -93,8 +81,10 @@ impl ModelRegistry {
         self.index.get(name).map(|&i| &self.models[i])
     }
 
-    pub fn type_by_name(&self, name: &str) -> Option<&ResolvedType> {
-        self.type_index.get(name).map(|&i| &self.types[i])
+    /// Look up a model or alias by its written name.
+    pub fn type_by_name(&self, path: &Path, name: &str) -> Option<&ResolvedModel> {
+        let effective = self.effective_name(path, name);
+        self.model_by_name(effective)
     }
 
     pub fn query_by_name(&self, name: &str) -> Option<&ResolvedQuery> {
@@ -244,7 +234,6 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             for name in &import.names {
                 let target_file = &files[target_idx].1;
                 let canonical_name = if target_file.model_by_name(&name.name).is_some()
-                    || target_file.type_by_name(&name.name).is_some()
                 {
                     name.name.clone()
                 } else {
@@ -290,15 +279,11 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
 
     detect_cycles(&files, &edges)?;
 
-    // Duplicate detection. Models and type aliases share one namespace (they
-    // are both compile-time types); queries are their own function namespace.
+    // Duplicate detection. All models (block and alias) share one namespace;
+    // queries and transactions share their own function namespace.
     let mut type_names: BTreeMap<String, usize> = BTreeMap::new();
     for (file_idx, (path, file)) in files.iter().enumerate() {
-        for name in file
-            .types
-            .iter()
-            .map(|t| t.name.as_str())
-            .chain(file.models.iter().map(|m| m.name.as_str()))
+        for name in file.models.iter().map(|m| m.name.as_str())
         {
             if let Some(prev) = type_names.get(name) {
                 return Err(AxiomError::ModelDuplicate {
@@ -341,10 +326,10 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
             allowed.insert(w.clone());
         }
         let scope = &allowed;
-        for ty in &file.types {
-            check_annotated(&ty.ty, scope, &format!("type `{}`", ty.name), path)?;
-        }
         for model in &file.models {
+            if let Some(ann) = &model.alias {
+                check_annotated(ann, scope, &format!("model `{}`", model.name), path)?;
+            }
             for field in &model.fields {
                 check_annotated(
                     &field.ty,
@@ -388,14 +373,6 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
 
     let mut registry = ModelRegistry::default();
     for (path, file) in files.iter() {
-        for ty in &file.types {
-            let pos = registry.types.len();
-            registry.type_index.insert(ty.name.clone(), pos);
-            registry.types.push(ResolvedType {
-                path: path.clone(),
-                ty: ty.clone(),
-            });
-        }
         for model in &file.models {
             let pos = registry.models.len();
             registry.index.insert(model.name.clone(), pos);
@@ -432,13 +409,9 @@ pub fn resolve_models(sources: &[(PathBuf, String)]) -> Result<ModelRegistry, Ax
     Ok(registry)
 }
 
-/// Local model and type names declared in a file.
+/// Local model names (including aliases) declared in a file.
 fn local_type_names(file: &AxmFile) -> BTreeSet<String> {
-    file.types
-        .iter()
-        .map(|t| t.name.clone())
-        .chain(file.models.iter().map(|m| m.name.clone()))
-        .collect()
+    file.models.iter().map(|m| m.name.clone()).collect()
 }
 
 /// Resolve `import { ... } from "path"` to a concrete `.axm` file, relative to
@@ -587,15 +560,15 @@ mod tests {
     #[test]
     fn imported_types_are_linked() {
         let registry = resolve_models(&[
-            file("models/shared.axm", "type Email = String.email();"),
+            file("models/shared.axm", "model Email = String.email();"),
             file(
                 "models/user.axm",
                 "import { Email } from \"shared\"\nmodel User { email: Email }",
             ),
         ])
         .expect("resolve");
-        assert_eq!(registry.types.len(), 1);
-        assert!(registry.type_by_name("Email").is_some());
+        assert_eq!(registry.models.len(), 2);
+        assert!(registry.model_by_name("Email").is_some());
     }
 
     #[test]
@@ -687,7 +660,7 @@ mod tests {
     #[test]
     fn detects_type_and_model_name_overlap() {
         let err = resolve_models(&[
-            file("models/a.axm", "type User = String;"),
+            file("models/a.axm", "model User = String;"),
             file("models/b.axm", "model User { b: String }"),
         ])
         .expect_err("duplicate");
@@ -784,14 +757,14 @@ mod tests {
     #[test]
     fn resolves_type_across_namespaces() {
         let registry = resolve_models(&[
-            file("models/a.axm", "type Email = String.email();"),
+            file("models/a.axm", "model Email = String.email();"),
             file(
                 "models/b.axm",
                 "import { Email } from \"a\"\nmodel User { id: UUID }\nquery GetByEmail($email: Email) -> User? {\n  SELECT * FROM users WHERE email = $email;\n}",
             ),
         ])
         .expect("linked");
-        assert!(registry.type_by_name("Email").is_some());
+        assert!(registry.model_by_name("Email").is_some());
     }
 
     #[test]

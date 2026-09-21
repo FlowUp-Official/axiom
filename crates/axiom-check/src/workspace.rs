@@ -294,22 +294,23 @@ pub fn check_target_references(
             }
         }
 
-        for resolved in &registry.types {
+        for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
             let src = src_by_path
                 .get(&resolved.path)
                 .map(String::as_str)
                 .unwrap_or("");
-            let owner = format!("type `{}`", resolved.ty.name);
+            let owner = format!("model `{}`", resolved.model.name);
             let mut refs = Vec::new();
+            let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
             collect_excluded_refs(
                 registry,
                 &resolved.path,
-                &resolved.ty.ty.base,
+                &ann.base,
                 &emitted,
                 &mut refs,
             );
             for reference in refs {
-                let span = decl_keyword_start(src, "type", &resolved.ty.name)
+                let span = decl_keyword_start(src, "model", &resolved.model.name)
                     .and_then(|from| word_span_from(src, &reference.written, from));
                 push_excluded_reference(&mut diags, &resolved.path, target, &owner, span, &reference);
             }
@@ -411,10 +412,7 @@ fn collect_excluded_refs(
     match ty {
         TypeRef::Named(written) => {
             let canonical = registry.effective_name(path, written);
-            if registry.type_by_name(canonical).is_some() {
-                return;
-            }
-            if registry.model_by_name(canonical).is_some() && !emitted.contains(canonical) {
+            if registry.model_by_name(&canonical).is_some() && !emitted.contains(canonical) {
                 out.push(ExcludedReference {
                     written: written.clone(),
                     canonical: canonical.to_string(),
@@ -729,7 +727,7 @@ fn known_return_type(catalog: &TableCatalog<'_>, registry: &ModelRegistry, name:
             .unwrap_or(&t.name)
             .eq_ignore_ascii_case(name)
     });
-    table || registry.index.contains_key(name) || registry.type_index.contains_key(name)
+    table || registry.index.contains_key(name)
 }
 
 /// Verify the declared return contract against the SQL body: a row-returning
@@ -1034,9 +1032,12 @@ fn base_class(registry: &ModelRegistry, ty: &TypeRef, depth: usize) -> BaseClass
         TypeRef::Int | TypeRef::BigInt | TypeRef::Float => BaseClass::Num,
         TypeRef::Array(_) => BaseClass::Collection,
         TypeRef::Nullable(inner) => base_class(registry, inner, depth + 1),
-        TypeRef::Named(name) => match registry.type_index.get(name) {
-            Some(&i) => base_class(registry, &registry.types[i].ty.ty.base, depth + 1),
-            None => BaseClass::Other,
+        TypeRef::Named(name) => match registry.model_by_name(name) {
+            Some(resolved) if resolved.model.alias.is_some() => {
+                let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
+                base_class(registry, &ann.base, depth + 1)
+            }
+            _ => BaseClass::Other,
         },
         _ => BaseClass::Other,
     }
@@ -1117,18 +1118,19 @@ fn check_rule_base_compat(
             );
         }
     }
-    for resolved in &registry.types {
+    for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
         let src = src_by_path
             .get(&resolved.path)
             .map(String::as_str)
             .unwrap_or("");
+        let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         check_type_rules(
             &mut diags,
             &resolved.path,
             src,
-            &resolved.ty.name,
-            &resolved.ty.name,
-            &resolved.ty.ty,
+            &resolved.model.name,
+            &resolved.model.name,
+            ann,
             registry,
         );
     }
@@ -1293,24 +1295,15 @@ fn collect_type_names(ty: &TypeRef, out: &mut std::collections::BTreeSet<String>
     }
 }
 
-/// The set of type names referenced anywhere across the workspace: imports,
-/// type-alias bases, model fields, and query parameters and return types. Used
-/// by the linter's `unused-type-alias` rule.
-pub fn collect_referenced_types(
-    model_files: &[(PathBuf, String)],
-) -> std::collections::BTreeSet<String> {
-    collect_referenced_names(model_files)
-}
-
 /// Every written name referenced by a `.axm` file, from every declaration site
 /// that can name another declaration: imports (original and aliased names),
 /// type-alias bases, model field types, and query parameter and return types.
 ///
-/// This is the single scan behind both [`collect_referenced_models`] (the
-/// `dead-model` liveness set) and [`collect_referenced_types`] (the
-/// `unused-type-alias` liveness set). It is a written-name scan, not a
-/// resolution graph: a name counts as referenced whenever it appears at one of
-/// these sites, even if the referring declaration is itself unreferenced.
+/// This is the single scan behind [`collect_referenced_models`] (the
+/// `dead-model` liveness set — covers both block models and model aliases).
+/// It is a written-name scan, not a resolution graph: a name counts as
+/// referenced whenever it appears at one of these sites, even if the referring
+/// declaration is itself unreferenced.
 fn collect_referenced_names(
     model_files: &[(PathBuf, String)],
 ) -> std::collections::BTreeSet<String> {
@@ -1327,10 +1320,10 @@ fn collect_referenced_names(
                 }
             }
         }
-        for ty in &file.types {
-            collect_type_names(&ty.ty.base, &mut referenced);
-        }
         for model in &file.models {
+            if let Some(ann) = &model.alias {
+                collect_type_names(&ann.base, &mut referenced);
+            }
             for field in &model.fields {
                 collect_type_names(&field.ty.base, &mut referenced);
             }

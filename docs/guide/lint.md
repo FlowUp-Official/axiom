@@ -37,7 +37,6 @@ and `transaction` declaration in a `.axm` file:
 | Rule | Severity | What it reports |
 | ---- | -------- | --------------- |
 | `unused-import` | warning | An `import` whose names are never referenced by a model, field, transaction parameter, or return type; aliased imports are matched by the name written at the use site |
-| `unused-type-alias` | warning | A `type` alias that is never referenced by any model, field, query, or transaction anywhere in the workspace |
 | `dead-model` | warning | A model that is never referenced anywhere in the workspace — by a model field, an import, a query or transaction parameter or return type, or a type-alias base (directly or transitively) |
 | `redundant-validator` | warning | A duplicate validator, or a bound strictly weaker than one already established on the same field (e.g. `.min(10) .min(5)`); custom messages are ignored when matching |
 | `unsatisfiable-validator` | warning | Validator combinations no value can satisfy: contradictory numeric bounds (`.min(10) .max(5)`), contradictory length bounds (`.min_length(10) .max_length(5)`), or `.nonempty()` with `.max_length(0)` |

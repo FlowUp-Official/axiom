@@ -12,7 +12,7 @@ pub mod parser;
 pub mod resolver;
 
 pub use ast::{
-    AxmFile, FieldDecl, ModelDecl, ModelOverride, QueryDecl, Rule, SafeParseMode, Target,
+    AnnotatedType, AxmFile, FieldDecl, ModelDecl, ModelOverride, QueryDecl, Rule, SafeParseMode, Target,
     TransactionDecl, Transform, TypeRef,
 };
 pub use codegen::{

@@ -84,13 +84,14 @@ pub fn generate_rust_models_with_options(
         emit_db_helpers(&mut out);
     }
 
-    for resolved in &registry.types {
+    for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
+        let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         emit_type_alias(
             &mut out,
             registry,
             &resolved.path,
-            &resolved.ty.name,
-            &resolved.ty.ty,
+            &resolved.model.name,
+            ann,
         );
     }
     for (resolved, _) in &plan {
@@ -118,13 +119,14 @@ pub fn generate_rust_models_with_options(
             options,
         );
     }
-    for resolved in &registry.types {
+    for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
+        let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         emit_alias_coerce(
             &mut out,
             registry,
             &resolved.path,
-            &resolved.ty.name,
-            &resolved.ty.ty,
+            &resolved.model.name,
+            ann,
             &cyclic,
         );
     }
@@ -1763,7 +1765,7 @@ mod tests {
     #[test]
     fn recursive_array_validation() {
         let out = generate_rust_models(
-            &registry("type Address = String .nonempty()\nmodel User {\n  history: Address[]\n}"),
+            &registry("model Address = String .nonempty()\nmodel User {\n  history: Address[]\n}"),
             &no_catalog(),
         );
         assert!(out.contains("pub history: Vec<Address>,"));
@@ -1775,7 +1777,7 @@ mod tests {
     fn error_paths_render_arrays_and_fields() {
         let out = generate_rust_models(
             &registry(
-                "type Address = String .nonempty()\nmodel User {\n  history: Address[]\n  email: String .email()\n}",
+                "model Address = String .nonempty()\nmodel User {\n  history: Address[]\n  email: String .email()\n}",
             ),
             &no_catalog(),
         );
@@ -1854,7 +1856,7 @@ model Secret {
 
     #[test]
     fn type_aliases_fold_and_emit() {
-        let src = "type Email = String .email() .max_length(320)\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
+        let src = "model Email = String .email() .max_length(320)\nmodel UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}\n";
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(out.contains("pub type Email = String;"));
         assert!(out.contains("pub type UserId = i64;"));

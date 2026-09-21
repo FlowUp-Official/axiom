@@ -27,7 +27,7 @@ pub use diagnostics::{line_of_offset, span_for_line};
 pub use synchronization::{SyncCheck, write_fixed_outputs};
 pub use workspace::{
     Workspace, check_duplicate_fields, check_model_sources, check_models, check_queries,
-    check_schemas, check_target_references, collect_referenced_models, collect_referenced_types,
+    check_schemas, check_target_references, collect_referenced_models,
     resolve_inputs,
 };
 

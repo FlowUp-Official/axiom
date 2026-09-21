@@ -6,7 +6,7 @@
 
 use axiom_core::axm::ast::{
     AnnotatedType, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
-    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TransactionDecl, TypeDecl, TypeRef,
+    ParamDecl, QueryDecl, QueryReturn, Rule, Transform, TransactionDecl, TypeRef,
 };
 use axiom_core::axm::parser::parse_axm_file;
 
@@ -24,10 +24,9 @@ pub fn format_axm(src: &str) -> Result<String, String> {
         .imports
         .iter()
         .map(|i| vec![format_import(i)])
-        .chain(file.types.iter().map(|t| vec![format_type_decl(t)]))
         .chain(file.models.iter().map(format_model))
-         .chain(file.queries.iter().map(format_query))
-         .chain(file.transactions.iter().map(format_transaction))
+        .chain(file.queries.iter().map(format_query))
+        .chain(file.transactions.iter().map(format_transaction))
     {
         if !first_item {
             lines.push_blank();
@@ -61,15 +60,15 @@ fn format_imported_name(name: &ImportedName) -> String {
     }
 }
 
-fn format_type_decl(decl: &TypeDecl) -> String {
-    format!("type {} = {};", decl.name, format_annotated(&decl.ty))
-}
-
 /// Render a full top-level model including any `@...` decorators (e.g.
 /// `@target(...)`, `@no_codegen`, `@parse`, `@safeParse(...)`) and the
 /// `extends select<...>` source.
 fn format_model(model: &ModelDecl) -> Vec<String> {
     let mut out: Vec<String> = model.overrides.iter().map(format_override).collect();
+    if let Some(ann) = &model.alias {
+        out.push(format!("model {} = {};", model.name, format_annotated(ann)));
+        return out;
+    }
     let source = model
         .source
         .as_ref()
@@ -432,12 +431,12 @@ model UserView extends select<public.users> {
 
     #[test]
     fn formats_type_aliases() {
-        let src = "type Email = String.email();\ntype UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}";
+        let src = "model Email = String.email();\nmodel UserId = BigInt\nmodel User {\n  email: Email\n  id: UserId\n}";
         let out = fmt(src);
         assert_eq!(
             out,
-            "type Email = String.email();\n\
-             \ntype UserId = BigInt;\n\
+            "model Email = String.email();\n\
+             \nmodel UserId = BigInt;\n\
              \nmodel User {\n\
              \x20 email: Email\n\
              \x20 id: UserId\n\
@@ -588,7 +587,7 @@ transaction CreatePost($userId: UUID) -> Post {
     fn output_is_idempotent() {
         let messy = r#"
 import {A,B} from "geo";
-type Email = String .email() .max_length(320)
+model Email = String .email() .max_length(320)
 model User {
   email : String .trim() .email()
   address: Address[]

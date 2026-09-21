@@ -1,7 +1,7 @@
 # The `.axm` Language
 
 `.axm` files layer a typed application contract on top of your SQL schema.
-A file contains `import`s, `type` aliases, `model` declarations, and `query`
+A file contains `import`s, `model` declarations, and `query`
 and `transaction` declarations. Everything is compiled into the generated
 TypeScript and Rust clients as real, runnable code — no runtime config, no
 duplicated logic.
@@ -29,22 +29,23 @@ The `source` is a relative `.axm` file reference. Imported names must exist in
 the target file, and a bare import never collides with a locally declared name.
 Import cycles are reported by the resolver.
 
-## Types
-
-Reusable, named refinements of a primitive or existing type:
-
-```axm
-type Email = String.email().max_length(320)
-type NonEmptyString = String.nonempty().trim()
-```
-
-As with imports, a trailing `;` is optional on type declarations:
-
-```axm
-type Email = String.email().max_length(320);
-```
-
 ## Models
+
+All declarations use the `model` keyword. Two forms exist:
+
+* **Type alias** — `model Name = <type>;` defines a reusable, named refinement of a primitive or existing type.
+* **Block model** — `model Name { ... }` (optionally `extends select<...>`) defines a typed shape with fields.
+
+### Type aliases
+
+Aliases are declared with the `name = <type>` form:
+
+```axm
+model Email = String.email().max_length(320)
+model NonEmptyString = String.nonempty().trim()
+```
+
+### Block models
 
 A model is a typed shape. The canonical, database-backed form spells out its
 source relation:
@@ -57,6 +58,9 @@ model User extends select<users> {
   age: Int.min(0).max(150)
 }
 ```
+
+A trailing `;` is optional on all `model` declarations (both aliases
+and block models, and queries and transactions).
 
 - `extends select<users>` binds the model to the `users` table in the SQL
   catalog. The relation is a database identifier, resolved case-sensitively: a
@@ -76,7 +80,7 @@ model User extends select<users> {
 
 A model, query, or transaction may be preceded by `@` decorators that override
 how **that one** declaration is generated. They apply to `model`, `query`, and
-`transaction` declarations only, never to `type` aliases or imports.
+`transaction` declarations only, never to imports.
 `@target(...)` works for models, queries, and transactions; `@no_codegen`,
 `@parse`, and `@safeParse(...)` apply to models only (using any of them on a
 query or transaction is a parse error).
@@ -102,6 +106,9 @@ model Shared {
 query DailyPurging() {
   DELETE FROM audit_logs WHERE created_at < now() - interval '30 days';
 }
+
+@target("typescript")
+model ShortId = String
 ```
 
 - Target names are lowercase and case-sensitive; the recognized values are
@@ -124,17 +131,23 @@ query DailyPurging() {
 model InternalThing {
   id: UUID
 }
+
+@no_codegen
+model ShortId = String
 ```
 
-A `@no_codegen` model never receives its own standalone parse entry point
-(`Result` / `safeParse` / `parse` in TypeScript, `SomeModel::parse` /
-`SomeModel::safe_parse` in Rust). Its type/interface/struct is still emitted —
-and still exported — so it can appear as a field type, type alias, or query
-return, and `coerce`/validation helpers it depends on are included as needed.
+A `@no_codegen` model (alias or block) never receives its own standalone parse
+entry point (`Result` / `safeParse` / `parse` in TypeScript,
+`SomeModel::parse` / `SomeModel::safe_parse` in Rust). For block models, its
+type/interface/struct is still emitted — and still exported — so it can appear
+as a field type, model alias, or query return, and `coerce`/validation helpers
+it depends on are included as needed. For model aliases, `@no_codegen` causes
+the alias to fully fold into its base type (no `coerce{Name}` function is
+emitted; references use the base type directly).
 
-- A `@no_codegen` model that nothing references is dropped from the output
-  entirely (no dead code).
-- A `@no_codegen` model pulled in by an emitted model, type alias, or query is
+- A `@no_codegen` model (alias or block) that nothing references is dropped
+  from the output entirely (no dead code).
+- A `@no_codegen` model pulled in by an emitted model, model alias, or query is
   emitted with its type and coercion logic but without the standalone parse API.
 - `@no_codegen` only applies to `model` declarations; `@target("...")` on a
   `query` is allowed, but `@no_codegen` on a query is a parse error.
@@ -156,7 +169,8 @@ model FanoutUser {
 (TypeScript) and `{Model}::safe_parse`/`{Model}::parse` (Rust), so `@parse`
 simply makes the default behavior explicit. It takes no arguments and does not
 change the generated output. It may combine with `@safeParse(...)` or
-`@target(...)`, but not with `@no_codegen`.
+`@target(...)` on the same `model` declaration (alias or block), but not with
+`@no_codegen`.
 
 ### `@safeParse("first")` / `@safeParse("all")` — control error collection
 
@@ -174,6 +188,9 @@ model LenientUser {
   email: String .email()
   age: Int .min(0)
 }
+
+@safeParse("all")
+model NonEmptyString = String.nonempty().trim()
 ```
 
 By default every model collects **all** validation errors during a parse run —
@@ -190,12 +207,11 @@ the equivalent of `@safeParse("all")` (or no `@safeParse` at all).
   equivalent; the recognized modes are `first` and `all` (lowercase,
   case-sensitive).
 - `@safeParse(...)` only applies to `model` declarations; using it on a
-  `query` is a parse error. It may combine with `@parse`, `@target(...)`, and
-  a second use is a parse error.
-- `@safeParse(...)` and `@parse` are **mutually exclusive** with
-  `@no_codegen` on the same model; each decorator may appear **at most once**.
-  An unknown decorator name, unknown target, or unknown safeParse mode is a
-  parse error.
+  `query` is a parse error.
+- `@safeParse(...)`, `@parse`, and `@target(...)` may be combined on the same
+  model; `@no_codegen` is mutually exclusive with all of them, and each
+  decorator may appear **at most once**. An unknown decorator name, unknown
+  target, or unknown safeParse mode is a parse error.
 - In a module containing at least one `@safeParse("first")` model, the Rust
   generator emits `thread_local!`/`axm_stopped` scaffolding and the TypeScript
   generator emits an `AXM_STOP` sentinel and `_axm_fail_fast` flag. `"all"`
@@ -270,7 +286,8 @@ caller receives). Semicolons inside the SQL body (in string literals, comments,
 etc.) are preserved verbatim.
 
 A `;` is **not** allowed after the closing `}` of a `query` (or `model`)
-block.
+block. A trailing `;` is allowed (and optional) on model alias declarations
+(`model Name = <type>;`), which have no body.
 
 See [Query Functions](/guide/query-functions) for the full contract syntax,
 placeholder rules, and verification.
@@ -312,11 +329,7 @@ Transactions accept the same decorator set as queries:
 
 - `@target("typescript", "rust")` — restricts the generated function to the
   named targets (same semantics as on queries).
-- `@parse` — no-op marker (same semantics as on queries).
-- `@safeParse("first")` / `@safeParse("all")` — only meaningful on `model`
-  declarations; using them on a transaction is a parse error.
-- `@no_codegen` — only meaningful on models; using it on a transaction is a
-  parse error.
+- only `model` declarations carry `@parse`, `@no_codegen`, and `@safeParse(...)`).
 
 ### Generated code shape
 
@@ -330,7 +343,7 @@ and calls `txn.commit().await?` on success or `txn.rollback().await` on error.
 ## Resolution
 
 On every command, `.axm` files are parsed and *resolved*: imports are linked,
-duplicate model/type/query names are rejected, and every referenced type is
+duplicate model names are rejected, and every referenced type is
 checked. Query return types are resolved against the full catalog — a table
 declared in `schema.sql` is a valid return type even though it is invisible to
 `.axm` import resolution. Errors surface as `check.model-*` diagnostics from
