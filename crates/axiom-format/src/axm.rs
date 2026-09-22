@@ -62,7 +62,7 @@ fn format_imported_name(name: &ImportedName) -> String {
 
 /// Render a full top-level model including any `@...` decorators (e.g.
 /// `@target(...)`, `@no_codegen`, `@parse`, `@safeParse(...)`) and the
-/// `extends select<...>` source.
+/// `infers select|insert|update|delete<...>` source.
 fn format_model(model: &ModelDecl) -> Vec<String> {
     let mut out: Vec<String> = model.overrides.iter().map(format_override).collect();
     if let Some(ann) = &model.alias {
@@ -72,7 +72,7 @@ fn format_model(model: &ModelDecl) -> Vec<String> {
     let source = model
         .source
         .as_ref()
-        .map(|s| format!(" extends select<{}>", s.relation))
+        .map(|s| format!(" infers {}<{}>", s.operation.name(), s.relation))
         .unwrap_or_default();
     out.push(format!("model {}{source} {{", model.name));
     for field in &model.fields {
@@ -387,20 +387,33 @@ model User {
     }
 
     #[test]
-    fn formats_extends_select_and_aliased_imports() {
+    fn formats_infers_sources_and_aliased_imports() {
         let src = r#"import { User as DbUser } from "users"
-model UserView extends select<public.users> {
+model UserView infers select<public.users> {
   id: UUID
   email: Email
 }"#;
         assert_eq!(
             fmt(src),
             "import { User as DbUser } from \"users\"\n\
-             \nmodel UserView extends select<public.users> {\n\
+             \nmodel UserView infers select<public.users> {\n\
              \x20 id: UUID\n\
              \x20 email: Email\n\
              }\n"
         );
+    }
+
+    #[test]
+    fn formats_every_infers_operation_round_trip() {
+        for op in ["select", "insert", "update", "delete"] {
+            let input = format!(
+                "model UserView infers {op}<public.users> {{\n  id: UUID\n  email: Email\n}}"
+            );
+            let expected = format!(
+                "model UserView infers {op}<public.users> {{\n  id: UUID\n  email: Email\n}}\n"
+            );
+            assert_eq!(fmt(&input), expected, "operation {op} did not round-trip");
+        }
     }
 
     #[test]

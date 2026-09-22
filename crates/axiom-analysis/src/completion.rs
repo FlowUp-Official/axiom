@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use axiom_core::axm::ast::{ModelOverride, Rule, Transform, TypeRef};
+use axiom_core::axm::ast::{ModelOperation, ModelOverride, Rule, Transform, TypeRef};
 
 use crate::database::{AnalysisDatabase, Lang};
 use crate::token::TokenKind;
@@ -110,6 +110,27 @@ impl AnalysisDatabase {
             return self.model_completions(&prefix);
         }
 
+        // After `infers` — the model source operation. Offer exactly the four
+        // operations the parser accepts, fed from `ModelOperation::ALL`, so
+        // completion can never insert an invalid spelling.
+        if tokens
+            .iter()
+            .rev()
+            .find(|t| t.kind != TokenKind::Comment && t.end <= word_start)
+            .is_some_and(|t| t.is_word() && t.ident_value() == "infers")
+        {
+            return ModelOperation::ALL
+                .iter()
+                .filter(|op| op.name().starts_with(&prefix.to_lowercase()))
+                .map(|op| CompletionItem {
+                    label: op.name().to_string(),
+                    detail: operation_detail(op.name()).to_string(),
+                    kind: CompletionKind::Keyword,
+                    insert_text: op.name().to_string(),
+                })
+                .collect();
+        }
+
         // After `@` — decorators. Offer the same decorators the parser
         // accepts, so completion can never insert an invalid spelling.
         if tokens
@@ -145,6 +166,18 @@ impl AnalysisDatabase {
                 insert_text: name.to_string(),
             })
             .collect()
+    }
+}
+
+/// Short description for a model source inference operation, one per
+/// `ModelOperation` variant.
+fn operation_detail(name: &str) -> &'static str {
+    match name {
+        "select" => "model shape for reading rows",
+        "insert" => "model shape for inserting rows",
+        "update" => "model shape for updating rows",
+        "delete" => "model shape for deleting rows",
+        _ => unreachable!("unknown inference operation {name}"),
     }
 }
 
@@ -272,6 +305,46 @@ mod tests {
             assert!(
                 !labels.iter().any(|l| l == stale),
                 "decorator {stale} suggested away from `@`"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_operations_after_infers() {
+        let src = "model User infers <users> { email: String }";
+        // Cursor just after the space following `infers`.
+        let offset = src.find('<').unwrap();
+        let items = db_from(src).completion(Path::new("models/a.axm"), offset);
+        let labels = labels(items);
+        for op in ["select", "insert", "update", "delete"] {
+            assert!(
+                labels.iter().any(|l| l == op),
+                "missing inference operation {op} after `infers`, got {labels:?}"
+            );
+        }
+        assert!(
+            labels.iter().all(|l| l == "select" || l == "insert" || l == "update" || l == "delete"),
+            "unexpected suggestions after `infers`: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn filters_operations_after_infers_by_prefix() {
+        let src = "model User infers ins<users> { email: String }";
+        let offset = src.find('<').unwrap();
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        assert_eq!(labels, vec!["insert"]);
+    }
+
+    #[test]
+    fn does_not_suggest_operations_away_from_infers() {
+        let src = "model User { email: X }";
+        let offset = src.find('X').unwrap();
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        for stale in ["select", "insert", "update", "delete"] {
+            assert!(
+                !labels.iter().any(|l| l == stale),
+                "operation {stale} suggested away from `infers`"
             );
         }
     }

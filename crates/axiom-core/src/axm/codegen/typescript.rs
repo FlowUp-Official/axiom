@@ -1589,12 +1589,37 @@ model Account {
                 ],
             }],
         };
-        let src = "model User extends select<users> {\n  displayName: String .nonempty()\n}\n";
+        let src = "model User infers select<users> {\n  displayName: String .nonempty()\n}\n";
         let out = generate_typescript_models(&registry(src), &catalog);
         assert!(out.contains("  id: bigint;"));
         assert!(out.contains("  displayName?: string | null;"));
         assert!(out.contains("checkNonEmpty(value, fieldPath, errors);"));
         assert!(out.contains("export interface User {"));
+    }
+
+    #[test]
+    fn all_infers_operations_flow_through_model_emission() {
+        // Every operation resolves its model shape through the same shared
+        // column-merge today; the point of the test is that the operation is a
+        // first-class part of the source expression and none of the four is
+        // dropped or treated as a bare model by the generator.
+        let catalog = TableCatalog {
+            tables: vec![TableSchema {
+                name: "users".into(),
+                columns: vec![ColumnSchema {
+                    name: "id".into(),
+                    data_type: "UUID".into(),
+                    nullable: false,
+                    primary_key: true,
+                }],
+            }],
+        };
+        for op in ["select", "insert", "update", "delete"] {
+            let src = format!("model User infers {op}<users> {{\n  displayName: String\n}}\n");
+            let out = generate_typescript_models(&registry(&src), &catalog);
+            assert!(out.contains("export interface User {"), "{op} lost the model: {out}");
+            assert!(out.contains("  id: string;"), "{op} lost the table column: {out}");
+        }
     }
 
     #[test]
@@ -1639,7 +1664,7 @@ query Search($query: String, $limit: Int, $cursor: Float?) -> Post[] {
     #[test]
     fn update_returning_query_is_not_wrapped_in_cte() {
         let src = r#"
-model User extends select<users> { name: String }
+model User infers select<users> { name: String }
 query UpdateName($id: UUID, $name: String) -> users {
   UPDATE users SET name = $name WHERE id = $id RETURNING id;
 }
@@ -1693,7 +1718,7 @@ query Open($id: UUID) -> Int {
             }],
         };
         let src = r#"
-model User extends select<users> {
+model User infers select<users> {
   displayName: String
 }
 query GetUser($id: UUID) -> User? {

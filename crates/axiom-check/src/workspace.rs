@@ -8,7 +8,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 use axiom_core::axm::ast::{
-    AnnotatedType, ParamDecl, QueryReturn, Rule, Target, Transform, TypeRef,
+    AnnotatedType, ModelSource, ParamDecl, QueryReturn, Rule, Target, Transform, TypeRef,
 };
 use axiom_core::axm::codegen::{emitted_model_names, query_emitted_for, transaction_emitted_for, resolve_relation};
 use axiom_core::axm::parser::parse_axm_file;
@@ -137,10 +137,12 @@ pub fn check_queries(
     (query_catalog, diags)
 }
 
-/// Validate every `model ... extends select<relation>` source against the
-/// schema catalog. The relation is a database identifier: it must match a
-/// declared table exactly (for qualified names) or by its last segment (for
-/// unqualified names), always case-sensitively.
+/// Validate every database-backed model source (`infers select|insert|update|
+/// delete<relation>`) against the schema catalog. The relation is a database
+/// identifier: it must match a declared table exactly (for qualified names) or
+/// by its last segment (for unqualified names), always case-sensitively. The
+/// operation itself needs no schema check today — every operation resolves its
+/// fields against the same table — so this verifies the relation only.
 pub fn check_model_sources(
     catalog: &TableCatalog<'_>,
     registry: &ModelRegistry,
@@ -163,33 +165,36 @@ pub fn check_model_sources(
             .get(&resolved.path)
             .map(String::as_str)
             .unwrap_or("");
-        let span = model_source_relation_span(src, relation);
+        let span = model_source_relation_span(src, source);
         diags.push(
             Diagnostic::error(
                 &resolved.path,
                 "check.model-source",
                 format!(
-                    "model `{}` extends select<{relation}>, which does not match any table in the schema",
-                    resolved.model.name
+                    "model `{}` infers {}<{relation}>, which does not match any table in the schema",
+                    resolved.model.name,
+                    source.operation.name()
                 ),
             )
-            .with_help(
-                "select<...> names a database relation; use the exact (case-sensitive) table \
+            .with_help(format!(
+                "infers {}<...> names a database relation; use the exact (case-sensitive) table \
                  name from a schema file, or the unqualified name to match the last segment \
                  of a qualified table",
-            )
+                source.operation.name()
+            ))
             .with_span(span),
         );
     }
     diags
 }
 
-/// Prefer a span covering the relation text inside `select<...>`; falls back
-/// to the start of the declaring line.
-fn model_source_relation_span(src: &str, relation: &str) -> Span {
-    let rel_pos = find_span(src, "select<", 0).map(|s| s.end).unwrap_or(0);
+/// Prefer a span covering the relation text inside `infers {op}<...>`; falls
+/// back to the start of the declaring line.
+fn model_source_relation_span(src: &str, source: &ModelSource) -> Span {
+    let needle = format!("{}<", source.operation.name());
+    let rel_pos = find_span(src, &needle, 0).map(|s| s.end).unwrap_or(0);
     if let Some(rel_end) = src[rel_pos..].find('>')
-        && src[rel_pos..rel_pos + rel_end].trim() == relation
+        && src[rel_pos..rel_pos + rel_end].trim() == source.relation
     {
         let raw = &src[rel_pos..rel_pos + rel_end];
         let trimmed = raw.trim();

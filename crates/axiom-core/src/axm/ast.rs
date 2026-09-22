@@ -93,14 +93,14 @@ impl AnnotatedType {
 /// primitive/existing type. The two forms are:
 ///
 /// ```text
-/// model User extends select<users> {
+/// model User infers select<users> {
 ///   id: UUID
 /// }
 ///
 /// model Email = String.email().max_length(320)
 /// ```
 ///
-/// The canonical database-backed form uses `extends select<users>` (a
+/// The canonical database-backed form uses `infers select<users>` (a
 /// *database-derived source expression* — the relation's DB identifier, not an
 /// Axiom type). Bare models with no `source` remain valid as pure application
 /// models with no database backing. Alias models carry no fields or source.
@@ -110,8 +110,9 @@ impl AnnotatedType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDecl {
     pub name: String,
-    /// The `select<...>` source expression, when the model is database-backed.
-    /// `None` for bare application models and for alias models.
+    /// The `infers op<...>` source expression, when the model is
+    /// database-backed. `None` for bare application models and for alias
+    /// models.
     pub source: Option<ModelSource>,
     pub fields: Vec<FieldDecl>,
     /// When `Some`, this model is an alias (`model Email = String.email()`):
@@ -291,13 +292,65 @@ impl Target {
     }
 }
 
-/// A database-derived source expression: `select<users>`.
+/// The database operation whose inferred model shape a database-backed model
+/// describes.
+///
+/// `infers select<users>` describes the shape appropriate for reading from
+/// `users`, `infers insert<users>` for inserting rows, and so on. The operation
+/// is a first-class part of the source expression: even though every operation
+/// currently resolves its fields against the same table columns, the compiler
+/// carries it through resolution, validation, and codegen so operation-aware
+/// field shaping can be layered in later without redesigning the language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOperation {
+    /// `infers select<relation>` — the model shape for reading rows.
+    Select,
+    /// `infers insert<relation>` — the model shape for inserting rows.
+    Insert,
+    /// `infers update<relation>` — the model shape for updating rows.
+    Update,
+    /// `infers delete<relation>` — the model shape for deleting rows.
+    Delete,
+}
+
+impl ModelOperation {
+    /// The recognized operations, in canonical order. The parser, semantic
+    /// checks, completion, and formatter all feed off this one list so the four
+    /// operations can never drift apart.
+    pub const ALL: [ModelOperation; 4] = [
+        ModelOperation::Select,
+        ModelOperation::Insert,
+        ModelOperation::Update,
+        ModelOperation::Delete,
+    ];
+
+    /// The lowercase source spelling of the operation.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ModelOperation::Select => "select",
+            ModelOperation::Insert => "insert",
+            ModelOperation::Update => "update",
+            ModelOperation::Delete => "delete",
+        }
+    }
+
+    /// Parse an inference operation name; names are case-sensitive and
+    /// lowercase. Unknown words return `None`.
+    pub fn parse(name: &str) -> Option<ModelOperation> {
+        Self::ALL.iter().find(|op| op.name() == name).copied()
+    }
+}
+
+/// A database-derived source expression: `infers select<users>`,
+/// `infers insert<users>`, `infers update<users>`, or `infers delete<users>`.
 ///
 /// The payload is a database identifier, NOT an Axiom type identifier. It must
 /// be resolved against the SQL schema and is subject to the configured SQL
 /// dialect's identifier semantics, not Axiom capitalization rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSource {
+    /// The operation whose inferred shape the model describes.
+    pub operation: ModelOperation,
     pub relation: String,
 }
 

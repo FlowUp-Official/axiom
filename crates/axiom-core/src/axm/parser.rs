@@ -10,7 +10,8 @@
 //! name           := ident ("as" ident)?
 //! model          := "model" ident model_body
 //! model_body     := "=" annotated_type [";"]
-//!                  | ("extends" "select<" db_ident ">")? "{" field* "}"
+//!                  | ("infers" ("select" | "insert" | "update" | "delete")
+//!                     "<" db_ident ">")? "{" field* "}"
 //! override       := "@" ident ("(" word ("," word)* ")")?
 //! word           := string | ident
 //! field          := (ident | string) "?"? ":" annotated_type ("=" literal)?
@@ -64,9 +65,9 @@ use winnow::token::{any, one_of, take_while};
 type PResult<T> = winnow::ModalResult<T, ContextError>;
 
 use crate::axm::ast::{
-    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOverride,
-    ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target, TransactionDecl,
-    Transform, TypeRef,
+    AnnotatedType, AxmFile, FieldDecl, ImportStmt, ImportedName, Literal, ModelDecl, ModelOperation,
+    ModelOverride, ModelSource, ParamDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target,
+    TransactionDecl, Transform, TypeRef,
 };
 
 /// A failed `.axm` parse with a human-readable message.
@@ -170,8 +171,9 @@ fn primitive<'a>(
     (word, peek(not(one_of(is_word_char)))).value(ty)
 }
 
-/// A database identifier inside `select<...>`, which may be schema-qualified
-/// (`public.users`) and follows the SQL dialect's identifier charset.
+/// A database identifier inside `infers ... <...>`, which may be
+/// schema-qualified (`public.users`) and follows the SQL dialect's identifier
+/// charset.
 fn db_ident(input: &mut &str) -> PResult<String> {
     take_while(1.., |c: char| {
         c.is_ascii_alphanumeric() || c == '_' || c == '.'
@@ -517,9 +519,27 @@ fn model_decl(input: &mut &str) -> PResult<ModelDecl> {
         });
     }
 
-    let source = opt((ws, kw("extends"), ws, kw("select"), '<', db_ident, '>'))
-        .parse_next(input)?
-        .map(|(_, _, _, _, _, relation, _)| ModelSource { relation });
+    // Database-backed form: `infers select<users>`, `infers insert<users>`,
+    // etc. The operation is validated against the four recognized operations
+    // (the legacy `extends select<...>` spelling is rejected with a pointed
+    // message), so `infers` does not become a free-form keyword.
+    let source = opt((
+        ws,
+        alt((
+            kw("infers").value(()),
+            legacy_extends_source,
+        )),
+        ws,
+        operation,
+        '<',
+        db_ident,
+        '>',
+    ))
+    .parse_next(input)?
+    .map(|(_, _, _, operation, _, relation, _)| ModelSource {
+        operation,
+        relation,
+    });
 
     ws(input)?;
     let fields = delimited(
@@ -541,6 +561,40 @@ fn model_decl(input: &mut &str) -> PResult<ModelDecl> {
         fields,
         alias: None,
         overrides: Vec::new(),
+    })
+}
+
+/// Reject the legacy `extends` spelling of a database-backed model source with
+/// a targeted message pointing at the new `infers` syntax. Only reached by
+/// [`alt`] after `infers` does not match, so a bare `extends` after a model
+/// name becomes a parse error instead of silently parsing as a bare model.
+fn legacy_extends_source(input: &mut &str) -> PResult<()> {
+    kw("extends").parse_next(input)?;
+    Err(ErrMode::Cut(ContextError::from_external_error(
+        input,
+        RuleError(
+            "`extends select<...>` is no longer supported; use `infers select<...>` \
+             (or `infers insert<...>`, `infers update<...>`, `infers delete<...>`) \
+             for a database-backed model"
+                .into(),
+        ),
+    )))
+}
+
+/// The inference operation inside a database-backed source expression. Exactly
+/// `select`, `insert`, `update`, and `delete` are recognized, fed from
+/// [`ModelOperation::ALL`]. Any other word is a `Cut`, so `infers <word>` with
+/// an unknown operation fails with a targeted message rather than parsing as a
+/// bare model.
+fn operation(input: &mut &str) -> PResult<ModelOperation> {
+    let word = take_while(1.., is_word_char).parse_next(input)?;
+    ModelOperation::parse(word).ok_or_else(|| {
+        ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError(format!(
+                "unknown inference operation `{word}`; expected one of `select`, `insert`, `update`, `delete`"
+            )),
+        ))
     })
 }
 
@@ -1075,10 +1129,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_model_with_extends_select() {
+    fn parses_model_with_infers_select() {
         let file = parse(
             r#"
-model User extends select<users> {
+model User infers select<users> {
     email: String.email(),
     username: Username,
     displayName: String.min_length(1).max_length(100)
@@ -1090,6 +1144,7 @@ model User extends select<users> {
         assert_eq!(
             model.source,
             Some(ModelSource {
+                operation: ModelOperation::Select,
                 relation: "users".into()
             })
         );
@@ -1101,11 +1156,56 @@ model User extends select<users> {
     }
 
     #[test]
+    fn parses_all_infers_operations() {
+        for (op, relation) in [
+            (ModelOperation::Select, "users"),
+            (ModelOperation::Insert, "users"),
+            (ModelOperation::Update, "users"),
+            (ModelOperation::Delete, "users"),
+        ] {
+            let file = parse(&format!(
+                "model User infers {}<{relation}> {{ id: UUID }}",
+                op.name()
+            ));
+            assert_eq!(
+                file.models[0].source,
+                Some(ModelSource {
+                    operation: op,
+                    relation: relation.into()
+                }),
+                "operation {} did not survive the parser",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_extends_source() {
+        let message = parse_err("model User extends select<users> { id: UUID }");
+        assert!(
+            message.contains("`extends select<...>` is no longer supported")
+                && message.contains("infers"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_infers_operation() {
+        let message = parse_err("model User infers upsert<users> { id: UUID }");
+        assert!(
+            message.contains("unknown inference operation `upsert`")
+                && message.contains("select"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
     fn parses_schema_qualified_select_source() {
-        let file = parse("model User extends select<public.users> { id: UUID }");
+        let file = parse("model User infers select<public.users> { id: UUID }");
         assert_eq!(
             file.models[0].source,
             Some(ModelSource {
+                operation: ModelOperation::Select,
                 relation: "public.users".into()
             })
         );
@@ -1117,7 +1217,7 @@ model User extends select<users> {
         // the content is the field name. All three spellings mix freely.
         let file = parse(
             r#"
-model User extends select<users> {
+model User infers select<users> {
   id: UUID,
   "email": String.email().max_length(320),
   "username": String.nonempty().trim(),
@@ -1671,7 +1771,7 @@ model UserId = BigInt;
     #[test]
     fn semicolons_after_closing_braces_are_rejected() {
         let err = parse_err(
-            r#"model User extends select<users> {
+            r#"model User infers select<users> {
     id: UUID,
     email: String.email().max_length(320),
     username: String.nonempty().trim(),
@@ -1812,7 +1912,7 @@ query GetUser($id: UUID) -> User? { SELECT * FROM users WHERE id = $id; }
 import { User, Email as ContactEmail } from "./users"
 model Email = String.email().max_length(320)
 model NonEmptyString = String.nonempty().trim()
-model User extends select<users> {
+model User infers select<users> {
     id: UUID,
     email: String.email().max_length(320),
     username: String.nonempty().trim(),
@@ -1939,7 +2039,7 @@ query ListUsers($limit: Int) -> User[] {
 // This is an Axiom comment
 model Email = String.email(); // trailing comment
 // another
-model User extends select<users> {
+model User infers select<users> {
     email: Email,
 }
 "#,
@@ -1962,7 +2062,7 @@ model User extends select<users> {
             r#"
 model Email = String.email().max_length(320);
 
-model User extends select<users> {
+model User infers select<users> {
     email: Email,
     username: String.min_length(3).max_length(32)
 }

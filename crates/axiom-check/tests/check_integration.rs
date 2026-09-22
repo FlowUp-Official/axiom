@@ -389,25 +389,19 @@ fn workspace_resolution_requires_existing_files() {
 }
 
 #[test]
-fn model_source_must_match_a_table() {
+fn model_source_must_match_a_table_for_every_infers_operation() {
     let schema = vec![file(
         "schema.sql",
         "CREATE TABLE public.users (id INT PRIMARY KEY, email TEXT NOT NULL);",
     )];
     let (catalog, _) = check_schemas(&schema);
-    let registry = registry_from(&[file(
-        "models/user.axm",
-        "model User extends select<users> {\n  email: String .email()\n}\n",
-    )]);
-    let diags = check_model_sources(
-        &catalog,
-        &registry,
-        &[file(
-            "models/user.axm",
-            "model User extends select<users> {\n  email: String .email()\n}\n",
-        )],
-    );
-    assert!(diags.is_empty(), "{diags:?}");
+    for op in ["select", "insert", "update", "delete"] {
+        let src = format!("model User infers {op}<users> {{\n  email: String .email()\n}}\n");
+        let files = &[file("models/user.axm", &src)];
+        let registry = registry_from(files);
+        let diags = check_model_sources(&catalog, &registry, files);
+        assert!(diags.is_empty(), "{op} => {diags:?}");
+    }
 }
 
 #[test]
@@ -417,15 +411,37 @@ fn model_source_rejects_missing_or_miscased_relation() {
         "CREATE TABLE public.users (id INT PRIMARY KEY, email TEXT NOT NULL);",
     )];
     let (catalog, _) = check_schemas(&schema);
-    for relation in ["Users", "orders", "public.none"] {
-        let src = format!("model User extends select<{relation}> {{\n  email: String\n}}\n");
+    for (op, relation) in [("select", "Users"), ("insert", "orders"), ("delete", "public.none")] {
+        let src = format!("model User infers {op}<{relation}> {{\n  email: String\n}}\n");
         let files = &[file("models/user.axm", &src)];
         let registry = registry_from(files);
         let diags = check_model_sources(&catalog, &registry, files);
         assert!(
             codes(&diags).contains(&"check.model-source"),
-            "{relation} => {diags:?}"
+            "infers {op}<{relation}> => {diags:?}"
         );
+        let message = diags
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            message.contains(&format!("infers {op}<{relation}>")),
+            "diagnostic should preserve the operation `{op}`, got: {message}"
+        );
+    }
+}
+
+#[test]
+fn model_sources_preserve_operation_through_resolution() {
+    use axiom_core::axm::ast::ModelOperation;
+    for op in ["select", "insert", "update", "delete"] {
+        let src = format!("model User infers {op}<users> {{\n  email: String\n}}\n");
+        let files = &[file("models/user.axm", &src)];
+        let registry = registry_from(files);
+        let source = registry.models[0].model.source.as_ref().expect("source");
+        assert_eq!(source.operation, ModelOperation::parse(op).unwrap());
+        assert_eq!(source.operation.name(), op);
     }
 }
 

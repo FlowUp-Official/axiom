@@ -465,7 +465,8 @@ pub(crate) struct EffectiveField {
     pub default: Option<Literal>,
 }
 
-/// Resolve a `select<relation>` source expression against the schema catalog.
+/// Resolve a database source relation (`select<relation>`, `insert<relation>`,
+/// etc.) against the schema catalog.
 ///
 /// The relation is a database identifier, so a fully qualified reference
 /// (`public.users`) matches the qualified catalogue name exactly, while an
@@ -494,10 +495,17 @@ pub fn resolve_relation<'a, 'b>(
 /// Compute the effective fields for a model declared in `path`.
 ///
 /// A bare model uses its declared fields. A database-backed model
-/// (`model X extends select<t>`) merges the table columns with its declared
-/// fields: every column becomes a field (unrefined columns get a
-/// database-derived type), and declared fields refine their matching column or
-/// add application-only fields.
+/// (`model X infers select<t>`, `infers insert<t>`, ...) merges the table
+/// columns with its declared fields: every column becomes a field (unrefined
+/// columns get a database-derived type), and declared fields refine their
+/// matching column or add application-only fields.
+///
+/// Every inference operation currently resolves its fields through this shared
+/// table-column merge; the operation itself is carried by
+/// [`ModelSource::operation`](crate::axm::ast::ModelOperation) so
+/// operation-aware shaping (e.g. exposing only insertable columns for
+/// `infers insert<t>`) can be layered in here later without touching the
+/// parser or AST.
 pub(crate) fn effective_fields(
     registry: &ModelRegistry,
     catalog: &TableCatalog,

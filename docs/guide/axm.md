@@ -34,7 +34,7 @@ Import cycles are reported by the resolver.
 All declarations use the `model` keyword. Two forms exist:
 
 * **Type alias** — `model Name = <type>;` defines a reusable, named refinement of a primitive or existing type.
-* **Block model** — `model Name { ... }` (optionally `extends select<...>`) defines a typed shape with fields.
+* **Block model** — `model Name { ... }` (optionally `infers select<...>`) defines a typed shape with fields.
 
 ### Generated types
 
@@ -62,7 +62,7 @@ A model is a typed shape. The canonical, database-backed form spells out its
 source relation:
 
 ```axm
-model User extends select<users> {
+model User infers select<users> {
   id: UUID
   email: String.email().max_length(320)
   username: String.nonempty().trim()
@@ -73,13 +73,23 @@ model User extends select<users> {
 A trailing `;` is optional on all `model` declarations (both aliases
 and block models, and queries and transactions).
 
-- `extends select<users>` binds the model to the `users` table in the SQL
+- `infers` names the database operation whose model shape is being inferred:
+  `select`, `insert`, `update`, or `delete`. Each operation resolves its shape
+  from the same table, so today `model User infers select<users> { ... }`,
+  `infers insert<users>`, `infers update<users>`, and `infers delete<users>`
+  all merge the `users` columns with the declared fields. The operation is
+  carried through the compiler as distinct semantic information, ready to drive
+  operation-specific field shaping later.
+- `infers select<users>` binds the model to the `users` table in the SQL
   catalog. The relation is a database identifier, resolved case-sensitively: a
-  fully qualified name (`select<public.users>`) matches that table exactly,
-  while an unqualified name (`select<users>`) also matches the last segment of
-  a qualified table. An unmatched relation is reported by `axiom check` as
-  `error[check.model-source]`. Bare models with no source remain valid as pure
-  application models.
+  fully qualified name (`infers select<public.users>`) matches that table
+  exactly, while an unqualified name (`infers select<users>`) also matches the
+  last segment of a qualified table. An unmatched relation is reported by
+  `axiom check` as `error[check.model-source]`. Bare models with no source
+  remain valid as pure application models.
+- The legacy `extends select<users>` spelling is rejected with an error
+  pointing at the `infers` syntax; only `select`, `insert`, `update`, and
+  `delete` are valid after `infers`.
 - Fields are `name: <type>` with optional `?` (`age?`) for absent values and an
   optional default (`country = "US"`), applied only when the field is missing.
 - Field names may be double-quoted. Quoted and bare names mix freely and are
@@ -103,7 +113,7 @@ By default every model and every query is generated for all configured targets.
 
 ```axm
 @target("rust")
-model AuditLog extends select<audit_logs> {
+model AuditLog infers select<audit_logs> {
   id: UUID
   payload: String
 }
