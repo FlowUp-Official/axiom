@@ -44,7 +44,7 @@ fn write_fixture(dir: &Path, schema: &str) {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -328,14 +328,18 @@ fn init_creates_valid_config_file() {
     assert!(path.exists(), "axiom.json should be created");
     let contents = std::fs::read_to_string(&path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
-    assert_eq!(
-        value["$schema"].as_str(),
-        Some(concat!(
-            "https://raw.githubusercontent.com/FlowUp-Official/axiom/v",
-            env!("CARGO_PKG_VERSION"),
-            "/schemas/axiom.schema.json"
-        ))
+
+    // Test binaries are development builds (no `AXIOM_RELEASE` set), so they
+    // must NOT emit a version-pinned `$schema`: the running code may have
+    // diverged from the nearest published release, and an emitted URL could
+    // promise a schema that this binary did not generate. Release builds
+    // embed the URL via `schema_version_url` (covered by axiom-core unit
+    // tests).
+    assert!(
+        value.get("$schema").is_none(),
+        "development builds must omit `$schema`, got: {value}"
     );
+
     assert!(stdout(&output).contains("Initialized new axiom.json configuration file"));
 }
 
@@ -372,7 +376,7 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -422,7 +426,7 @@ fn lint_flags_unused_query_param_and_type_alias() {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -470,7 +474,7 @@ fn lint_flags_unused_query_param_and_type_alias() {
 }
 
 const LINT_CONFIG_JSON: &str = r#"{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -570,7 +574,7 @@ fn write_apis_fixture(dir: &Path, config_json: &str) {
 fn config_with_apis(apis: &str) -> String {
     format!(
         r#"{{
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
   "project": {{ "name": "fixture", "dialect": "postgres" }},
   "cache": {{ "enabled": false, "path": ".axiom.cache" }},
   "source": {{ "schema": ["schema.sql"], "axm": ["models/models.axm"] }},

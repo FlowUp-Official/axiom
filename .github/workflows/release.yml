@@ -9,8 +9,32 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # Guardrail: the release tag name is the only source of every published
+  # asset URL, including the version-pinned `axiom.schema.json` that released
+  # binaries embed via `schema_version_url`. A tag that does not exactly match
+  # `Cargo.toml`'s workspace version would publish a schema produced by
+  # different code than the version claims, so the release must fail here.
+  verify-version:
+    name: Verify tag matches Cargo version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Assert tag equals v{Cargo package version}
+        shell: bash
+        run: |
+          cargo_version="$(awk '/^\[workspace.package\]/{in_pkg=1} in_pkg && /^version *=/{sub(/^version *= *"/, ""); sub(/".*$/, ""); print; exit}' Cargo.toml)"
+          expected="v${cargo_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "::error::Release tag '${GITHUB_REF_NAME}' does not match the Cargo package version 'v${cargo_version}'. Bump the version in Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Verified: release tag '${GITHUB_REF_NAME}' matches 'v${cargo_version}'."
+
+  build:
     name: Build and package ${{ matrix.target }}
+    needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,20 +58,20 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # AXIOM_RELEASE marks this as a release build so the binary embeds the
+      # version-pinned `$schema` URL in `axiom init` output. Development builds
+      # (without this variable) deliberately omit `$schema`.
       - name: Build release binary
+        env:
+          AXIOM_RELEASE: "1"
         run: cargo build --release --target ${{ matrix.target }}
 
       # --- Linux Packaging ---
-      - name: Package Linux archive, schema, and checksum
+      - name: Package Linux archive and checksum
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p dist schemas
-
-          # 1. Generate JSON Schema (Linux runner handles schema asset)
-          "target/${{ matrix.target }}/release/axiom" schema > schemas/axiom.schema.json
-
-          # 2. Package binary archive
+          mkdir -p dist
           cp "target/${{ matrix.target }}/release/axiom" dist/axiom
           tar -C dist -czf "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" axiom
           sha256sum "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
@@ -62,20 +86,72 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash
           "$hash  $archive" | Out-File -Encoding ascii "$archive.sha256"
 
-      # --- Upload Assets to Release ---
-      - name: Publish Linux Release Assets
+      - name: Upload Linux artifacts
         if: runner.os == 'Linux'
-        uses: softprops/action-gh-release@v3
+        uses: actions/upload-artifact@v4
         with:
-          files: |
-            axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            axiom-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
-            schemas/axiom.schema.json
+          name: axiom-linux
+          path: |
+            axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+            target/x86_64-unknown-linux-gnu/release/axiom
 
-      - name: Publish Windows Release Assets
+      - name: Upload Windows artifacts
         if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: axiom-windows
+          path: |
+            axiom-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+            axiom-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip.sha256
+
+  # Generates the schema from the exact release binary and publishes every
+  # artifact into a single release. If schema generation, validation, or
+  # checksumming fails, this job fails and NO release is created at all.
+  release:
+    name: Generate schema and publish release
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # 1. Generate the JSON schema with the binary built from this exact tag.
+      - name: Generate JSON schema from the release binary
+        shell: bash
+        run: |
+          chmod +x artifacts/axiom-linux/axiom
+          artifacts/axiom-linux/axiom schema > axiom.schema.json
+
+      # 2. Validate: schema exists, parses as JSON, and the binary is a release
+      #    build that embeds the version-pinned $schema URL.
+      - name: Validate generated schema and release build
+        shell: bash
+        run: |
+          test -s axiom.schema.json
+          python3 -m json.tool axiom.schema.json > /dev/null
+          tmpdir="$(mktemp -d)"
+          (cd "${tmpdir}" \
+            && "$GITHUB_WORKSPACE/artifacts/axiom-linux/axiom" init > /dev/null \
+            && grep -q 'releases/download/v' axiom.json)
+          echo "Schema is valid and embeds the version-pinned $schema URL."
+
+      # 3. Checksum, matching the existing binary-archive convention.
+      - name: Checksum schema
+        shell: bash
+        run: sha256sum axiom.schema.json > axiom.schema.json.sha256
+
+      # 4. Publish. Prerelease tags such as v0.7.0-rc.1 are marked prerelease.
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            axiom-${{ github.ref_name }}-${{ matrix.target }}.zip
-            axiom-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
+            axiom.schema.json
+            axiom.schema.json.sha256
+            artifacts/axiom-linux/axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            artifacts/axiom-linux/axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+            artifacts/axiom-windows/axiom-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+            artifacts/axiom-windows/axiom-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip.sha256
+          prerelease: ${{ contains(github.ref_name, '-') }}

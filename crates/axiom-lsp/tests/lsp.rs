@@ -57,7 +57,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
     std::fs::write(
         base.join("axiom.json"),
         r#"{
-            "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+            "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
             "project": { "name": "fixture", "dialect": "postgres" },
             "cache": { "enabled": false, "path": ".axiom.cache" },
             "source": {

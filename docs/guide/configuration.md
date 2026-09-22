@@ -12,16 +12,23 @@ schema for the running Axiom version:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/vX.Y.Z/axiom.schema.json",
   "project": { "name": "api", "dialect": "postgres" }
 }
 ```
 
-This gives you autocompletion, hover documentation, and inline validation in
-**VS Code**, **Neovim**, and any other editor with JSON Schema support.
+The schema is **generated from the exact Axiom source that was released under
+that version** and published as a **GitHub Release artifact** (`axiom schema`)
+— it is not committed to the repository, and you should not copy or commit it
+yourself. Reference the version-pinned URL instead. This gives you
+autocompletion, hover documentation, and inline validation in **VS Code**,
+**Neovim**, and any other editor with JSON Schema support.
 
-- Schema URLs are version-pinned (`v<version>`), so every release has a stable,
-  immutable schema.
+- Schema URLs are version-pinned (`releases/download/v<version>/...`), so every
+  release has a stable, immutable schema that always matches the Axiom binary
+  that produced your configuration.
+- Development builds of Axiom (compiled locally from a checkout) omit `$schema`
+  because they have no matching published release yet.
 - The `$schema` key is optional and is skipped when absent.
 
 ## Minimal configuration
@@ -35,7 +42,7 @@ An `axiom init` template looks like this:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/FlowUp-Official/axiom/v0.6.0/schemas/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/vX.Y.Z/axiom.schema.json",
   "project": { "name": "my-project", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": {

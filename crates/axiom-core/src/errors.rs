@@ -41,7 +41,7 @@ pub enum AxiomError {
     #[diagnostic(
         code(axiom::config::validation_failed),
         help(
-            "Fix the flagged keys in `axiom.json`, or consult the canonical schema at https://raw.githubusercontent.com/FlowUp-Official/axiom/main/schemas/axiom.schema.json"
+            "Fix the flagged keys in `axiom.json`, or consult the JSON schema for your Axiom release at https://github.com/FlowUp-Official/axiom/releases (run `axiom schema` to print it locally)."
         )
     )]
     ConfigValidationFailed { path: PathBuf, errors: String },
