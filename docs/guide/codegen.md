@@ -24,9 +24,8 @@ A TypeScript module that pairs with the `postgres` driver:
 
 Declarations flagged `@target("rust")` (models **or** queries) are skipped by
 the TypeScript generator — a filtered-out query emits neither its function nor
-a `Sql` import. Models flagged `@no_codegen` always get the interface and
-`coerce` function but never a `safeParse`/`parse` entry point, and are omitted
-entirely when no emitted declaration references them. `@safeParse("first")`
+a `Sql` import. Models flagged `@no_codegen` (and its variants) keep only the parts of their public interface that are not suppressed; a `@no_codegen` model is omitted
+entirely when no emitted declaration references it. `@safeParse("first")`
 models emit fail-fast `safeParse` functions that stop at the first validation
 error (plus a module-level `AXM_STOP` sentinel when any model asks for it).
 See [Model decorators](/guide/axm#model-decorators).
@@ -70,9 +69,7 @@ A Rust module that pairs with `tokio-postgres`:
   any error.
 
 Declarations flagged `@target("typescript")` (models **or** queries) are
-skipped by the Rust generator; models flagged `@no_codegen` get the `pub
-struct` and the free `coerce_*` function but no `impl` block with
-`parse`/`safe_parse`. `@safeParse("first")` models emit a fail-fast
+skipped by the Rust generator; models flagged `@no_codegen` (and its variants) keep only the parts of their public interface that are not suppressed (`pub struct` or the public `safe_parse` entry points). `@safeParse("first")` models emit a fail-fast
 `safe_parse` that records only the first validation error (using
 `thread_local!` state emitted when any model asks for it). See
 [Model decorators](/guide/axm#model-decorators).
@@ -101,11 +98,11 @@ pub async fn get_user(
 - **Naming conversions** — SQL `snake_case` names are converted per target:
   `camelCase` for TypeScript, `snake_case` for Rust.
 - **Per-model decorators** — `@target(...)` filters both model and query output
-  per target in both generators; `@no_codegen` (models only) suppresses the
-  standalone parse API; `@parse` is a no-op marker; `@safeParse("first")` /
+  per target in both generators; `@no_codegen` (and its variants, for models only) suppress the
+  standalone parse API and/or public types; `@parse` is a no-op marker; `@safeParse("first")` /
   `@safeParse("all")` (models only) select fail-fast vs. collect-all error
   handling for the standalone parse API. Transactions accept the same
-  `@target(...)` decorator as queries; `@no_codegen` and `@safeParse(...)` are
+  `@target(...)` decorator as queries; `@no_codegen` and its variants, and `@safeParse(...)` are
   only valid on models. Models referenced only by emitted
   declarations are pulled in with just their type and coercion logic.
 - **Only what you use** — validation helpers (e.g. regex presets for email/UUID)

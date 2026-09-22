@@ -32,7 +32,7 @@ convention `cargo fmt --check` uses, so it drops straight into CI.
 - Calls with four or more arguments break onto continuation lines, one `.rule()`
   per line; calls with three or fewer stay inline.
 - Transformations are listed before validations.
-- Model decorators (`@target(...)`, `@no_codegen`, `@parse`,
+- Model decorators (`@target(...)`, `@no_codegen`, `@no_types_codegen`, `@no_validation_codegen`, `@parse`,
   `@safeParse("first"|"all")`) are preserved and printed on their own line
   above the `model` keyword; `@target` argument lists are canonicalized to
   double-quoted, comma-separated names

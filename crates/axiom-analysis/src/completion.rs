@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use axiom_core::axm::ast::{Rule, Transform, TypeRef};
+use axiom_core::axm::ast::{ModelOverride, Rule, Transform, TypeRef};
 
 use crate::database::{AnalysisDatabase, Lang};
 use crate::token::TokenKind;
@@ -110,6 +110,26 @@ impl AnalysisDatabase {
             return self.model_completions(&prefix);
         }
 
+        // After `@` — decorators. Offer the same decorators the parser
+        // accepts, so completion can never insert an invalid spelling.
+        if tokens
+            .iter()
+            .rev()
+            .find(|t| t.kind != TokenKind::Comment && t.end <= word_start)
+            .is_some_and(|t| t.kind == TokenKind::Punct && t.text == "@")
+        {
+            return ModelOverride::ALL
+                .iter()
+                .filter(|o| o.name().to_lowercase().starts_with(&prefix.to_lowercase()))
+                .map(|o| CompletionItem {
+                    label: o.name().to_string(),
+                    detail: decorator_detail(o.name()).to_string(),
+                    kind: CompletionKind::Keyword,
+                    insert_text: o.name().to_string(),
+                })
+                .collect();
+        }
+
         self.model_completions(&prefix)
     }
 
@@ -125,6 +145,19 @@ impl AnalysisDatabase {
                 insert_text: name.to_string(),
             })
             .collect()
+    }
+}
+
+/// Short description for a decorator, one per `ModelOverride` variant.
+fn decorator_detail(name: &str) -> &'static str {
+    match name {
+        "target" => "restrict codegen to the listed targets",
+        "no_codegen" => "never emit the standalone validation API",
+        "no_types_codegen" => "never emit the generated public model type",
+        "no_validation_codegen" => "never emit public validation generation",
+        "parse" => "keep the standalone validation API",
+        "safeParse" => "set the safeParse error aggregation mode",
+        _ => unreachable!("unknown decorator {name}"),
     }
 }
 
@@ -176,6 +209,69 @@ mod tests {
             assert!(
                 !labels.iter().any(|l| l == stale),
                 "stale validator {stale} suggested"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_model_decorators_after_at() {
+        let src = "@\nmodel User { id: UUID }";
+        let offset = src.find('@').unwrap() + 1;
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        let expect = [
+            "target",
+            "no_codegen",
+            "no_types_codegen",
+            "no_validation_codegen",
+            "parse",
+            "safeParse",
+        ];
+        for name in expect {
+            let matches = labels.iter().filter(|l| l == &name).count();
+            assert_eq!(
+                matches, 1,
+                "expected exactly one suggestion for {name}, got {labels:?}"
+            );
+        }
+        assert_eq!(
+            labels.len(),
+            expect.len(),
+            "unexpected extra suggestions: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn filters_model_decorators_by_typed_prefix() {
+        let src = "@no_\nmodel User { id: UUID }";
+        let offset = src.find('@').unwrap() + 4;
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        assert_eq!(
+            labels,
+            vec!["no_codegen", "no_types_codegen", "no_validation_codegen"]
+        );
+    }
+
+    #[test]
+    fn annotates_model_decorators_as_keywords() {
+        let src = "@\nmodel User { id: UUID }";
+        let offset = src.find('@').unwrap() + 1;
+        let items = db_from(src).completion(Path::new("models/a.axm"), offset);
+        assert!(!items.is_empty());
+        assert!(
+            items.iter().all(|i| { i.kind == CompletionKind::Keyword }),
+            "expected all decorators to be keyword completions, got {items:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_suggest_decorators_away_from_at() {
+        let src = "model User { email: X }";
+        let offset = src.find('X').unwrap();
+        let labels = labels(db_from(src).completion(Path::new("models/a.axm"), offset));
+        for stale in ["no_codegen", "no_types_codegen", "no_validation_codegen", "safeParse"] {
+            assert!(
+                !labels.iter().any(|l| l == stale),
+                "decorator {stale} suggested away from `@`"
             );
         }
     }

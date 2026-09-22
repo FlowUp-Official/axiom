@@ -135,7 +135,7 @@ model ShortId = String
 - A declaration with no `@target` restriction is emitted for every configured
   target.
 
-### `@no_codegen` — suppress the standalone validation API
+### `@no_codegen`, `@no_types_codegen`, `@no_validation_codegen` — suppress generation
 
 ```axm
 @no_codegen
@@ -143,28 +143,37 @@ model InternalThing {
   id: UUID
 }
 
-@no_codegen
-model ShortId = String
+@no_types_codegen
+model ParseOnly {
+  id: UUID
+}
+
+@no_validation_codegen
+model TypeOnly {
+  id: UUID
+}
 ```
 
-A `@no_codegen` model (alias or block) never receives its own standalone parse
-entry point (`Result` / `safeParse` / `parse` in TypeScript,
-`SomeModel::parse` / `SomeModel::safe_parse` in Rust). For block models, its
-type/interface/struct is still emitted — and still exported — so it can appear
-as a field type, model alias, or query return, and `coerce`/validation helpers
-it depends on are included as needed. For model aliases, `@no_codegen` causes
-the alias to fully fold into its base type (no `coerce{Name}` function is
-emitted; references use the base type directly).
+These decorators suppress parts of the public emission of a block model:
+- `@no_codegen`: Suppresses both the standalone validation API and the public model type.
+- `@no_types_codegen`: Suppresses the public generated model type (`pub struct` / `export interface`), while keeping public validation generation.
+- `@no_validation_codegen`: Suppresses public validation generation, while keeping the public model type.
 
-- A `@no_codegen` model (alias or block) that nothing references is dropped
-  from the output entirely (no dead code).
-- A `@no_codegen` model pulled in by an emitted model, model alias, or query is
-  emitted with its type and coercion logic but without the standalone parse API.
-- `@no_codegen` only applies to `model` declarations; `@target("...")` on a
-  `query` is allowed, but `@no_codegen` on a query is a parse error.
-- `@target` and `@no_codegen` are **mutually exclusive** on the same model;
-  each decorator may appear **at most once**. An unknown decorator name or an
-  unknown target is a parse error.
+For block models suppressed this way, the internal pieces the generator needs (the struct/interface and its `coerce` helper) are still emitted privately, so a suppressed model can appear as a field type, model alias, or query/transaction parameter or return, and the validation helpers it depends on are included.
+
+**Referencing a suppressed type from a public model is intentional.** A public model whose field (or alias, or query/transaction return) names a `@no_codegen`/`@no_types_codegen` model still composes `coerce` recursively into that model's private helper, and the hidden type is never promoted to `pub`/`export`:
+- **TypeScript**: the outer interface is `export`ed and its fields keep their types, so consumers read nested data with full type-checking even though the nested interface is unexported (TypeScript types are structural and have no runtime privacy).
+- **Rust**: the outer struct is `pub`, the nested struct stays private. Consumers can use the outer model's `safe_parse`/`parse`, and reach nested data by serializing (e.g. `serde_json::to_value(&outer)`) — but they cannot name the nested type or navigate `outer.field` as a typed value across crates (the compiler emits a `private_interfaces` warning). If the nested type must be nameable, mark it `@no_validation_codegen` (public type, no validation API) instead.
+
+The public API each decorator leaves behind is genuinely consumable without naming the hidden type:
+- Rust `@no_types_codegen` models expose free `safe_parse_{name}` / `parse_{name}` functions whose return type is the public `serde_json::Value` (the hidden struct is never referenced by a public signature).
+- TypeScript `@no_types_codegen` models export `safeParse{Name}` / `parse{Name}`; their result types carry the value's shape, so consumers use it structurally even though the interface itself is not exported.
+
+- An unreferenced `@no_codegen` model is dropped from the output entirely (no dead code). `@no_types_codegen` and `@no_validation_codegen` models are always emitted because one half of their surface is public.
+- A `@no_codegen` model pulled in by an emitted model, model alias, or query is emitted with its type and coercion logic but without any public API.
+- These decorators only apply to `model` declarations; using them on a `query` is a parse error.
+- `@target` and these decorators are **mutually exclusive** on the same model. The three codegen decorators are mutually exclusive with each other. Each decorator may appear **at most once**.
+- `@no_codegen` and `@no_validation_codegen` are **mutually exclusive** with `@parse` and `@safeParse(...)`. `@no_types_codegen` keeps public validation, so `@parse` / `@safeParse(...)` remain valid with it.
 
 ### `@parse` — explicit no-op marker
 

@@ -267,6 +267,63 @@ async fn completion_is_empty_for_standalone_sql_files() {
 }
 
 #[tokio::test]
+async fn completion_offers_model_decorators_after_at() {
+    let (dir, base) = workspace();
+    let (mut service, _socket, _root) = setup(&base).await;
+
+    let uri = file_uri(&base, "models/post.axm");
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "axm",
+                "version": 1,
+                "text": "@\nmodel Post {\n  title: String\n}\n"
+            }
+        }),
+    )
+    .await;
+
+    let value = call(
+        &mut service,
+        "textDocument/completion",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 1 }
+        }),
+    )
+    .await;
+    let response: Option<CompletionResponse> = serde_json::from_value(value).unwrap();
+    let Some(CompletionResponse::Array(items)) = response else {
+        panic!("expected a completion array, got {response:?}");
+    };
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for decorator in [
+        "target",
+        "no_codegen",
+        "no_types_codegen",
+        "no_validation_codegen",
+        "parse",
+        "safeParse",
+    ] {
+        assert_eq!(
+            labels.iter().filter(|l| **l == decorator).count(),
+            1,
+            "expected exactly one `@{decorator}` suggestion, got {labels:?}"
+        );
+    }
+    assert!(
+        items
+            .iter()
+            .any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
+        "expected decorators to surface as keyword completions, got {items:?}"
+    );
+    drop((dir, service));
+}
+
+#[tokio::test]
 async fn hover_describes_table_and_columns() {
     let (dir, base) = workspace();
     let (mut service, _socket, _root) = setup(&base).await;

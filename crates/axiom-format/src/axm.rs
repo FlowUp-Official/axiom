@@ -93,6 +93,8 @@ fn format_override(override_: &ModelOverride) -> String {
                 .join(", ")
         ),
         ModelOverride::NoCodegen => "@no_codegen".to_string(),
+        ModelOverride::NoTypesCodegen => "@no_types_codegen".to_string(),
+        ModelOverride::NoValidationCodegen => "@no_validation_codegen".to_string(),
         ModelOverride::Parse => "@parse".to_string(),
         ModelOverride::SafeParse(mode) => format!("@safeParse(\"{}\")", mode.name()),
     }
@@ -454,6 +456,15 @@ model UserView extends select<public.users> {
             "{out}"
         );
         assert!(out.contains("@no_codegen\nmodel Secret {"), "{out}");
+        assert_eq!(out, fmt(&out), "formatting must be idempotent");
+    }
+
+    #[test]
+    fn formats_no_types_and_no_validation_codegen_overrides() {
+        let src = "@no_types_codegen\nmodel A { id: UUID }\n@no_validation_codegen\nmodel B { id: UUID }";
+        let out = fmt(src);
+        assert!(out.contains("@no_types_codegen\nmodel A {"), "{out}");
+        assert!(out.contains("@no_validation_codegen\nmodel B {"), "{out}");
         assert_eq!(out, fmt(&out), "formatting must be idempotent");
     }
 

@@ -94,7 +94,7 @@ pub fn generate_rust_models_with_options(
             ann,
         );
     }
-    for (resolved, _) in &plan {
+    for (resolved, emission) in &plan {
         let fields = effective_fields(registry, catalog, &resolved.path, &resolved.model);
         emit_struct(
             &mut out,
@@ -103,6 +103,7 @@ pub fn generate_rust_models_with_options(
             &resolved.model,
             &fields,
             &cyclic,
+            *emission,
         );
     }
     for (resolved, emission) in &plan {
@@ -528,13 +529,19 @@ fn emit_struct(
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
     cyclic: &BTreeSet<String>,
+    emission: ModelEmission,
 ) {
     let type_name = model_name(model);
+    let vis = if matches!(emission, ModelEmission::Full | ModelEmission::TypesOnly) {
+        "pub "
+    } else {
+        ""
+    };
     let _ = writeln!(
         out,
         "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]"
     );
-    let _ = writeln!(out, "pub struct {type_name} {{");
+    let _ = writeln!(out, "{vis}struct {type_name} {{");
     for field in fields {
         let rust_name = util::rust_field_ident(&field.emitted_name);
         let ty = rust_field_type(registry, path, field, cyclic);
@@ -559,8 +566,9 @@ fn emit_impl_and_coerce(
     let coerce_name = coerce_fn_name(&model.name);
     let first = fail_fast && effective_safe_parse_mode(model, options) == SafeParseMode::First;
 
-    // `@no_codegen` models have their type and `coerce` emitted (referencing
-    // declarations depend on them) but no standalone `safe_parse`/`parse`.
+    // `@no_codegen` / `@no_types_codegen` structs are private; only the parsing
+    // entry points named below are part of the public API. `@no_validation_codegen`
+    // models have a `pub` struct but no standalone validation.
     if matches!(emission, ModelEmission::Full) {
         let _ = writeln!(out, "impl {type_name} {{");
         if options.emit_safe_parse {
@@ -643,6 +651,98 @@ fn emit_impl_and_coerce(
             let _ = writeln!(out, "    }}");
         }
         let _ = writeln!(out, "}}\n");
+    } else if matches!(emission, ModelEmission::ValidationOnly) {
+        // `@no_types_codegen` keeps a public validation API even though the
+        // model struct stays private. The entry points are free functions whose
+        // return type is the public `serde_json::Value`, so consumers can call
+        // them and use the coerced value without ever naming the private struct.
+        let safe_parse_name = format!("safe_parse_{}", util::rust_field_name(&model.name));
+        let parse_name = format!("parse_{}", util::rust_field_name(&model.name));
+        if options.emit_safe_parse {
+            let _ = writeln!(
+                out,
+                "pub fn {safe_parse_name}(value: &serde_json::Value) -> Result<serde_json::Value, Vec<ValidationError>> {{"
+            );
+            let _ = writeln!(
+                out,
+                "    let mut errors: Vec<ValidationError> = Vec::new();"
+            );
+            let _ = writeln!(
+                out,
+                "    let mut path: Vec<PathSegment> = Vec::new();"
+            );
+            if first {
+                let _ = writeln!(out, "    let prev_fail_fast = AXM_FAIL_FAST.with(|c| c.get());");
+                let _ = writeln!(out, "    AXM_FAIL_FAST.with(|c| c.set(true));");
+            }
+            let _ = writeln!(
+                out,
+                "    let out = {coerce_name}(value, &mut path, &mut errors);"
+            );
+            if first {
+                let _ = writeln!(out, "    AXM_FAIL_FAST.with(|c| c.set(prev_fail_fast));");
+            }
+            let _ = writeln!(out, "    if errors.is_empty() {{");
+            let _ = writeln!(
+                out,
+                "        Ok(serde_json::to_value(out).expect(\"{type_name} must serialize\"))"
+            );
+            let _ = writeln!(out, "    }} else {{");
+            let _ = writeln!(out, "        Err(errors)");
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "}}\n");
+        }
+        if options.emit_parse {
+            let _ = writeln!(
+                out,
+                "pub fn {parse_name}(value: &serde_json::Value) -> serde_json::Value {{"
+            );
+            if options.emit_safe_parse {
+                let _ = writeln!(out, "    match {safe_parse_name}(value) {{");
+                let _ = writeln!(out, "        Ok(value) => value,");
+                let _ = writeln!(
+                    out,
+                    "        Err(errors) => panic!(\"{type_name} validation failed: {{errors:?}}\"),"
+                );
+                let _ = writeln!(out, "    }}");
+            } else {
+                // Standalone `parse` (no `safe_parse` requested): inline the
+                // coercion and panic on the first (or all) errors.
+                let _ = writeln!(
+                    out,
+                    "    let mut errors: Vec<ValidationError> = Vec::new();"
+                );
+                let _ = writeln!(
+                    out,
+                    "    let mut path: Vec<PathSegment> = Vec::new();"
+                );
+                if first {
+                    let _ = writeln!(out, "    let prev_fail_fast = AXM_FAIL_FAST.with(|c| c.get());");
+                    let _ = writeln!(out, "    AXM_FAIL_FAST.with(|c| c.set(true));");
+                }
+                let _ = writeln!(
+                    out,
+                    "    let out = {coerce_name}(value, &mut path, &mut errors);"
+                );
+                if first {
+                    let _ = writeln!(out, "    AXM_FAIL_FAST.with(|c| c.set(prev_fail_fast));");
+                }
+                let _ = writeln!(
+                    out,
+                    "    if !errors.is_empty() {{"
+                );
+                let _ = writeln!(
+                    out,
+                    "        panic!(\"{type_name} validation failed: {{errors:?}}\");"
+                );
+                let _ = writeln!(out, "    }}");
+                let _ = writeln!(
+                    out,
+                    "    serde_json::to_value(out).expect(\"{type_name} must serialize\")"
+                );
+            }
+            let _ = writeln!(out, "}}\n");
+        }
     }
 
     let _ = writeln!(
@@ -1901,7 +2001,7 @@ model Shared {
     }
 
     #[test]
-    fn no_codegen_models_emit_struct_but_not_impl() {
+    fn no_codegen_models_emit_internal_struct_but_no_public_api() {
         let src = r#"
 model User {
   account: Account
@@ -1917,10 +2017,177 @@ model Secret {
 "#;
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(!out.contains("Secret"));
-        assert!(out.contains("pub struct Account {"));
+        // `@no_codegen` provides neither a public type nor public validation,
+        // but the struct + `coerce` stay as internal machinery for the
+        // referencing `User` model.
+        assert!(!out.contains("pub struct Account {"));
+        assert!(out.contains("\nstruct Account {"));
         assert!(out.contains("fn coerce_account("));
         assert!(!out.contains("impl Account {"));
         assert!(!out.contains("safe_parse(value: &serde_json::Value) -> Result<Account"));
+        assert!(out.contains("pub struct User {"));
+    }
+
+    #[test]
+    fn codegen_decorators_matrix_rust() {
+        let src = r#"
+model DefaultModel { id: UUID }
+@no_codegen
+model NoCodegenModel { id: UUID }
+@no_types_codegen
+model NoTypesModel { id: UUID }
+@no_validation_codegen
+model NoValidationModel { id: UUID }
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+
+        // Default: type and validation are both public.
+        assert!(out.contains("pub struct DefaultModel {"), "{out}");
+        assert!(out.contains(
+            "impl DefaultModel {\n    pub fn safe_parse(value: &serde_json::Value) -> Result<DefaultModel, Vec<ValidationError>> {"
+        ), "{out}");
+        assert!(out.contains("pub fn parse(value: &serde_json::Value) -> DefaultModel {"), "{out}");
+
+        // @no_codegen: neither public. Unreferenced, so nothing is emitted and
+        // the struct is not even generated as internal machinery.
+        assert!(!out.contains("NoCodegenModel"), "{out}");
+
+        // @no_types_codegen: only validation is public. The struct stays
+        // private, so the entry points are free functions returning the public
+        // `serde_json::Value` — a consumer can call and use them without ever
+        // naming the hidden struct.
+        assert!(!out.contains("pub struct NoTypesModel"), "{out}");
+        assert!(out.contains("\nstruct NoTypesModel {"), "{out}");
+        assert!(out.contains("fn coerce_no_types_model("), "{out}");
+        assert!(out.contains(
+            "pub fn safe_parse_no_types_model(value: &serde_json::Value) -> Result<serde_json::Value, Vec<ValidationError>> {"
+        ), "{out}");
+        assert!(out.contains(
+            "pub fn parse_no_types_model(value: &serde_json::Value) -> serde_json::Value {"
+        ), "{out}");
+        assert!(!out.contains("impl NoTypesModel {"), "{out}");
+        // No public entry point may reference the private struct: the public
+        // signatures mention only `serde_json::Value` / `Vec<ValidationError>`.
+        assert!(
+            !out.contains("pub fn safe_parse_no_types_model(value: &serde_json::Value) -> Result<NoTypesModel"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("pub fn parse_no_types_model(value: &serde_json::Value) -> NoTypesModel"),
+            "{out}"
+        );
+
+        // @no_validation_codegen: only the type is public.
+        assert!(out.contains("pub struct NoValidationModel {"), "{out}");
+        assert!(out.contains("fn coerce_no_validation_model("), "{out}");
+        assert!(!out.contains("impl NoValidationModel {"), "{out}");
+        assert!(!out.contains("safe_parse_no_validation_model("), "{out}");
+        assert!(!out.contains("parse_no_validation_model("), "{out}");
+        assert!(
+            !out.contains("pub fn safe_parse(value: &serde_json::Value) -> Result<NoValidationModel"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn no_types_codegen_safe_parse_first_keeps_fail_fast() {
+        let src = r#"
+@safeParse("first")
+@no_types_codegen
+model ApiKey {
+  secret: String .min(32)
+  label: String .nonempty()
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("thread_local! {"), "{out}");
+        assert!(out.contains("let prev_fail_fast = AXM_FAIL_FAST.with(|c| c.get());"), "{out}");
+        assert!(out.contains(
+            "pub fn safe_parse_api_key(value: &serde_json::Value) -> Result<serde_json::Value, Vec<ValidationError>> {"
+        ), "{out}");
+        assert!(out.contains("serde_json::to_value(out).expect(\"ApiKey must serialize\")"), "{out}");
+        assert!(!out.contains("impl ApiKey {"), "{out}");
+    }
+
+    #[test]
+    fn no_codegen_models_emit_internal_struct_but_no_public_api_locks_nested_reference() {
+        // The `@no_codegen` / `@no_types_codegen` types stay private even when
+        // a public model references them, and they keep no standalone `impl`
+        // API. This is intentional: the parent model's `coerce` composes into
+        // the private `coerce_*` helpers so validation still works, while the
+        // suppressed public interfaces stay suppressed (the matrix is not
+        // weakened). Cross-crate Rust consumers can use the outer model's
+        // public API and reach nested data via serde, but cannot name the
+        // nested type — see docs/guide/axm.md.
+        let src = r#"
+model User {
+  profile: Profile
+  apiKey: ApiKey
+}
+@no_codegen
+model Profile {
+  id: UUID
+}
+@no_types_codegen
+model ApiKey {
+  secret: String .min(32)
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+
+        // The outer model is fully public...
+        assert!(out.contains("pub struct User {"), "{out}");
+        assert!(out.contains("\nimpl User {\n    pub fn safe_parse(value: &serde_json::Value) -> Result<User, Vec<ValidationError>> {"), "{out}");
+        // ...and its fields reference the suppressed model types, which stay
+        // private (no `pub struct`).
+        assert!(out.contains("    pub profile: Profile,"), "{out}");
+        assert!(out.contains("    pub api_key: ApiKey,"), "{out}");
+        assert!(!out.contains("pub struct Profile {"), "{out}");
+        assert!(!out.contains("pub struct ApiKey {"), "{out}");
+        assert!(out.contains("\nstruct Profile {"), "{out}");
+        assert!(out.contains("\nstruct ApiKey {"), "{out}");
+        assert!(!out.contains("impl Profile {"), "{out}");
+        assert!(!out.contains("impl ApiKey {"), "{out}");
+
+        // Validation composes recursively through the private coerce helpers.
+        assert!(out.contains("fn coerce_profile("), "{out}");
+        assert!(out.contains("fn coerce_api_key("), "{out}");
+        assert!(out.contains("            let base = coerce_profile(raw, path, errors);"), "{out}");
+        assert!(out.contains("            let base = coerce_api_key(raw, path, errors);"), "{out}");
+
+        // `@no_types_codegen` still exposes public validation for the nested
+        // model, returning the public `serde_json::Value` (never the private
+        // struct).
+        assert!(out.contains(
+            "pub fn safe_parse_api_key(value: &serde_json::Value) -> Result<serde_json::Value, Vec<ValidationError>> {"
+        ), "{out}");
+        assert!(out.contains("pub fn parse_api_key(value: &serde_json::Value) -> serde_json::Value {"), "{out}");
+        // `@no_codegen` exposes nothing.
+        assert!(!out.contains("safe_parse_profile("), "{out}");
+        assert!(!out.contains("parse_profile("), "{out}");
+    }
+
+    #[test]
+    fn no_validation_codegen_still_emits_query_coerce_reference() {
+        // `@no_validation_codegen` keeps the type public and the `coerce`
+        // helper so query/transaction params can still validate through it.
+        let src = r#"
+@no_validation_codegen
+model CreateUserInput {
+  email: String .email()
+}
+query CreateUser($input: CreateUserInput) {
+  INSERT INTO users (email) VALUES ($input.email);
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct CreateUserInput {"), "{out}");
+        assert!(out.contains("fn coerce_create_user_input("), "{out}");
+        assert!(out.contains(
+            "let _ = coerce_create_user_input(&serde_json::to_value(&self.input)?, &mut path, &mut param_errors);"
+        ), "{out}");
+        assert!(!out.contains("safe_parse("), "{out}");
+        assert!(!out.contains("impl CreateUserInput {"), "{out}");
     }
 
     #[test]

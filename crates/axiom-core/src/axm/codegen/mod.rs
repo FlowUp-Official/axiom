@@ -65,6 +65,8 @@ pub(crate) enum ModelEmission {
     /// The full public surface: the type plus the standalone validation API
     /// (`safeParse`/`parse`, Rust `safe_parse`/`parse`).
     Full,
+    TypesOnly,
+    ValidationOnly,
     /// Only the type and `coerce` needed by referencing declarations —
     /// `@no_codegen` models pulled into the output by a reference.
     Internal,
@@ -174,7 +176,13 @@ pub(crate) fn emit_plan(
         .filter(|resolved| emitted.contains(&resolved.model.name))
         .map(|resolved| {
             let emission = if public.contains(&resolved.model.name) {
-                ModelEmission::Full
+                if resolved.model.is_no_types_codegen() {
+                    ModelEmission::ValidationOnly
+                } else if resolved.model.is_no_validation_codegen() {
+                    ModelEmission::TypesOnly
+                } else {
+                    ModelEmission::Full
+                }
             } else {
                 ModelEmission::Internal
             };

@@ -482,7 +482,8 @@ fn emit_model(
     let type_name = model_name(model);
     let first = effective_safe_parse_mode(model, options) == SafeParseMode::First;
 
-    let _ = writeln!(out, "export interface {type_name} {{");
+    let vis = if matches!(emission, ModelEmission::Full | ModelEmission::TypesOnly) { "export " } else { "" };
+    let _ = writeln!(out, "{vis}interface {type_name} {{");
     for field in fields {
         let optional = if field.optional { "?" } else { "" };
         let _ = writeln!(
@@ -514,7 +515,7 @@ fn emit_model(
     let _ = writeln!(out, "  return out;");
     let _ = writeln!(out, "}}\n");
 
-    if matches!(emission, ModelEmission::Full) {
+    if matches!(emission, ModelEmission::Full | ModelEmission::ValidationOnly) {
         if options.emit_safe_parse {
             let _ = writeln!(
                 out,
@@ -1537,7 +1538,8 @@ model Account {
 "#;
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(!out.contains("Secret"));
-        assert!(out.contains("export interface Account {"));
+        assert!(!out.contains("export interface Account {"));
+        assert!(out.contains("interface Account {"));
         assert!(out.contains("  account: Account;"));
         assert!(out.contains("function coerceAccount("));
         assert!(!out.contains("safeParseAccount"));
@@ -1996,5 +1998,93 @@ model User {
         for expected in EXPECTED_EXPORTS {
             assert!(out.contains(expected), "Expected {expected} in output: {out}");
         }
+    }
+
+    #[test]
+    fn new_codegen_decorators_typescript() {
+        let src = r#"
+model DefaultModel { id: UUID }
+@no_codegen
+model NoCodegenModel { id: UUID }
+@no_types_codegen
+model NoTypesModel { id: UUID }
+@no_validation_codegen
+model NoValidationModel { id: UUID }
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+
+        // Default: type and validation are both public.
+        assert!(out.contains("export interface DefaultModel {"));
+        assert!(out.contains("export function safeParseDefaultModel("));
+        assert!(out.contains("export function parseDefaultModel("));
+
+        // @no_codegen: neither public. Unreferenced, so nothing is generated
+        // for the model at all (not even the internal interface).
+        assert!(!out.contains("NoCodegenModel"), "{out}");
+
+        // @no_types_codegen: only validation is public. The interface is kept
+        // internally but not exported; the exported safeParse/parse entry
+        // points return values consumers use structurally without naming the
+        // interface, so the model type is never part of the import surface.
+        assert!(!out.contains("export interface NoTypesModel {"));
+        assert!(out.contains("interface NoTypesModel {"));
+        assert!(out.contains("function coerceNoTypesModel("));
+        assert!(out.contains("export type NoTypesModelResult = { ok: true; value: NoTypesModel } | { ok: false; errors: ValidationError[] };"));
+        assert!(out.contains("export function safeParseNoTypesModel(input: unknown): NoTypesModelResult {"));
+        assert!(out.contains("export function parseNoTypesModel(input: unknown): NoTypesModel {"));
+        assert!(!out.contains("export interface NoTypesModel"));
+
+        // @no_validation_codegen: only the type is public; validation is
+        // neither exported nor generated.
+        assert!(out.contains("export interface NoValidationModel {"));
+        assert!(out.contains("function coerceNoValidationModel("));
+        assert!(!out.contains("export function safeParseNoValidationModel("));
+        assert!(!out.contains("function safeParseNoValidationModel("));
+        assert!(!out.contains("function parseNoValidationModel("));
+        assert!(!out.contains("NoValidationModelResult"));
+    }
+
+    #[test]
+    fn public_models_may_reference_internal_models() {
+        // A public model may reference `@no_codegen` / `@no_types_codegen`
+        // models: the interfaces stay unexported, but the public interface
+        // fields are fully usable structurally by consumers (TypeScript has no
+        // runtime privacy). Coerce still composes into the unexported helpers.
+        let src = r#"
+model User {
+  profile: Profile
+  apiKey: ApiKey
+}
+@no_codegen
+model Profile {
+  id: UUID
+}
+@no_types_codegen
+model ApiKey {
+  secret: String .min(32)
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+
+        assert!(out.contains("export interface User {"), "{out}");
+        assert!(out.contains("  profile: Profile;"), "{out}");
+        assert!(out.contains("  apiKey: ApiKey;"), "{out}");
+        assert!(!out.contains("export interface Profile {"), "{out}");
+        assert!(!out.contains("export interface ApiKey {"), "{out}");
+        assert!(out.contains("interface Profile {"), "{out}");
+        assert!(out.contains("interface ApiKey {"), "{out}");
+
+        assert!(out.contains("function coerceProfile("), "{out}");
+        assert!(out.contains("function coerceApiKey("), "{out}");
+        assert!(out.contains("out.profile = value;"), "{out}");
+        assert!(out.contains("out.apiKey = value;"), "{out}");
+
+        // `@no_types_codegen` still exports validation for the nested model.
+        assert!(out.contains("export type ApiKeyResult = { ok: true; value: ApiKey } | { ok: false; errors: ValidationError[] };"), "{out}");
+        assert!(out.contains("export function safeParseApiKey("), "{out}");
+        assert!(out.contains("export function parseApiKey("), "{out}");
+        // `@no_codegen` exports nothing.
+        assert!(!out.contains("safeParseProfile"), "{out}");
+        assert!(!out.contains("parseProfile"), "{out}");
     }
 }

@@ -139,6 +139,20 @@ impl ModelDecl {
             .any(|o| matches!(o, ModelOverride::NoCodegen))
     }
 
+    /// Whether the `@no_types_codegen` decorator is applied.
+    pub fn is_no_types_codegen(&self) -> bool {
+        self.overrides
+            .iter()
+            .any(|o| matches!(o, ModelOverride::NoTypesCodegen))
+    }
+
+    /// Whether the `@no_validation_codegen` decorator is applied.
+    pub fn is_no_validation_codegen(&self) -> bool {
+        self.overrides
+            .iter()
+            .any(|o| matches!(o, ModelOverride::NoValidationCodegen))
+    }
+
     /// The explicit `@safeParse(...)` mode, if the model carries the decorator.
     pub fn safe_parse_override(&self) -> Option<SafeParseMode> {
         self.overrides.iter().find_map(|o| match o {
@@ -164,6 +178,12 @@ pub enum ModelOverride {
     /// Its type and `coerce` are emitted only when another emitted declaration
     /// references the model. Only applicable to `model` declarations.
     NoCodegen,
+    /// `@no_types_codegen` — never emit the public generated model type.
+    /// Public validation generation is kept.
+    NoTypesCodegen,
+    /// `@no_validation_codegen` — never emit public validation generation.
+    /// Public model type is kept.
+    NoValidationCodegen,
     /// `@parse` — declare that this model keeps its standalone validation
     /// entry points (`Result`/`safeParse`/`parse`). Documentary: every
     /// model not marked `@no_codegen` gets them anyway. Only applicable to
@@ -175,6 +195,32 @@ pub enum ModelOverride {
     /// applicable to `model` declarations; mutually exclusive with
     /// `@no_codegen`.
     SafeParse(SafeParseMode),
+}
+
+impl ModelOverride {
+    /// Every decorator the parser accepts, in canonical order. The editor
+    /// offers exactly these names, so completion stays in sync with the
+    /// hand-rolled parser; adding a decorator means adding a variant here.
+    pub const ALL: [ModelOverride; 6] = [
+        ModelOverride::Target(Vec::new()),
+        ModelOverride::NoCodegen,
+        ModelOverride::NoTypesCodegen,
+        ModelOverride::NoValidationCodegen,
+        ModelOverride::Parse,
+        ModelOverride::SafeParse(SafeParseMode::All),
+    ];
+
+    /// The source spelling of the decorator (the `no_codegen` in `@no_codegen`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ModelOverride::Target(_) => "target",
+            ModelOverride::NoCodegen => "no_codegen",
+            ModelOverride::NoTypesCodegen => "no_types_codegen",
+            ModelOverride::NoValidationCodegen => "no_validation_codegen",
+            ModelOverride::Parse => "parse",
+            ModelOverride::SafeParse(_) => "safeParse",
+        }
+    }
 }
 
 /// The error-aggregation mode named by `@safeParse(...)`.
@@ -212,7 +258,7 @@ impl SafeParseMode {
 fn target_restriction(overrides: &[ModelOverride]) -> Option<&[Target]> {
     overrides.iter().find_map(|o| match o {
         ModelOverride::Target(targets) => Some(targets.as_slice()),
-        ModelOverride::NoCodegen | ModelOverride::Parse | ModelOverride::SafeParse(_) => None,
+        _ => None,
     })
 }
 

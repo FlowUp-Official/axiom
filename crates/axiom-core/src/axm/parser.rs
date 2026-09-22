@@ -591,6 +591,24 @@ fn model_override(input: &mut &str) -> PResult<ModelOverride> {
             }
             Ok(ModelOverride::NoCodegen)
         }
+        "no_types_codegen" => {
+            if opt('(').parse_next(input)?.is_some() {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError("`@no_types_codegen` takes no arguments".into()),
+                )));
+            }
+            Ok(ModelOverride::NoTypesCodegen)
+        }
+        "no_validation_codegen" => {
+            if opt('(').parse_next(input)?.is_some() {
+                return Err(ErrMode::Cut(ContextError::from_external_error(
+                    input,
+                    RuleError("`@no_validation_codegen` takes no arguments".into()),
+                )));
+            }
+            Ok(ModelOverride::NoValidationCodegen)
+        }
         "parse" => {
             if opt('(').parse_next(input)?.is_some() {
                 return Err(ErrMode::Cut(ContextError::from_external_error(
@@ -674,6 +692,8 @@ fn quoted_word(input: &mut &str) -> PResult<String> {
 fn validate_override_combination(input: &mut &str, overrides: &[ModelOverride]) -> PResult<()> {
     let mut has_target = false;
     let mut has_no_codegen = false;
+    let mut has_no_types_codegen = false;
+    let mut has_no_validation_codegen = false;
     let mut has_parse = false;
     let mut has_safe_parse = false;
     for override_ in overrides {
@@ -696,6 +716,24 @@ fn validate_override_combination(input: &mut &str, overrides: &[ModelOverride]) 
                 }
                 has_no_codegen = true;
             }
+            ModelOverride::NoTypesCodegen => {
+                if has_no_types_codegen {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@no_types_codegen` is specified more than once".into()),
+                    )));
+                }
+                has_no_types_codegen = true;
+            }
+            ModelOverride::NoValidationCodegen => {
+                if has_no_validation_codegen {
+                    return Err(ErrMode::Cut(ContextError::from_external_error(
+                        input,
+                        RuleError("model override `@no_validation_codegen` is specified more than once".into()),
+                    )));
+                }
+                has_no_validation_codegen = true;
+            }
             ModelOverride::Parse => {
                 if has_parse {
                     return Err(ErrMode::Cut(ContextError::from_external_error(
@@ -716,17 +754,26 @@ fn validate_override_combination(input: &mut &str, overrides: &[ModelOverride]) 
             }
         }
     }
-    if has_target && has_no_codegen {
+
+    let codegen_overrides = (has_no_codegen as u8) + (has_no_types_codegen as u8) + (has_no_validation_codegen as u8);
+    if codegen_overrides > 1 {
         return Err(ErrMode::Cut(ContextError::from_external_error(
             input,
-            RuleError("`@target` cannot be combined with `@no_codegen` on the same model".into()),
+            RuleError("`@no_codegen`, `@no_types_codegen`, and `@no_validation_codegen` are mutually exclusive".into()),
         )));
     }
-    if has_no_codegen && (has_parse || has_safe_parse) {
+
+    if has_target && codegen_overrides > 0 {
+        return Err(ErrMode::Cut(ContextError::from_external_error(
+            input,
+            RuleError("`@target` cannot be combined with `@no_codegen`, `@no_types_codegen`, or `@no_validation_codegen` on the same model".into()),
+        )));
+    }
+    if (has_no_codegen || has_no_validation_codegen) && (has_parse || has_safe_parse) {
         return Err(ErrMode::Cut(ContextError::from_external_error(
             input,
             RuleError(
-                "`@no_codegen` cannot be combined with `@parse` or `@safeParse` on the same model"
+                "`@no_codegen` and `@no_validation_codegen` cannot be combined with `@parse` or `@safeParse` on the same model"
                     .into(),
             ),
         )));
@@ -977,6 +1024,8 @@ fn validate_query_overrides(input: &mut &str, overrides: &[ModelOverride]) -> PR
     for override_ in overrides {
         let message = match override_ {
             ModelOverride::NoCodegen => "`@no_codegen` only applies to `model` declarations",
+            ModelOverride::NoTypesCodegen => "`@no_types_codegen` only applies to `model` declarations",
+            ModelOverride::NoValidationCodegen => "`@no_validation_codegen` only applies to `model` declarations",
             ModelOverride::Parse => "`@parse` only applies to `model` declarations",
             ModelOverride::SafeParse(_) => "`@safeParse` only applies to `model` declarations",
             ModelOverride::Target(_) => continue,
@@ -1155,6 +1204,55 @@ model User extends select<users> {
     }
 
     #[test]
+    fn parses_no_types_and_no_validation_codegen_overrides() {
+        let file = parse("@no_types_codegen\nmodel A { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::NoTypesCodegen]
+        );
+        assert!(file.models[0].is_no_types_codegen());
+        assert!(!file.models[0].is_no_validation_codegen());
+        assert!(!file.models[0].is_no_codegen());
+        assert!(file.models[0].target_restriction().is_none());
+
+        let file = parse("@no_validation_codegen\nmodel B { id: UUID }");
+        assert_eq!(
+            file.models[0].overrides,
+            vec![ModelOverride::NoValidationCodegen]
+        );
+        assert!(file.models[0].is_no_validation_codegen());
+        assert!(!file.models[0].is_no_types_codegen());
+        assert!(!file.models[0].is_no_codegen());
+        assert!(file.models[0].target_restriction().is_none());
+    }
+
+    #[test]
+    fn decorator_catalog_spellings_match_the_parser() {
+        // The completion catalog (`ModelOverride::ALL`) must agree with the
+        // spellings the parser actually accepts, so insertions stay valid.
+        for o in ModelOverride::ALL {
+            let decorator = match o.name() {
+                "target" => "@target(\"typescript\")".to_string(),
+                "safeParse" => "@safeParse(\"all\")".to_string(),
+                name => format!("@{name}"),
+            };
+            let file = parse(&format!("{decorator}\nmodel User {{ id: UUID }}"));
+            assert_eq!(file.models[0].overrides[0].name(), o.name());
+        }
+    }
+
+    #[test]
+    fn no_types_codegen_combines_with_parse_decorators() {
+        // `@no_types_codegen` keeps public validation, so the parse-API
+        // decorators are compatible with it (unlike `@no_codegen`/
+        // `@no_validation_codegen`).
+        for decorator in ["@no_types_codegen\n@parse", "@no_types_codegen\n@safeParse(\"all\")"] {
+            let file = parse(&format!("{decorator}\nmodel User {{ id: UUID }}"));
+            assert!(file.models[0].is_no_types_codegen());
+        }
+    }
+
+    #[test]
     fn target_override_applies_to_queries() {
         let file = parse(
             "@target(\"rust\")\nquery Log($msg: String) { INSERT INTO logs (msg) VALUES ($msg) }",
@@ -1175,6 +1273,12 @@ model User extends select<users> {
             "@no_codegen\nquery Log($msg: String) { INSERT INTO logs (msg) VALUES ($msg) }",
         );
         assert!(err.contains("only applies to `model`"), "{err}");
+        for decorator in ["@no_types_codegen", "@no_validation_codegen"] {
+            let err = parse_err(&format!(
+                "{decorator}\nquery Log($msg: String) {{ INSERT INTO logs (msg) VALUES ($msg) }}"
+            ));
+            assert!(err.contains("only applies to `model`"), "{err}");
+        }
         let err = parse_err("@parse\nquery Log($msg: String) { SELECT $msg }");
         assert!(err.contains("`@parse` only applies to `model`"), "{err}");
         let err = parse_err("@safeParse(\"first\")\nquery Log($msg: String) { SELECT $msg }");
@@ -1196,8 +1300,23 @@ model User extends select<users> {
 
     #[test]
     fn rejects_target_combined_with_no_codegen() {
-        let err = parse_err("@target(\"typescript\")\n@no_codegen\nmodel User { id: UUID }");
-        assert!(err.contains("cannot be combined"), "{err}");
+        for decorator in ["@no_codegen", "@no_types_codegen", "@no_validation_codegen"] {
+            let err = parse_err(&format!(
+                "@target(\"typescript\")\n{decorator}\nmodel User {{ id: UUID }}"
+            ));
+            assert!(err.contains("cannot be combined"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_combined_codegen_decorators() {
+        let err = parse_err("@no_codegen\n@no_types_codegen\nmodel User { id: UUID }");
+        assert!(err.contains("mutually exclusive"), "{err}");
+        let err = parse_err("@no_codegen\n@no_validation_codegen\nmodel User { id: UUID }");
+        assert!(err.contains("mutually exclusive"), "{err}");
+        let err =
+            parse_err("@no_types_codegen\n@no_validation_codegen\nmodel User { id: UUID }");
+        assert!(err.contains("mutually exclusive"), "{err}");
     }
 
     #[test]
@@ -1205,8 +1324,10 @@ model User extends select<users> {
         let err =
             parse_err("@target(\"typescript\")\n@target(\"rust\")\nmodel User { a: String }");
         assert!(err.contains("more than once"), "{err}");
-        let err = parse_err("@no_codegen\n@no_codegen\nmodel User { a: String }");
-        assert!(err.contains("more than once"), "{err}");
+        for decorator in ["@no_codegen", "@no_types_codegen", "@no_validation_codegen"] {
+            let err = parse_err(&format!("{decorator}\n{decorator}\nmodel User {{ a: String }}"));
+            assert!(err.contains("more than once"), "{err}");
+        }
         let err = parse_err("@parse\n@parse\nmodel User { a: String }");
         assert!(err.contains("more than once"), "{err}");
         let err = parse_err("@safeParse(\"first\")\n@safeParse(\"all\")\nmodel User { a: String }");
@@ -1227,6 +1348,10 @@ model User extends select<users> {
         assert!(err.contains("requires a target list"), "{err}");
         let err = parse_err("@no_codegen()\nmodel User { a: String }");
         assert!(err.contains("takes no arguments"), "{err}");
+        for decorator in ["@no_types_codegen", "@no_validation_codegen"] {
+            let err = parse_err(&format!("{decorator}()\nmodel User {{ a: String }}"));
+            assert!(err.contains("takes no arguments"), "{err}");
+        }
         let err = parse_err("@parse(\"x\")\nmodel User { a: String }");
         assert!(err.contains("takes no arguments"), "{err}");
         let err = parse_err("@safeParse\nmodel User { a: String }");
@@ -1285,6 +1410,13 @@ model User extends select<users> {
         let err = parse_err("@no_codegen\n@parse\nmodel User { a: String }");
         assert!(err.contains("cannot be combined"), "{err}");
         let err = parse_err("@safeParse(\"first\")\n@no_codegen\nmodel User { a: String }");
+        assert!(err.contains("cannot be combined"), "{err}");
+        // `@no_validation_codegen` also drops the parse API, so `@parse` /
+        // `@safeParse(...)` are incompatible with it too.
+        let err = parse_err("@no_validation_codegen\n@parse\nmodel User { a: String }");
+        assert!(err.contains("cannot be combined"), "{err}");
+        let err =
+            parse_err("@safeParse(\"first\")\n@no_validation_codegen\nmodel User { a: String }");
         assert!(err.contains("cannot be combined"), "{err}");
     }
 
@@ -1628,7 +1760,13 @@ transaction CreatePost($userId: UUID) {
 
     #[test]
     fn model_only_decorators_are_rejected_on_transaction() {
-        for decorator in ["@no_codegen", "@parse", "@safeParse(\"all\")"] {
+        for decorator in [
+            "@no_codegen",
+            "@no_types_codegen",
+            "@no_validation_codegen",
+            "@parse",
+            "@safeParse(\"all\")",
+        ] {
             let err = parse_err(&format!(
                 "{decorator}\ntransaction T($id: UUID) {{ UPDATE a SET x = 1; UPDATE b SET y = 2; }}"
             ));
