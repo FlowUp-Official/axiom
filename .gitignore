@@ -6,7 +6,5 @@
 /schemas
 .directory
 
-/extensions/tree-sitter-axm/
-/extensions/axiom-zed/
 *.wasm
 .ai-memory/

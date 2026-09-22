@@ -1,0 +1,6 @@
+[submodule "extensions/axiom-zed"]
+	path = extensions/axiom-zed
+	url = https://github.com/FlowUp-Official/axiom-zed
+[submodule "extensions/tree-sitter-axm"]
+	path = extensions/tree-sitter-axm
+	url = https://github.com/FlowUp-Official/tree-sitter-axm
