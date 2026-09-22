@@ -2235,4 +2235,127 @@ query GetUser($id: UserId) -> Int {
             "params with no rules must emit a trivial validate: {out}"
         );
     }
+
+    #[test]
+    fn model_struct_emits_all_primitive_field_types() {
+        let src = r#"
+model User {
+  name: String
+  count: Int
+  big: BigInt
+  ratio: Float
+  active: Boolean
+  uid: UUID
+  payload: Json
+  born: Date
+  when: DateTime
+  data: Bytes
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct User {"), "{out}");
+        assert!(out.contains("pub name: String,"), "{out}");
+        assert!(out.contains("pub count: i64,"), "{out}");
+        assert!(out.contains("pub big: i64,"), "{out}");
+        assert!(out.contains("pub ratio: f64,"), "{out}");
+        assert!(out.contains("pub active: bool,"), "{out}");
+        assert!(out.contains("pub uid: String,"), "{out}");
+        assert!(out.contains("pub payload: serde_json::Value,"), "{out}");
+        assert!(out.contains("pub born: String,"), "{out}");
+        assert!(out.contains("pub when: String,"), "{out}");
+        assert!(out.contains("pub data: Vec<u8>,"), "{out}");
+        assert!(out.contains("pub fn safe_parse(value: &serde_json::Value) -> Result<User, Vec<ValidationError>>"), "{out}");
+        assert!(out.contains("pub fn parse(value: &serde_json::Value) -> User {"), "{out}");
+    }
+
+    #[test]
+    fn model_struct_emits_optional_and_nullable_fields() {
+        let src = r#"
+model User {
+  name: String
+  nickname?: String
+  meta: String?
+  tags: String[]
+  coords: String[]?
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct User {"), "{out}");
+        assert!(out.contains("pub name: String,"), "{out}");
+        assert!(out.contains("pub nickname: Option<String>,"), "{out}");
+        assert!(out.contains("pub meta: Option<String>,"), "{out}");
+        assert!(out.contains("pub tags: Vec<String>,"), "{out}");
+        assert!(out.contains("pub coords: Option<Vec<String>>,"), "{out}");
+    }
+
+    #[test]
+    fn model_struct_emits_model_to_model_field_references() {
+        let src = r#"
+model Address {
+  street: String
+  city: String
+}
+model User {
+  name: String
+  address: Address
+  secondary: Address?
+  addresses: Address[]
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct Address {"), "{out}");
+        assert!(out.contains("pub struct User {"), "{out}");
+        assert!(out.contains("pub name: String,"), "{out}");
+        assert!(out.contains("pub address: Address,"), "{out}");
+        assert!(out.contains("pub secondary: Option<Address>,"), "{out}");
+        assert!(out.contains("pub addresses: Vec<Address>,"), "{out}");
+        assert!(out.contains("fn coerce_address("), "{out}");
+        assert!(out.contains("fn coerce_user("), "{out}");
+        assert!(out.contains("coerce_address("), "{out}");
+    }
+
+    #[test]
+    fn model_types_are_pub_importable_by_consumer() {
+        let src = r#"
+model User {
+  name: String
+  age: Int
+}
+model Post {
+  title: String
+  author: User
+}
+query GetPost($id: Int) -> Post {
+  SELECT title, author_id FROM posts WHERE id = $id;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("pub struct User {"), "User must be pub for consumer import: {out}");
+        assert!(out.contains("pub struct Post {"), "Post must be pub for consumer import: {out}");
+        assert!(out.contains("pub fn safe_parse(value: &serde_json::Value) -> Result<User, Vec<ValidationError>>"), "User safe_parse must be pub: {out}");
+        assert!(out.contains("pub fn safe_parse(value: &serde_json::Value) -> Result<Post, Vec<ValidationError>>"), "Post safe_parse must be pub: {out}");
+        assert!(out.contains("pub async fn get_post("), "Query function must be pub: {out}");
+        assert!(out.contains("-> Result<Post,"), "Post type must be in scope for query return: {out}");
+        assert!(out.contains("author: User"), "User type must be in scope for Post field: {out}");
+    }
+
+    #[test]
+    fn model_types_are_pub_no_private_structs() {
+        let src = r#"
+model User {
+  name: String
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        let structs: Vec<&str> = out.lines()
+            .filter(|l| l.trim().starts_with("struct ") && !l.trim().starts_with("struct ") == false)
+            .filter(|l| l.contains("struct ") && l.contains("{"))
+            .map(|l| {
+                let s = l.trim();
+                if s.starts_with("pub struct") { "" } else { s }
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(structs.is_empty(), "All model structs must be pub: {structs:?}");
+    }
 }

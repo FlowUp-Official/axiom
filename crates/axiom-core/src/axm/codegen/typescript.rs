@@ -1879,4 +1879,122 @@ query CreateUser($input: CreateUserInput) {
         assert!(out.contains("${params.email}"));
         assert_eq!(out.matches("${params.email}").count(), 1);
     }
+
+    #[test]
+    fn model_interface_emits_all_primitive_field_types() {
+        let src = r#"
+model User {
+  name: String
+  count: Int
+  big: BigInt
+  ratio: Float
+  active: Boolean
+  uid: UUID
+  payload: Json
+  born: Date
+  when: DateTime
+  data: Bytes
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface User {"), "{out}");
+        assert!(out.contains("name: string;"), "{out}");
+        assert!(out.contains("count: number;"), "{out}");
+        assert!(out.contains("big: bigint;"), "{out}");
+        assert!(out.contains("ratio: number;"), "{out}");
+        assert!(out.contains("active: boolean;"), "{out}");
+        assert!(out.contains("uid: string;"), "{out}");
+        assert!(out.contains("payload: unknown;"), "{out}");
+        assert!(out.contains("born: string;"), "{out}");
+        assert!(out.contains("when: string;"), "{out}");
+        assert!(out.contains("data: Uint8Array;"), "{out}");
+        assert!(out.contains("export function safeParseUser("), "{out}");
+    }
+
+    #[test]
+    fn model_interface_emits_optional_and_nullable_fields() {
+        let src = r#"
+model User {
+  name: String
+  nickname?: String
+  meta: String?
+  tags: String[]
+  coords: String[]?
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface User {"), "{out}");
+        assert!(out.contains("name: string;"), "{out}");
+        assert!(out.contains("nickname?: string;"), "{out}");
+        assert!(out.contains("meta: string | null;"), "{out}");
+        assert!(out.contains("tags: string[];"), "{out}");
+        assert!(out.contains("coords: string[] | null;"), "{out}");
+    }
+
+    #[test]
+    fn model_interface_emits_model_to_model_field_references() {
+        let src = r#"
+model Address {
+  street: String
+  city: String
+}
+model User {
+  name: String
+  address: Address
+  secondary: Address?
+  addresses: Address[]
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface Address {"), "{out}");
+        assert!(out.contains("export interface User {"), "{out}");
+        assert!(out.contains("name: string;"), "{out}");
+        assert!(out.contains("address: Address;"), "{out}");
+        assert!(out.contains("secondary: Address | null;"), "{out}");
+        assert!(out.contains("addresses: Address[];"), "{out}");
+        assert!(out.contains("function coerceAddress("), "{out}");
+        assert!(out.contains("function coerceUser("), "{out}");
+        assert!(out.contains("coerceAddress("), "{out}");
+    }
+
+    #[test]
+    fn model_types_are_export_importable_by_consumer() {
+        let src = r#"
+model User {
+  name: String
+  age: Int
+}
+model Post {
+  title: String
+  author: User
+}
+query GetPost($id: Int) -> Post {
+  SELECT title, author_id FROM posts WHERE id = $id;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(out.contains("export interface User {"), "User must be exported for consumer import: {out}");
+        assert!(out.contains("export interface Post {"), "Post must be exported for consumer import: {out}");
+        assert!(out.contains("export function safeParseUser("), "User safeParse must be exported: {out}");
+        assert!(out.contains("export function safeParsePost("), "Post safeParse must be exported: {out}");
+        assert!(out.contains("export async function getPost("), "Query function must be exported: {out}");
+        assert!(out.contains("Promise<Post>"), "Post type must be in scope for query return: {out}");
+        assert!(out.contains("author: User"), "User type must be in scope for Post field: {out}");
+    }
+
+    #[test]
+    fn model_types_are_export_no_private_interfaces() {
+        let src = r#"
+model User {
+  name: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        const EXPECTED_EXPORTS: &[&str] = &[
+            "export interface User {",
+        ];
+        for expected in EXPECTED_EXPORTS {
+            assert!(out.contains(expected), "Expected {expected} in output: {out}");
+        }
+    }
 }

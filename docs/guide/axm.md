@@ -36,6 +36,17 @@ All declarations use the `model` keyword. Two forms exist:
 * **Type alias** — `model Name = <type>;` defines a reusable, named refinement of a primitive or existing type.
 * **Block model** — `model Name { ... }` (optionally `extends select<...>`) defines a typed shape with fields.
 
+### Generated types
+
+Every `model` declaration is generated as a real type in both TypeScript and Rust:
+
+| Target | Generated from `model User { ... }` | Import path |
+| ------ | ----------------------------------- | ----------- |
+| TypeScript | `export interface User { ... }` | from the generated `.ts` output file |
+| Rust | `pub struct User { ... }` | from the generated `.rs` output file |
+
+Model types are **publicly accessible** — consumers import them directly from the generated API output. See [Code Generation](/guide/codegen#axm-model-types) for field type mappings, nullable/array fields, and model-to-model references.
+
 ### Type aliases
 
 Aliases are declared with the `name = <type>` form:

@@ -113,3 +113,106 @@ pub async fn get_user(
 - **Deterministic output** — generation is a pure function of the inputs, so
   repeated runs produce byte-identical files (when inputs are unchanged,
   generation is skipped entirely via the cache).
+
+## `.axm` model types
+
+Every `model` declaration in a `.axm` file is generated as a real type in
+both TypeScript and Rust. These types are **publicly accessible** from the
+generated API — consumers import them directly from the generated output file.
+
+### TypeScript model types
+
+Each model declaration produces an `export interface`:
+
+```ts
+// From: model User { name: String; age: Int }
+export interface User {
+  name: string;
+  age: number;
+}
+```
+
+Import from the generated API file (e.g. `gen/api.ts`):
+
+```ts
+import { User } from "./gen/api";
+```
+
+### Rust model types
+
+Each model declaration produces a `pub struct`:
+
+```rust
+// From: model User { name: String; age: Int }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct User {
+    pub name: String,
+    pub age: i64,
+}
+```
+
+Import from the generated API file (e.g. `gen/core.rs`):
+
+```rust
+use my_project::core::User;
+```
+
+### Field type mappings
+
+| Axiom type | TypeScript | Rust |
+| ---------- | ---------- | ---- |
+| `String` | `string` | `String` |
+| `Int` | `number` | `i64` |
+| `BigInt` | `bigint` | `i64` |
+| `Float` | `number` | `f64` |
+| `Boolean` | `boolean` | `bool` |
+| `UUID` | `string` | `String` |
+| `Date` | `string` | `String` |
+| `DateTime` | `string` | `String` |
+| `Json` | `unknown` | `serde_json::Value` |
+| `Bytes` | `Uint8Array` | `Vec<u8>` |
+| `ModelName` | `ModelName` | `ModelName` |
+
+### Nullable and array fields
+
+| Axiom type | TypeScript | Rust |
+| ---------- | ---------- | ---- |
+| `Field?` (optional) | `Type \| undefined` | `Option<Type>` |
+| `Type?` (nullable) | `Type \| null` | `Option<Type>` |
+| `Type[]` (array) | `Type[]` | `Vec<Type>` |
+
+### Model-to-model references
+
+A model field can reference another model by name. The generated type uses
+the referenced model's type directly:
+
+```axm
+model Address { street: String; city: String }
+model User { name: String; address: Address; addresses: Address[] }
+```
+
+```ts
+// TypeScript
+export interface Address { street: string; city: string; }
+export interface User {
+  name: string;
+  address: Address;
+  addresses: Address[];
+}
+```
+
+```rust
+// Rust
+#[derive(...)]
+pub struct Address { pub street: String, pub city: String, }
+#[derive(...)]
+pub struct User {
+    pub name: String,
+    pub address: Address,
+    pub addresses: Vec<Address>,
+}
+```
+
+Cyclic references (e.g. `A → B → A`) are handled automatically: the
+involved models box their cyclic fields (`Box<A>` in Rust) to keep struct
+sizes finite.
