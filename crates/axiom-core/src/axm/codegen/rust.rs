@@ -1222,12 +1222,10 @@ fn emit_params_struct(
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    let has_checks = params.iter().any(|p| {
-        let inlined = inline_annotated(registry, path, &AnnotatedType::new(p.ty.clone()));
-        !inlined.rules.is_empty() || !inlined.transforms.is_empty()
-    });
+    let has_checks = params.iter().any(|p| param_needs_validation(registry, path, p));
     if has_checks {
         out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
+        out.push_str("        let mut path: Vec<PathSegment> = Vec::new();\n");
         for param in params {
             emit_param_validation(out, registry, path, param);
         }
@@ -1538,6 +1536,26 @@ fn emit_param_validation(
     param: &crate::axm::ast::ParamDecl,
 ) {
     let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
+
+    // When the param's type is a model reference (e.g. `$input: CreateUserInput`),
+    // validate the entire value by running the model's coerce function. Model
+    // fields carry their own nested rules, so we don't fold — we delegate.
+    if is_model_param(registry, path, &param.ty) {
+        let field = util::rust_field_ident(&param.name);
+        let model_name = resolve_model_name(registry, path, &param.ty);
+        let coerce_fn = format!("coerce_{}", util::rust_field_name(&model_name));
+        let _ = writeln!(
+            out,
+            "        let mut param_errors: Vec<ValidationError> = Vec::new();"
+        );
+        let _ = writeln!(
+            out,
+            "        let _ = {coerce_fn}(&serde_json::to_value(&self.{field})?, &mut path, &mut param_errors);"
+        );
+        out.push_str("        errors.extend(param_errors);\n");
+        return;
+    }
+
     if inlined.rules.is_empty() && inlined.transforms.is_empty() {
         return;
     }
@@ -1558,6 +1576,57 @@ fn emit_param_validation(
         let _ = writeln!(out, "                message: \"{msg}\".to_string(),");
         let _ = writeln!(out, "            }});");
         let _ = writeln!(out, "        }}");
+    }
+}
+
+/// Whether a param needs validation: it either has inline rules/transforms or
+/// its type is a model reference that should be validated via its coerce function.
+fn param_needs_validation(
+    registry: &ModelRegistry,
+    path: &Path,
+    param: &crate::axm::ast::ParamDecl,
+) -> bool {
+    if is_model_param(registry, path, &param.ty) {
+        return true;
+    }
+    let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
+    !inlined.rules.is_empty() || !inlined.transforms.is_empty()
+}
+
+/// Whether a param's type resolves to a model (not a pure alias or primitive),
+/// meaning it should be validated via the model's coerce function.
+fn is_model_param(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+) -> bool {
+    match ty {
+        TypeRef::Named(name) => matches!(
+            named_kind(registry, path, name),
+            NamedKind::Model(_) | NamedKind::AliasFun(_)
+        ),
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => is_model_param(registry, path, inner),
+        _ => false,
+    }
+}
+
+/// Resolve the canonical model name for a param's type, descending through
+/// nullable/array wrappers and pure aliases.
+fn resolve_model_name(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+) -> String {
+    match ty {
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) => name,
+            NamedKind::Pure(base) => resolve_model_name(registry, path, &base),
+            NamedKind::Unknown(name) => name,
+        },
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
+            resolve_model_name(registry, path, inner)
+        }
+        _ => String::new(),
     }
 }
 
@@ -2111,5 +2180,59 @@ transaction RsOnly($a: Int) -> Int {
         let out = generate_rust_models(&registry(src), &no_catalog());
         assert!(out.contains("pub async fn rs_only("));
         assert!(!out.contains("ts_only"));
+    }
+
+    #[test]
+    fn model_typed_params_invoke_coerce_validator() {
+        let src = r#"
+model CreateUserInput {
+  email: String .email()
+  name: String .nonempty()
+}
+query CreateUser($input: CreateUserInput) {
+  INSERT INTO users (email, name) VALUES ($input.email, $input.name);
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(
+            out.contains("let _ = coerce_create_user_input(&serde_json::to_value(&self.input)?, &mut path, &mut param_errors);"),
+            "{out}"
+        );
+        assert!(out.contains("errors.extend(param_errors);"), "{out}");
+        assert!(out.contains("pub struct CreateUserParams {"), "{out}");
+    }
+
+    #[test]
+    fn model_typed_transaction_params_invoke_coerce_validator() {
+        let src = r#"
+model UpdateInput {
+  name: String .nonempty()
+}
+transaction UpdateUser($id: UUID, $input: UpdateInput) -> User {
+  UPDATE users SET name = $input.name WHERE id = $id;
+  SELECT * FROM users WHERE id = $id;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(
+            out.contains("let _ = coerce_update_input(&serde_json::to_value(&self.input)?, &mut path, &mut param_errors);"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn pure_alias_params_do_not_invoke_coerce() {
+        let src = r#"
+model UserId = BigInt
+query GetUser($id: UserId) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(!out.contains("coerce_user_id("), "pure alias param must not invoke a coerce fn: {out}");
+        assert!(
+            out.contains("let _ = self;\n"),
+            "params with no rules must emit a trivial validate: {out}"
+        );
     }
 }

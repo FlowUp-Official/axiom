@@ -916,6 +916,7 @@ fn emit_params_types(
         "export function validate{pascal}Params(params: {params_type}): ValidationError[] {{"
     );
     out.push_str("  const errors: ValidationError[] = [];\n");
+    out.push_str("  const path: Seg[] = [];\n");
     for param in params {
         emit_param_validation(out, registry, path, param);
     }
@@ -1189,6 +1190,27 @@ fn emit_param_validation(
     param: &crate::axm::ast::ParamDecl,
 ) {
     let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
+
+    // When the param's type is a model reference (e.g. `$input: CreateUserInput`),
+    // validate the entire value by running the model's coerce function. Model
+    // fields carry their own nested rules, so we delegate rather than fold.
+    if is_model_param(registry, path, &param.ty) {
+        let field = util::ts_field_name(&param.name);
+        let model_name = resolve_model_name(registry, path, &param.ty);
+        let coerce_fn = format!("coerce{}", util::pascal_case(&model_name));
+        let _ = writeln!(out, "  {{");
+        let _ = writeln!(
+            out,
+            "    const paramPath: Seg[] = [['f', '{field}']];"
+        );
+        let _ = writeln!(
+            out,
+            "    {coerce_fn}(params.{field} as unknown, paramPath, errors);"
+        );
+        let _ = writeln!(out, "  }}");
+        return;
+    }
+
     if inlined.rules.is_empty() && inlined.transforms.is_empty() {
         return;
     }
@@ -1197,6 +1219,43 @@ fn emit_param_validation(
     let _ = writeln!(out, "    const fieldPath: Seg[] = [['f', '{field}']];");
     emit_annotated_value(out, registry, path, &inlined, &format!("params.{field}"), 4);
     let _ = writeln!(out, "  }}");
+}
+
+/// Whether a param's type resolves to a model (not a pure alias or primitive),
+/// meaning it should be validated via the model's coerce function.
+fn is_model_param(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+) -> bool {
+    match ty {
+        TypeRef::Named(name) => matches!(
+            named_kind(registry, path, name),
+            NamedKind::Model(_) | NamedKind::AliasFun(_)
+        ),
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => is_model_param(registry, path, inner),
+        _ => false,
+    }
+}
+
+/// Resolve the canonical model name for a param's type, descending through
+/// nullable/array wrappers and pure aliases.
+fn resolve_model_name(
+    registry: &ModelRegistry,
+    path: &Path,
+    ty: &TypeRef,
+) -> String {
+    match ty {
+        TypeRef::Named(name) => match named_kind(registry, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) => name,
+            NamedKind::Pure(base) => resolve_model_name(registry, path, &base),
+            NamedKind::Unknown(name) => name,
+        },
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
+            resolve_model_name(registry, path, inner)
+        }
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1728,6 +1787,55 @@ transaction TsOnly($a: Int) -> Int {
         let out = generate_typescript_models(&registry(src), &no_catalog());
         assert!(out.contains("export async function tsOnly("));
         assert!(!out.contains("rsOnly"));
+    }
+
+    #[test]
+    fn model_typed_params_invoke_coerce_validator() {
+        let src = r#"
+model CreateUserInput {
+  email: String .email()
+  name: String .nonempty()
+}
+query CreateUser($input: CreateUserInput) {
+  INSERT INTO users (email, name) VALUES ($input.email, $input.name);
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(
+            out.contains("coerceCreateUserInput(params.input as unknown, paramPath, errors);"),
+            "{out}"
+        );
+        assert!(out.contains("export interface CreateUserParams {"), "{out}");
+    }
+
+    #[test]
+    fn model_typed_transaction_params_invoke_coerce_validator() {
+        let src = r#"
+model UpdateInput {
+  name: String .nonempty()
+}
+transaction UpdateUser($id: UUID, $input: UpdateInput) -> User {
+  UPDATE users SET name = $input.name WHERE id = $id;
+  SELECT * FROM users WHERE id = $id;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+        assert!(
+            out.contains("coerceUpdateInput(params.input as unknown, paramPath, errors);"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn pure_alias_params_do_not_invoke_coerce() {
+        let src = r#"
+model UserId = BigInt
+query GetUser($id: UserId) -> Int {
+  SELECT 1;
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &no_catalog());
+    assert!(!out.contains("coerceUserId("), "pure alias param must not invoke a coerce fn: {out}");
     }
 
     #[test]
