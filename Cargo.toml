@@ -12,8 +12,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
+panic = "abort"
+
+[profile.release.package."*"]
+opt-level = 3
 
 [workspace.dependencies]
 blake3 = "1.8.7"

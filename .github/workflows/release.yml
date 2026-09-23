@@ -94,7 +94,7 @@ jobs:
           path: |
             axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
             axiom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
-            target/x86_64-unknown-linux-gnu/release/axiom
+            dist/axiom
 
       - name: Upload Windows artifacts
         if: runner.os == 'Windows'
@@ -119,11 +119,21 @@ jobs:
           path: artifacts
 
       # 1. Generate the JSON schema with the binary built from this exact tag.
+      #    download-artifact@v8 extracts each artifact into its own
+      #    subdirectory and preserves the uploaded relative paths, so the binary
+      #    lands at artifacts/axiom-linux/dist/axiom.
       - name: Generate JSON schema from the release binary
         shell: bash
         run: |
-          chmod +x artifacts/axiom-linux/axiom
-          artifacts/axiom-linux/axiom schema > axiom.schema.json
+          AXIOM_BIN="$(find artifacts/axiom-linux -name 'axiom' -type f | head -1)"
+          if [[ -z "${AXIOM_BIN}" ]]; then
+            echo "::error::Release binary not found in downloaded artifacts"
+            find artifacts/axiom-linux -type f
+            exit 1
+          fi
+          AXIOM_BIN="$(realpath "${AXIOM_BIN}")"
+          chmod +x "${AXIOM_BIN}"
+          "${AXIOM_BIN}" schema > axiom.schema.json
 
       # 2. Validate: schema exists, parses as JSON, and the binary is a release
       #    build that embeds the version-pinned $schema URL.
@@ -133,8 +143,10 @@ jobs:
           test -s axiom.schema.json
           python3 -m json.tool axiom.schema.json > /dev/null
           tmpdir="$(mktemp -d)"
+          AXIOM_BIN="$(find artifacts/axiom-linux -name 'axiom' -type f | head -1)"
+          AXIOM_BIN="$(realpath "${AXIOM_BIN}")"
           (cd "${tmpdir}" \
-            && "$GITHUB_WORKSPACE/artifacts/axiom-linux/axiom" init > /dev/null \
+            && "${AXIOM_BIN}" init > /dev/null \
             && grep -q 'releases/download/v' axiom.json)
           echo "Schema is valid and embeds the version-pinned $schema URL."
 

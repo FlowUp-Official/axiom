@@ -44,7 +44,7 @@ fn write_fixture(dir: &Path, schema: &str) {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.7.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -376,7 +376,7 @@ fn lint_flags_sql_rules_in_axm_query_bodies() {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.7.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -426,7 +426,7 @@ fn lint_flags_unused_query_param_and_type_alias() {
     std::fs::write(
         dir.join("axiom.json"),
         r#"{
-  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.7.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -474,7 +474,7 @@ fn lint_flags_unused_query_param_and_type_alias() {
 }
 
 const LINT_CONFIG_JSON: &str = r#"{
-  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.7.0/axiom.schema.json",
   "project": { "name": "fixture", "dialect": "postgres" },
   "cache": { "enabled": true, "path": ".axiom.cache" },
   "source": { "schema": ["schema.sql"], "axm": ["models/models.axm"] },
@@ -574,7 +574,7 @@ fn write_apis_fixture(dir: &Path, config_json: &str) {
 fn config_with_apis(apis: &str) -> String {
     format!(
         r#"{{
-  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.6.0/axiom.schema.json",
+  "$schema": "https://github.com/FlowUp-Official/axiom/releases/download/v0.7.0/axiom.schema.json",
   "project": {{ "name": "fixture", "dialect": "postgres" }},
   "cache": {{ "enabled": false, "path": ".axiom.cache" }},
   "source": {{ "schema": ["schema.sql"], "axm": ["models/models.axm"] }},
