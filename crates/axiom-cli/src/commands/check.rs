@@ -12,7 +12,7 @@ use owo_colors::{OwoColorize, Stream};
 
 use crate::CheckArgs;
 use crate::commands::base_dir;
-use crate::commands::tty::is_tty;
+use crate::commands::color::{is_tty, ColorChoice};
 
 /// Run every check phase over the workspace. With `--fix`, out-of-sync
 /// generated outputs are rewritten before reporting.
@@ -35,7 +35,7 @@ pub fn run(args: CheckArgs, config: &AxiomConfig, config_path: &Path) -> Result<
         // Cache is an optimization; a failed write is not fatal.
     }
 
-    let renderer = Renderer::new(is_tty());
+    let renderer = Renderer::new(ColorChoice::current().enabled(is_tty()));
     if !report.diagnostics.is_empty() {
         let sources = source_map(&workspace);
         eprint!(

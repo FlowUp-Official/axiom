@@ -12,7 +12,7 @@ use owo_colors::{OwoColorize, Stream};
 
 use crate::LintArgs;
 use crate::commands::base_dir;
-use crate::commands::tty::is_tty;
+use crate::commands::color::{ColorChoice, is_tty};
 
 /// Run the configured lint rules over every input file, honoring
 /// `--rules` selection and the content-addressed [`ToolCache`].
@@ -46,7 +46,7 @@ pub fn run(args: LintArgs, config: &AxiomConfig, config_path: &Path) -> Result<i
         // Cache is an optimization; a failed write is not fatal.
     }
 
-    let renderer = Renderer::new(is_tty());
+    let renderer = Renderer::new(ColorChoice::current().enabled(is_tty()));
     if !diagnostics.is_empty() {
         eprint!("{}", render_all(&renderer, &diagnostics, |_| None));
     }

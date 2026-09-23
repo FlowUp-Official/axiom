@@ -9,7 +9,7 @@ use owo_colors::{OwoColorize, Stream};
 
 use crate::FormatArgs;
 use crate::commands::base_dir;
-use crate::commands::tty::is_tty;
+use crate::commands::color::{ColorChoice, is_tty};
 
 /// Format every configured input (or the explicit `--files`), writing the
 /// canonical form back to disk. With `--check` nothing is written; the run
@@ -17,7 +17,7 @@ use crate::commands::tty::is_tty;
 pub fn run(args: FormatArgs, config: &AxiomConfig, config_path: &Path) -> Result<i32, AxiomError> {
     let base = base_dir(config_path);
     let targets = resolve_targets(config, &base, &args.files)?;
-    let renderer = Renderer::new(is_tty());
+    let renderer = Renderer::new(ColorChoice::current().enabled(is_tty()));
 
     let mut diagnostics = Vec::new();
     let mut changed = 0usize;

@@ -4,7 +4,7 @@
 pub mod check;
 pub mod format;
 pub mod lint;
-pub mod tty;
+pub mod color;
 
 use std::path::{Path, PathBuf};
 

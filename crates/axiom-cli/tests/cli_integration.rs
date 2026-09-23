@@ -676,3 +676,193 @@ fn safe_parse_first_errors_mode_drives_fail_fast_default() {
         "first mode should emit fail-fast scaffolding in Rust"
     );
 }
+
+fn run_help(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_axiom")).args(args).output().expect("run axiom --help")
+}
+
+#[test]
+fn help_auto_piped_is_plain() {
+    let out = run_help(&["--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Usage:"), "piped help should still print usage");
+    assert!(!stdout.contains("\x1b["), "piped auto help must NOT contain ANSI");
+}
+
+#[test]
+fn help_color_always_piped_is_styled() {
+    let out = run_help(&["--color", "always", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\x1b["), "--color always piped help MUST contain ANSI");
+}
+
+#[test]
+fn help_color_never_is_plain() {
+    let out = run_help(&["--color", "never", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Usage:"), "never help should still print usage");
+    assert!(!stdout.contains("\x1b["), "--color never help must be plain");
+}
+
+#[test]
+fn subcommand_help_color_always_is_styled() {
+    let out = run_help(&["--color", "always", "check", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\x1b["), "subcommand help with --color always must contain ANSI");
+}
+
+#[test]
+fn subcommand_help_auto_piped_is_plain() {
+    let out = run_help(&["check", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("\x1b["), "piped auto subcommand help must NOT contain ANSI");
+}
+
+/// Returns true if the given SGR parameter bytes are a full reset (`\x1b[0m`).
+fn is_reset(params: &[u8]) -> bool {
+    params.iter().all(|&b| b == b'0')
+}
+
+/// Returns true if the given SGR parameter bytes set a foreground color
+/// (SGR 30-37, 90-97, or 38 for extended). Clap's styling renderer (anstyle)
+/// emits effects like bold (`1`) and colors as *separate* escape sequences, so a
+/// bold region appears as `\x1b[1m\x1b[36m` — two sequences. We therefore
+/// cannot judge "bold" in isolation; we scan whole styled regions instead.
+fn is_fg_color_params(params: &[u8]) -> bool {
+    let s = std::str::from_utf8(params).unwrap_or("");
+    for part in s.split(';') {
+        match part {
+            "30" | "31" | "32" | "33" | "34" | "35" | "36" | "37" | "38" | "90" | "91"
+            | "92" | "93" | "94" | "95" | "96" | "97" => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An "active region" is the span from a non-reset SGR escape up to (but not
+/// including) the next reset `\x1b[0m`. A region is "colorless bold" when it
+/// contains a bold SGR (`1`) but no foreground-color SGR — exactly the pattern
+/// that Clap's default `Styles::styled()` produced (e.g. `\x1b[1maxiom\x1b[0m`),
+/// which terminals render as bold white.
+fn has_colorless_bold_region(out: &str) -> bool {
+    let bytes = out.as_bytes();
+    let mut i = 0;
+    let mut in_region = false;
+    let mut region_has_bold = false;
+    let mut region_has_fg = false;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Collect param bytes up to 'm'.
+            let start = i + 2;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'm' {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                break;
+            }
+            let params = &bytes[start..end];
+            if is_reset(params) {
+                // End of region: flag if it was a colorless-bold region.
+                if in_region && region_has_bold && !region_has_fg {
+                    return true;
+                }
+                in_region = false;
+                region_has_bold = false;
+                region_has_fg = false;
+            } else {
+                if is_fg_color_params(params) {
+                    region_has_fg = true;
+                }
+                let s = std::str::from_utf8(params).unwrap_or("");
+                for part in s.split(';') {
+                    if part == "1" {
+                        region_has_bold = true;
+                    }
+                }
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+     // Region never closed by reset — treat trailing state too.
+    in_region && region_has_bold && !region_has_fg
+}
+
+/// The styled help must never produce a "colorless bold" region (bold SGR with
+/// no foreground color in the same region), which is what rendered the `axiom`
+/// command name, headings, and flags as bold white under Clap's default
+/// `Styles::styled()`. The intentional palette always pairs bold with a
+/// foreground color.
+#[test]
+fn help_color_always_piped_has_no_colorless_bold_region() {
+    let out = run_help(&["--color", "always", "--help"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        !has_colorless_bold_region(&text),
+        "styled help contains a colorless-bold region (bold without fg color) — \
+         reproduces the bold-white regression:\n{}",
+        text
+    );
+}
+
+/// The `axiom` command name in the usage line must be rendered with an explicit
+/// foreground color (green in the intentional palette), never as bare bold.
+#[test]
+fn help_color_always_piped_renders_command_name_with_fg_color() {
+    let out = run_help(&["--color", "always", "--help"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    // The intentional palette renders the bin name in bold green. An explicit
+    // green foreground escape (\x1b[32m or \x1b[1;32m) must be present, and
+    // the bin name must never appear as bare bold without a color escape.
+    assert!(
+        text.as_bytes().windows(5).any(|w| w == b"\x1b[32m" || w == b"\x1b[1;3"),
+        "expected an explicit foreground color (green SGR 32) so the command name \
+         is not bold-white; got:\n{}",
+        text
+    );
+    // The exact bare-bold-no-color regression pattern is a hard failure.
+    assert!(
+        !text.contains("\x1b[1maxiom\x1b[0m"),
+        "command name rendered as bare bold (bold white): {}",
+        text
+    );
+}
+
+/// Subcommand styled help must also avoid colorless-bold regions.
+#[test]
+fn subcommand_help_color_always_has_no_colorless_bold_region() {
+    let out = run_help(&["--color", "always", "check", "--help"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("Usage:"));
+    assert!(
+        !has_colorless_bold_region(&text),
+        "subcommand styled help contains a colorless-bold region — \
+         reproduces the bold-white regression:\n{}",
+        text
+    );
+}
+
+/// `auto` over a pipe (the default test environment: stdout is not a TTY) must
+/// stay plain — the palette change must not force color when piped.
+#[test]
+fn help_auto_piped_contains_no_ansi_at_all() {
+    let out = run_help(&["--help"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        !text.contains("\x1b["),
+        "auto help over a pipe must contain zero ANSI bytes"
+    );
+    assert!(text.contains("Usage:"));
+}

@@ -12,8 +12,10 @@ use axiom_core::config::{AxiomConfig, OutputConfig, resolve_glob_paths};
 use axiom_core::db;
 use axiom_core::errors::AxiomError;
 use axiom_core::query::QueryCatalog;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
+
+use crate::commands::color::ColorChoice;
 
 mod commands;
 
@@ -21,7 +23,7 @@ mod commands;
 #[command(
     name = "axiom",
     version,
-    about = "Code generator for SQL schemas and queries"
+    about = "Code generator for validations and queries"
 )]
 struct Cli {
     /// Path to the `axiom.json` configuration file. Auto-detected in the current
@@ -31,6 +33,18 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+
+    /// When to colorize output: `auto` (default, honor terminal + `NO_COLOR`
+    /// conventions), `always`, or `never`. Also settable via `AXIOM_COLOR`.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHEN",
+        default_value_t = ColorChoice::Auto,
+        env = "AXIOM_COLOR"
+    )]
+    color: ColorChoice,
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,7 +141,15 @@ async fn main() -> miette::Result<()> {
 }
 
 async fn run() -> Result<i32, AxiomError> {
-    let cli = Cli::parse();
+    let (clap_color, clap_styles) = crate::commands::color::clap_render_seams();
+    let cli = Cli::from_arg_matches(
+        &Cli::command()
+            .color(clap_color)
+            .styles(clap_styles)
+            .get_matches(),
+    )
+    .unwrap_or_else(|e| e.exit());
+    cli.color.apply();
 
     match &cli.command {
         Commands::Schema => {
