@@ -105,6 +105,12 @@ pub fn format_sql(sql: &str) -> String {
     let mut lines = Lines::new();
     let mut current = String::new();
     let mut line_index = 0usize;
+    // In sqlparser >= 0.63, a single-line comment no longer includes its
+    // trailing newline as part of the comment token — it is emitted as a
+    // separate `Newline` token. The comment handler below flushes the comment
+    // line, so the subsequent bare `Newline` must not flush again (which would
+    // insert a spurious blank line). This flag tracks that.
+    let mut just_flushed = false;
 
     for token in tokens {
         match token {
@@ -119,16 +125,26 @@ pub fn format_sql(sql: &str) -> String {
                         // A comment ends its line; a following clause starts a
                         // fresh line at column zero.
                         line_index = 0;
+                        just_flushed = true;
                         false
                     }
                     Whitespace::MultiLineComment(_) => false,
                 };
                 if has_newline {
+                    // If the current line is already empty because the previous
+                    // token (e.g. a single-line comment) flushed it, skip the
+                    // redundant newline flush to avoid a spurious blank line.
+                    if just_flushed && current.is_empty() {
+                        just_flushed = false;
+                        continue;
+                    }
+                    just_flushed = false;
                     line_index = flush_line(&mut lines, &mut current, line_index);
                 }
             }
             Token::EOF => {}
             _ => {
+                just_flushed = false;
                 let text = render_token(&token);
                 push_token(&mut current, &text);
             }
