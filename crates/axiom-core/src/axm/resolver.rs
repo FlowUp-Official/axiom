@@ -107,6 +107,29 @@ impl ModelRegistry {
             .map(|s| s.as_str())
             .unwrap_or(written)
     }
+
+    /// Every type/model name visible in `path`'s scope: models declared in the
+    /// same file (by canonical name) plus the written names imported into that
+    /// file (which may be aliases of names declared elsewhere).
+    ///
+    /// This is the set a declaration in `path` may reference without an explicit
+    /// `import` — every other cross-file Axiom model/type name must be imported
+    /// to be used as a return type.
+    pub fn in_scope_names(&self, path: &Path) -> std::collections::BTreeSet<String> {
+        let canonical_path = canonical(path);
+        let mut scope: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for resolved in &self.models {
+            if canonical(&resolved.path) == canonical_path {
+                scope.insert(resolved.model.name.clone());
+            }
+        }
+        if let Some(bindings) = self.aliases.get(&canonical_path) {
+            for written in bindings.keys() {
+                scope.insert(written.clone());
+            }
+        }
+        scope
+    }
 }
 
 /// Compile every query and transaction declaration in a registry into the

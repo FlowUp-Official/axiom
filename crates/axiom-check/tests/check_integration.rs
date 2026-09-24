@@ -641,3 +641,402 @@ fn unreferenced_model_is_absent_from_referenced_models() {
     let referenced = collect_referenced_models(&files);
     assert!(!referenced.contains("Unused"), "{referenced:?}");
 }
+
+// --- query-contract: scalar/alias return semantics ---
+
+fn check_contract(schema_sql: &str, models_src: &str) -> Vec<axiom_diagnostics::Diagnostic> {
+    let schema = vec![file("schema.sql", schema_sql)];
+    let models = vec![file("models/models.axm", models_src)];
+    let (catalog, _) = check_schemas(&schema);
+    let registry = registry_from(&models);
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, &models);
+    diags
+}
+
+#[test]
+fn scalar_alias_array_return_accepts_compatible_column() {
+    let schema = "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);";
+    let models = "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        diags.iter().all(|d| d.code != "check.query-contract"),
+        "expected no query-contract error, got: {diags:?}"
+    );
+}
+
+#[test]
+fn scalar_alias_array_return_accepts_aliased_compatible_column() {
+    let schema = "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);";
+    let models = "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id AS id FROM follows WHERE follower_id = $userId\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        diags.iter().all(|d| d.code != "check.query-contract"),
+        "expected no query-contract error for aliased column, got: {diags:?}"
+    );
+}
+
+#[test]
+fn scalar_alias_array_return_rejects_incompatible_uuid_column() {
+    // `model UserId = String` is text-based; a UUID column is also text-class,
+    // but a numeric column is not.
+    let schema = "CREATE TABLE follows (following_id INT NOT NULL, follower_id TEXT NOT NULL);";
+    let models = "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        codes(&diags).contains(&"check.query-contract"),
+        "expected a query-contract error for SQL Int vs String alias, got: {diags:?}"
+    );
+}
+
+#[test]
+fn scalar_alias_accepts_uuid_column() {
+    // UUID is text-class; a `model X = String` alias accepts a UUID column.
+    let schema = "CREATE TABLE follows (following_id UUID NOT NULL, follower_id TEXT NOT NULL);";
+    let models = "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        diags.iter().all(|d| d.code != "check.query-contract"),
+        "expected no query-contract error for UUID vs String alias, got: {diags:?}"
+    );
+}
+
+#[test]
+fn scalar_alias_accepts_varchar_column() {
+    let schema = "CREATE TABLE follows (following_id VARCHAR(64) NOT NULL, follower_id TEXT NOT NULL);";
+    let models = "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        diags.iter().all(|d| d.code != "check.query-contract"),
+        "expected no query-contract error for VARCHAR vs String alias, got: {diags:?}"
+    );
+}
+
+#[test]
+fn int_alias_rejects_text_column() {
+    // `model Count = Int` (numeric) vs a TEXT column must mismatch.
+    let schema = "CREATE TABLE follows (n TEXT NOT NULL);";
+    let models = "model Count = Int\n\nquery Get() -> Count[] {\n  SELECT n FROM follows\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        codes(&diags).contains(&"check.query-contract"),
+        "expected a query-contract error for TEXT vs Int alias, got: {diags:?}"
+    );
+}
+
+#[test]
+fn structured_model_return_contract_remains_unchanged() {
+    // The original structured-model field matching is unaffected.
+    let schema = "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);";
+    let models = "model User { id: Int, email: String }\n\nquery list_users() -> User {\n  SELECT password FROM users\n}";
+    let diags = check_contract(schema, models);
+    assert!(
+        codes(&diags).contains(&"check.query-contract"),
+        "expected the existing field-mismatch contract error, got: {diags:?}"
+    );
+}
+
+// --- target-excluded-reference: alias/value models are emitted for every target ---
+
+#[test]
+fn alias_referenced_by_structured_model_is_not_target_excluded() {
+    let files = vec![file(
+        "models/models.axm",
+        "model UserId = String\nmodel User {\n  id: String\n  name: UserId\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert!(
+        diags.is_empty(),
+        "alias referenced by a structured model should not be target-excluded: {diags:?}"
+    );
+}
+
+#[test]
+fn alias_referenced_by_query_is_not_target_excluded() {
+    let schema = "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);";
+    let files = vec![
+        file("schema.sql", schema),
+        file(
+            "models/models.axm",
+            "model UserId = String\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let (catalog, _) = check_schemas(&files.iter().map(|f| f.clone()).collect::<Vec<_>>().as_slice());
+    let (registry, _) = check_models(None, &files[1..]);
+    let registry = registry.expect("registry");
+    // Run target-reference check on the model file only.
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files[1..]);
+    assert!(
+        diags.is_empty(),
+        "alias referenced by a query should not be target-excluded: {diags:?}"
+    );
+}
+
+#[test]
+fn alias_with_target_typescript_is_not_target_excluded_from_typescript() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"typescript\")\nmodel UserId = String\nmodel User {\n  id: String\n  name: UserId\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert!(
+        diags.is_empty(),
+        "alias emitted for every target must not be reported excluded: {diags:?}"
+    );
+}
+
+#[test]
+fn alias_with_target_rust_is_not_target_excluded_from_rust() {
+    let files = vec![file(
+        "models/models.axm",
+        "@target(\"rust\")\nmodel UserId = String\nmodel User {\n  id: String\n  name: UserId\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    assert!(
+        diags.is_empty(),
+        "alias emitted for every target must not be reported excluded: {diags:?}"
+    );
+}
+
+#[test]
+fn structured_model_target_exclusion_is_still_reported() {
+    // Regression guard: genuine @target exclusions on structured models still
+    // surface, so the alias-skip fix did not over-broaden the check.
+    let files = vec![file(
+        "models/models.axm",
+        "model Address {\n  street: String\n}\n\n@target(\"rust\")\nmodel Account {\n  owner: Address\n}\n\nmodel User {\n  name: String\n  account: Account\n}",
+    )];
+    let registry = registry_from(&files);
+    let diags = check_target_references(&AxiomConfig::default_template(), &registry, &files);
+    let ts: Vec<_> = diags.iter().filter(|d| d.message.contains("typescript")).collect();
+    assert_eq!(ts.len(), 1, "{diags:?}");
+    assert_eq!(ts[0].code, "check.target-excluded-reference");
+    assert!(ts[0].message.contains("`Account`"), "{:?}", ts[0].message);
+}
+
+// --- import scoping: query return types are exempt, fields/params are not ---
+
+#[test]
+fn query_return_type_does_not_require_cross_file_import() {
+    // `UserId` is declared in types.axm; core.axm references it only in a
+    // return type with no import. The resolver deliberately exempts return
+    // types from import scoping (a return may name a SQL table), so this
+    // resolves cleanly.
+    let files = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "query GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let (registry, diags) = check_models(None, &files);
+    assert!(diags.is_empty(), "expected no resolution errors, got: {diags:?}");
+    assert!(registry.is_some(), "registry should resolve");
+    assert!(
+        registry.unwrap().model_by_name("UserId").is_some(),
+        "UserId must be resolvable from the per-file return type"
+    );
+}
+
+#[test]
+fn model_field_referencing_unimported_type_is_rejected() {
+    // Fields ARE subject to import scoping; `UserId` used as a field type
+    // without an import must be reported as unknown.
+    let files = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "model Follow { id: String, user_id: UserId }",
+        ),
+    ];
+    let (registry, diags) = check_models(None, &files);
+    assert!(
+        diags.iter().any(|d| d.code == "check.model-resolution" && d.message.contains("unknown type `UserId`")),
+        "expected an unknown-type error for the field, got: {diags:?}"
+    );
+    assert!(registry.is_none(), "registry should not resolve");
+}
+
+#[test]
+fn query_param_referencing_unimported_type_is_rejected() {
+    let files = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "query Get($id: UserId) -> String {\n  SELECT id FROM t\n}",
+        ),
+    ];
+    let (registry, diags) = check_models(None, &files);
+    assert!(
+        diags.iter().any(|d| d.code == "check.model-resolution" && d.message.contains("unknown type `UserId`")),
+        "expected an unknown-type error for the param, got: {diags:?}"
+    );
+    assert!(registry.is_none());
+}
+
+// --- return-type import scoping ---
+
+fn run_query_check(schema_sql: &str, model_files: &[(PathBuf, String)]) -> Vec<axiom_diagnostics::Diagnostic> {
+    let schema = vec![file("schema.sql", schema_sql)];
+    let (catalog, _) = check_schemas(&schema);
+    let (registry, _) = check_models(None, model_files);
+    let registry = registry.expect("registry resolves");
+    let hash = [0u8; 32];
+    let (_, diags) = check_queries(None, &hash, &catalog, &registry, model_files);
+    diags
+}
+
+#[test]
+fn unimported_cross_file_query_return_type_is_rejected() {
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "query GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "check.model-resolution" && d.message.contains("not defined in this file and not imported")),
+        "expected a model-resolution error for unimported UserId return, got: {diags:?}"
+    );
+}
+
+#[test]
+fn imported_cross_file_query_return_type_is_accepted() {
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "import { UserId } from \"./types\"\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().all(|d| d.code != "check.model-resolution"),
+        "imported return type should not be flagged as unimported: {diags:?}"
+    );
+}
+
+#[test]
+fn unimported_cross_file_transaction_return_type_is_rejected() {
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "transaction CreateFollow($userId: String) -> UserId {\n  INSERT INTO follows (follower_id) VALUES ($userId) RETURNING following_id\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "check.model-resolution" && d.message.contains("not defined in this file and not imported")),
+        "expected a model-resolution error for unimported UserId return, got: {diags:?}"
+    );
+}
+
+#[test]
+fn imported_cross_file_transaction_return_type_is_accepted() {
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "import { UserId } from \"./types\"\ntransaction CreateFollow($userId: String) -> UserId {\n  INSERT INTO follows (follower_id) VALUES ($userId) RETURNING following_id\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().all(|d| d.code != "check.model-resolution"),
+        "imported return type should not be flagged as unimported: {diags:?}"
+    );
+}
+
+#[test]
+fn local_return_type_without_import_is_accepted() {
+    // A model declared in the same file as the query needs no import.
+    let models = vec![file(
+        "models/m.axm",
+        "model UserId = String\n\nquery GetFollowings($userId: String) -> UserId[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+    )];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().all(|d| d.code != "check.model-resolution"),
+        "locally-declared return type should not be flagged as unimported: {diags:?}"
+    );
+}
+
+#[test]
+fn sql_table_return_without_import_is_accepted() {
+    // A bare SQL table name is not an Axiom model, so import scoping does not
+    // apply (the table is validated against the catalog, not the import scope).
+    let models = vec![file(
+        "models/m.axm",
+        "query list_users() -> users[] {\n  SELECT id FROM users\n}",
+    )];
+    let diags = run_query_check(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);",
+        &models,
+    );
+    assert!(
+        diags.iter().all(|d| d.code != "check.model-resolution"),
+        "table return type should not require an import: {diags:?}"
+    );
+}
+
+#[test]
+fn imported_aliased_return_type_resolves_through_alias() {
+    // `import { UserId as UID }` then `-> UID[]` must resolve UID -> UserId.
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "import { UserId as UID } from \"./types\"\n\nquery GetFollowings($userId: String) -> UID[] {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().all(|d| d.code != "check.model-resolution"),
+        "aliased import of the return type should resolve: {diags:?}"
+    );
+}
+
+#[test]
+fn nullable_array_return_type_enforces_import() {
+    // `UserId[]?` (array then nullable) must still traverse to UserId.
+    let models = vec![
+        file("models/types.axm", "model UserId = String\n"),
+        file(
+            "models/core.axm",
+            "query GetFollowings($userId: String) -> UserId[]? {\n  SELECT following_id FROM follows WHERE follower_id = $userId\n}",
+        ),
+    ];
+    let diags = run_query_check(
+        "CREATE TABLE follows (following_id TEXT NOT NULL, follower_id TEXT NOT NULL);",
+        &models,
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "check.model-resolution" && d.message.contains("UserId")),
+        "expected a model-resolution error for nullable-array UserId return, got: {diags:?}"
+    );
+}
+

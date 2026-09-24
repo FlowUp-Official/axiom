@@ -406,7 +406,15 @@ struct ExcludedReference {
 }
 
 /// Collect references to models that are absent from `emitted`. Type aliases
-/// are skipped: they are emitted for every target and checked where declared.
+/// (value/alias models) are skipped: they are emitted for every target and
+/// checked where declared.
+///
+/// This mirrors the codegen, which emits alias models unconditionally for every
+/// target (`crates/axiom-core/src/axm/codegen/typescript.rs` and
+/// `...rust.rs` both iterate `registry.models` filtering on `model.alias`,
+/// without consulting `@target`). `emit_plan`/`emitted_model_names` exclude
+/// alias models by design because they are not part of the structured-emission
+/// set, so a reference to one must not be reported as target-excluded.
 fn collect_excluded_refs(
     registry: &ModelRegistry,
     path: &Path,
@@ -417,11 +425,13 @@ fn collect_excluded_refs(
     match ty {
         TypeRef::Named(written) => {
             let canonical = registry.effective_name(path, written);
-            if registry.model_by_name(&canonical).is_some() && !emitted.contains(canonical) {
-                out.push(ExcludedReference {
-                    written: written.clone(),
-                    canonical: canonical.to_string(),
-                });
+            if let Some(resolved) = registry.model_by_name(&canonical) {
+                if !resolved.model.is_alias() && !emitted.contains(canonical) {
+                    out.push(ExcludedReference {
+                        written: written.clone(),
+                        canonical: canonical.to_string(),
+                    });
+                }
             }
         }
         TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
@@ -698,22 +708,44 @@ fn check_declared_statement(
     match &statement.return_type {
         QueryReturn::Exec => {}
         QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
-            let name = axiom_core::axm::type_ref_name(ty);
-            if !known_return_type(catalog, registry, &name) {
-                diags.push(
-                    Diagnostic::error(
-                        path,
-                        "check.query-return-type",
-                        format!(
-                            "{} `{}` returns `{name}`, but no such table, model, or type exists",
-                            statement.kind.keyword(),
-                            statement.name
+            // Validate each named type reference in the (possibly wrapped,
+            // e.g. `UserId[]?` or `User?[]`) return type independently: it must
+            // resolve to a known table or model, and a model reference must be
+            // imported (or declared locally) — SQL table names are not Axiom
+            // models and are exempt from import scoping.
+            for written in named_type_refs(ty) {
+                let canonical = registry.effective_name(path, &written);
+                if !known_return_type(catalog, registry, &canonical) {
+                    diags.push(
+                        Diagnostic::error(
+                            path,
+                            "check.query-return-type",
+                            format!(
+                                "{} `{}` returns `{written}`, but no such table, model, or type exists",
+                                statement.kind.keyword(),
+                                statement.name
+                            ),
+                        )
+                        .with_help(
+                            "declare the table in a schema file or the model/type in a `.axm` file",
                         ),
-                    )
-                    .with_help(
-                        "declare the table in a schema file or the model/type in a `.axm` file",
-                    ),
-                );
+                    );
+                } else if registry.model_by_name(&canonical).is_some()
+                    && !registry.in_scope_names(path).contains(&written)
+                {
+                    diags.push(
+                        Diagnostic::error(
+                            path,
+                            "check.model-resolution",
+                            format!(
+                                "{} `{}` returns `{written}`, but the model is not defined in this file and not imported",
+                                statement.kind.keyword(),
+                                statement.name
+                            ),
+                        )
+                        .with_help("add an `import { UserId } from \"./types\"` for the referenced model"),
+                    );
+                }
             }
         }
     }
@@ -733,6 +765,23 @@ fn known_return_type(catalog: &TableCatalog<'_>, registry: &ModelRegistry, name:
             .eq_ignore_ascii_case(name)
     });
     table || registry.index.contains_key(name)
+}
+
+/// Every written `Named` type reference in a `TypeRef`, unwrapping
+/// `Array`/`Nullable` so that `UserId[]`, `UserId?`, and `UserId` all surface
+/// `UserId` for import-scope validation.
+fn named_type_refs(ty: &TypeRef) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_named_type_refs(ty, &mut out);
+    out
+}
+
+fn collect_named_type_refs(ty: &TypeRef, out: &mut Vec<String>) {
+    match ty {
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => collect_named_type_refs(inner, out),
+        TypeRef::Named(name) => out.push(name.clone()),
+        _ => {}
+    }
 }
 
 /// Verify the declared return contract against the SQL body: a row-returning
@@ -800,8 +849,26 @@ fn check_return_contract(
     }
 
     if let Some(model) = registry.model_by_name(&row_name) {
-        let field_names: Vec<String> = model.model.fields.iter().map(|f| f.name.clone()).collect();
-        projection_vs_fields(path, statement.name, &row_name, &projected, &field_names, true)
+        if model.model.is_alias() {
+            // A value/alias model (e.g. `model UserId = String`) carries no
+            // fields: the codegen inlines it to its underlying primitive and
+            // emits a scalar value per projection column (e.g. `string[]` /
+            // `Vec<String>`). Validate the projected column's SQL type against
+            // the alias's underlying base class instead of demanding a field.
+            let ann = model.model.alias.as_ref().expect("alias model must have alias type");
+            projection_vs_scalar_alias(
+                path,
+                statement.name,
+                &row_name,
+                &projected,
+                &ann.base,
+                registry,
+                catalog,
+            )
+        } else {
+            let field_names: Vec<String> = model.model.fields.iter().map(|f| f.name.clone()).collect();
+            projection_vs_fields(path, statement.name, &row_name, &projected, &field_names, true)
+        }
     } else if let Some(table) = catalog.table_by_name(&row_name) {
         let field_names: Vec<String> = table.columns.iter().map(|c| c.name.to_string()).collect();
         projection_vs_fields(path, statement.name, &row_name, &projected, &field_names, false)
@@ -839,6 +906,94 @@ fn projection_vs_fields(
         }
     }
     diags
+}
+
+/// Validate a query whose declared return type is a value/alias model (e.g.
+/// `model UserId = String`). Because aliases are inlined to their underlying
+/// primitive by the codegen, a scalar-array return corresponds to a single value
+/// column whose SQL type must be compatible with the alias's base class.
+///
+/// Mirrors how the codegen classifies `NamedKind::Pure` aliases (see
+/// `crates/axiom-core/src/axm/codegen/mod.rs`): an alias with no transforms or
+/// rules resolves to `TypeRef::Named`/`TypeRef::String`/`TypeRef::UUID` and is
+/// emitted as plain `string`/`String`.
+fn projection_vs_scalar_alias(
+    path: &Path,
+    name: &str,
+    row_name: &str,
+    projected: &[String],
+    alias_base: &TypeRef,
+    registry: &ModelRegistry,
+    catalog: &TableCatalog<'_>,
+) -> Vec<Diagnostic> {
+    let alias_class = base_class(registry, alias_base, 0);
+    let mut diags = Vec::new();
+
+    if alias_class == BaseClass::Other {
+        // `model X = Date` / `Json` / etc.: the alias carries no scalar base
+        // class we can cheaply compare against SQL types, so accept the single
+        // projection (the codegen still inlines to a primitive).
+        return diags;
+    }
+
+    for ident in projected {
+        match lookup_column_data_type(catalog, ident) {
+            Some(sql_type) => {
+                let sql_class = sql_data_type_class(&sql_type);
+                if sql_class != alias_class {
+                    diags.push(
+                        Diagnostic::error(
+                            path,
+                            "check.query-contract",
+                            format!(
+                                "`{name}` projects column `{ident}` of SQL type `{sql_type}`, \
+                                 which is not compatible with the declared `{row_name}` type"
+                            ),
+                        )
+                            .with_help("align the SQL projection's type with the declared return type's underlying type"),
+                    );
+                }
+            }
+            None => {
+                // Unresolvable column type is already reported by
+                // `check.missing-column` / `check.query-sql`; do not double-report
+                // against the contract here.
+            }
+        }
+    }
+    diags
+}
+
+/// Best-effort classification of a SQL column `data_type` (as recorded by
+/// `parse_sql_catalog`, i.e. `ColumnDef.data_type.to_string()`) into the
+/// corresponding [`BaseClass`]. Unknown types fall back to `Other` so the
+/// contract check stays permissive rather than producing false positives.
+fn sql_data_type_class(sql_type: &str) -> BaseClass {
+    let lower = sql_type.to_ascii_lowercase();
+    // Drop type modifiers/parameters, e.g. `varchar(64)` -> `varchar`, so the
+    // base type name matches regardless of the catalog's rendered form.
+    let token = lower.split(['(', ' ', '\t']).next().unwrap_or("");
+    match token {
+        "text" | "varchar" | "char" | "bpchar" | "citext" | "uuid" | "inet" | "cidr" | "macaddr" => BaseClass::Str,
+        "int" | "integer" | "bigint" | "smallint" | "numeric" | "decimal" | "real" | "double" | "float" | "money" => BaseClass::Num,
+        _ => BaseClass::Other,
+    }
+}
+
+/// Look up the declared SQL `data_type` of a bare column name across all tables
+/// in `catalog` (case-insensitive on the column name). Returns `None` when the
+/// column is not declared on any known table (e.g. it is computed, aliased away
+/// by the existing `check.missing-column` pass, or a qualified/joins column).
+fn lookup_column_data_type(catalog: &TableCatalog<'_>, ident: &str) -> Option<String> {
+    let lower = ident.to_ascii_lowercase();
+    for table in &catalog.tables {
+        for column in &table.columns {
+            if column.name.to_lowercase() == lower {
+                return Some(column.data_type.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Does this statement produce rows to callers?

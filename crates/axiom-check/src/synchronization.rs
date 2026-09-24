@@ -120,10 +120,13 @@ fn render_output(
         // `.axm` queries are emitted by the model generators below; passing
         // an empty catalog to the SQL-side generators keeps each query from
         // being emitted twice and matches `axiom generate`.
-        OutputConfig::TypeScript(_) => {
+        OutputConfig::TypeScript(ts) => {
             let mut code = generate_typescript(catalog, &QueryCatalog::default());
             if let Some(registry) = registry {
                 code.push_str(&generate_typescript_models_with_options(registry, catalog, options));
+            }
+            if ts.suppress_type_errors {
+                code.insert_str(0, "// @ts-nocheck\n");
             }
             code
         }
