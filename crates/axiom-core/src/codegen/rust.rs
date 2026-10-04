@@ -840,6 +840,9 @@ mod tests {
             data_type: Cow::Borrowed(data_type),
             nullable,
             primary_key: false,
+            has_default: false,
+            is_generated: false,
+            is_identity: false,
         }
     }
 
@@ -866,7 +869,7 @@ mod tests {
                 col("id", "BIGSERIAL", false),
             ],
         );
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
+        let out = generate_rust(&TableCatalog { tables: vec![t], ..Default::default() }, &no_queries());
         assert!(out.contains("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]"));
         assert!(out.contains("pub struct Users {"));
         assert!(out.contains("pub email: String,"));
@@ -876,7 +879,7 @@ mod tests {
     #[test]
     fn emits_trivial_validate() {
         let t = table("users", vec![col("email", "VARCHAR(255)", false)]);
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
+        let out = generate_rust(&TableCatalog { tables: vec![t], ..Default::default() }, &no_queries());
         assert!(out.contains("pub fn validate(&self) -> Result<(), Vec<ValidationError>>"));
         assert!(out.contains("let _ = self;"));
         assert!(!out.contains("fn is_email"));
@@ -886,7 +889,7 @@ mod tests {
     #[test]
     fn nullable_fields_use_option() {
         let t = table("sessions", vec![col("external_id", "UUID", true)]);
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
+        let out = generate_rust(&TableCatalog { tables: vec![t], ..Default::default() }, &no_queries());
         assert!(out.contains("pub external_id: Option<String>,"));
         assert!(!out.contains("if let Some(value)"));
         assert!(!out.contains("fn is_uuid"));
@@ -898,6 +901,7 @@ mod tests {
         let out = generate_rust(
             &TableCatalog {
                 tables: vec![plain],
+                ..Default::default()
             },
             &no_queries(),
         );
@@ -927,7 +931,7 @@ mod tests {
     #[test]
     fn only_emits_used_preset_helpers() {
         let t = table("users", vec![col("email", "VARCHAR", false)]);
-        let out = generate_rust(&TableCatalog { tables: vec![t] }, &no_queries());
+        let out = generate_rust(&TableCatalog { tables: vec![t], ..Default::default() }, &no_queries());
         assert!(!out.contains("fn is_email"));
         assert!(!out.contains("fn is_ipv6"));
         assert!(!out.contains("fn is_ulid"));
@@ -1050,7 +1054,7 @@ mod tests {
             kind: DeclKind::Query,
         };
         let out = generate_rust(
-            &TableCatalog { tables: vec![t] },
+            &TableCatalog { tables: vec![t], ..Default::default() },
             &QueryCatalog { queries: vec![q] },
         );
         assert!(

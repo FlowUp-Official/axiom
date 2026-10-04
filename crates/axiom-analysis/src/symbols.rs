@@ -319,10 +319,14 @@ mod tests {
                 data_type: (*ty).to_string().into(),
                 nullable: *nullable,
                 primary_key: false,
+                has_default: false,
+                is_generated: false,
+                is_identity: false,
             });
         }
         TableCatalog {
             tables: vec![table],
+            ..Default::default()
         }
     }
 

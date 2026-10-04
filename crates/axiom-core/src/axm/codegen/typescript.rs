@@ -84,6 +84,8 @@ pub fn generate_typescript_models_with_options(
 
     emit_helpers(&mut out, &uses, fail_fast);
 
+    emit_enums(&mut out, catalog, &uses);
+
     for resolved in registry.models.iter().filter(|m| m.model.alias.is_some()) {
         let ann = resolved.model.alias.as_ref().expect("alias model must have alias type");
         emit_type_alias_for(
@@ -100,6 +102,7 @@ pub fn generate_typescript_models_with_options(
         emit_model(
             &mut out,
             registry,
+            catalog,
             &resolved.path,
             &resolved.model,
             &fields,
@@ -113,6 +116,7 @@ pub fn generate_typescript_models_with_options(
         emit_alias_coerce(
             &mut out,
             registry,
+            catalog,
             &resolved.path,
             &resolved.model.name,
             ann,
@@ -413,6 +417,29 @@ fn emit_bounded_helper(out: &mut String, name: &str, condition: &str, prefix: &s
     let _ = writeln!(out, "}}\n");
 }
 
+/// Emit one finite `export type {Name} = "v1" | "v2" | ...` declaration per
+/// distinct PostgreSQL enum referenced by the registry. Each enum is declared
+/// exactly once; models reference it by name.
+fn emit_enums(out: &mut String, catalog: &TableCatalog, uses: &Uses) {
+    for pg_name in &uses.enums {
+        let Some(enum_schema) = catalog.enum_by_name(pg_name) else {
+            continue;
+        };
+        let type_name = crate::axm::codegen::enum_name_to_type_name(&enum_schema.name);
+        let values: Vec<String> = enum_schema
+            .values
+            .iter()
+            .map(|v| format!("\"{}\"", v))
+            .collect();
+        let _ = writeln!(out, "export type {type_name} =");
+        for (i, v) in values.iter().enumerate() {
+            let sep = if i + 1 == values.len() { ";" } else { " |" };
+            let _ = writeln!(out, "    {v}{sep}");
+        }
+        out.push('\n');
+    }
+}
+
 fn emit_type_alias_for(
     out: &mut String,
     registry: &ModelRegistry,
@@ -432,6 +459,7 @@ fn emit_type_alias_for(
 fn emit_alias_coerce(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     declared: &str,
     ann: &AnnotatedType,
@@ -443,7 +471,7 @@ fn emit_alias_coerce(
     let name = canonical_name(registry, path, declared);
     let result_ty = ts_named_type(registry, path, &inlined.base);
     emit_annotated_fn(
-        out, registry, path, &name, &result_ty, &inlined, "anchor", 0,
+        out, registry, catalog, path, &name, &result_ty, &inlined, "anchor", 0,
     );
 }
 
@@ -453,6 +481,7 @@ fn emit_alias_coerce(
 fn emit_annotated_fn(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     name: &str,
     result_ty: &str,
@@ -463,9 +492,9 @@ fn emit_annotated_fn(
     let pad = " ".repeat(indent);
     let _ = writeln!(
         out,
-        "function coerce{name}({value_param}: unknown, path: Seg[], errors: ValidationError[]): {result_ty} {{"
+        "function coerce{name}({value_param}: unknown, path: Seg[], errors: ValidationError[]): {result_ty} {{",
     );
-    emit_annotated_value(out, registry, path, ann, value_param, indent + 2);
+    emit_annotated_value(out, registry, catalog, path, ann, value_param, indent + 2);
     let _ = writeln!(out, "{pad}  return value;");
     let _ = writeln!(out, "{pad}}}\n");
 }
@@ -473,6 +502,7 @@ fn emit_annotated_fn(
 fn emit_model(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
@@ -510,7 +540,7 @@ fn emit_model(
     let _ = writeln!(out, "  }}");
     let _ = writeln!(out, "  const record = value as Record<string, unknown>;");
     for field in fields {
-        emit_field(out, registry, path, field);
+        emit_field(out, registry, catalog, path, field);
     }
     let _ = writeln!(out, "  return out;");
     let _ = writeln!(out, "}}\n");
@@ -600,6 +630,7 @@ fn emit_model(
 fn emit_field(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     field: &crate::axm::codegen::EffectiveField,
 ) {
@@ -621,18 +652,18 @@ fn emit_field(
                 "    if (raw === undefined) raw = {};",
                 ts_literal(literal)
             );
-            emit_field_assign(out, registry, path, field, 4);
+            emit_field_assign(out, registry, catalog, path, field, 4);
         }
         None if field.optional => {
             let _ = writeln!(out, "    if (raw !== undefined) {{");
-            emit_field_assign(out, registry, path, field, 6);
+            emit_field_assign(out, registry, catalog, path, field, 6);
             let _ = writeln!(out, "    }}");
         }
         None => {
             let _ = writeln!(out, "    if (raw === undefined) {{");
             let _ = writeln!(out, "      fail(errors, fieldPath, 'field is required');");
             let _ = writeln!(out, "    }} else {{");
-            emit_field_assign(out, registry, path, field, 6);
+            emit_field_assign(out, registry, catalog, path, field, 6);
             let _ = writeln!(out, "    }}");
         }
     }
@@ -643,12 +674,13 @@ fn emit_field(
 fn emit_field_assign(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     field: &crate::axm::codegen::EffectiveField,
     indent: usize,
 ) {
     let pad = " ".repeat(indent);
-    emit_annotated_value(out, registry, path, &field.annotated, "raw", indent);
+    emit_annotated_value(out, registry, catalog, path, &field.annotated, "raw", indent);
     let _ = writeln!(
         out,
         "{pad}out.{} = value;",
@@ -661,6 +693,7 @@ fn emit_field_assign(
 fn emit_annotated_value(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     ann: &AnnotatedType,
     raw: &str,
@@ -677,11 +710,11 @@ fn emit_annotated_value(
                 transforms: ann.transforms.clone(),
                 rules: ann.rules.clone(),
             };
-            emit_annotated_value(out, registry, path, &nested, raw, indent + 2);
+            emit_annotated_value(out, registry, catalog, path, &nested, raw, indent + 2);
             let _ = writeln!(out, "{pad}}}");
         }
         _ => {
-            let expr = coerce_value_expr(registry, path, &ann.base, raw, "fieldPath", "errors");
+            let expr = coerce_value_expr(registry, catalog, path, &ann.base, raw, "fieldPath", "errors");
             let _ = writeln!(out, "{pad}const base = {expr};");
             if ann.transforms.is_empty() {
                 let _ = writeln!(out, "{pad}let value = base;");
@@ -700,6 +733,7 @@ fn emit_annotated_value(
 /// An expression that coerces `value` to the annotated type base's runtime type.
 fn coerce_value_expr(
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     ty: &TypeRef,
     value: &str,
@@ -717,7 +751,10 @@ fn coerce_value_expr(
         TypeRef::Date => format!("coerceDate({value}, {path_expr}, {errors})"),
         TypeRef::DateTime => format!("coerceDateTime({value}, {path_expr}, {errors})"),
         TypeRef::Bytes => format!("coerceBytes({value}, {path_expr}, {errors})"),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
+            NamedKind::Enum(_) => {
+                format!("coerceString({value}, {path_expr}, {errors})")
+            }
             NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
                 format!(
                     "coerce{}({value}, {path_expr}, {errors})",
@@ -725,16 +762,16 @@ fn coerce_value_expr(
                 )
             }
             NamedKind::Pure(base) => {
-                coerce_value_expr(registry, path, &base, value, path_expr, errors)
+                coerce_value_expr(registry, catalog, path, &base, value, path_expr, errors)
             }
         },
         TypeRef::Array(inner) => {
             let item_path = format!("[...{path_expr}, ['i', index]]");
-            let item = coerce_value_expr(registry, path, inner, "entry", &item_path, errors);
+            let item = coerce_value_expr(registry, catalog, path, inner, "entry", &item_path, errors);
             format!("coerceArray({value}, {path_expr}, {errors}).map((entry, index) => {item})")
         }
         TypeRef::Nullable(inner) => {
-            let inner = coerce_value_expr(registry, path, inner, value, path_expr, errors);
+            let inner = coerce_value_expr(registry, catalog, path, inner, value, path_expr, errors);
             format!("{value} === null ? null : {inner}")
         }
     }
@@ -752,8 +789,8 @@ fn ts_named_type(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> String 
         TypeRef::Json => "unknown".to_string(),
         TypeRef::Date | TypeRef::DateTime => "string".to_string(),
         TypeRef::Bytes => "Uint8Array".to_string(),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+        TypeRef::Named(name) => match named_kind(registry, &TableCatalog::default(), path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Enum(name) | NamedKind::Unknown(name) => {
                 util::pascal_case(&name)
             }
             NamedKind::Pure(base) => ts_named_type(registry, path, &base),
@@ -898,6 +935,7 @@ fn pg_type_cast(ty: &TypeRef) -> Option<&'static str> {
 fn emit_params_types(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     pascal: &str,
     params: &[crate::axm::ast::ParamDecl],
@@ -919,7 +957,7 @@ fn emit_params_types(
     out.push_str("  const errors: ValidationError[] = [];\n");
     out.push_str("  const path: Seg[] = [];\n");
     for param in params {
-        emit_param_validation(out, registry, path, param);
+        emit_param_validation(out, registry, catalog, path, param);
     }
     out.push_str("  return errors;\n");
     out.push_str("}\n\n");
@@ -938,7 +976,7 @@ fn is_select_query(sql: &str) -> bool {
 fn ts_is_model_return(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Nullable(inner) | TypeRef::Array(inner) => ts_is_model_return(registry, path, inner),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
+        TypeRef::Named(name) => match named_kind(registry, &TableCatalog::default(), path, name) {
             NamedKind::Pure(base) => ts_is_model_return(registry, path, &base),
             _ => true,
         },
@@ -977,8 +1015,9 @@ fn wrap_sql_model(
                     crate::axm::codegen::EffectiveField {
                         emitted_name: util::ts_field_name(&db_name),
                         db_column: Some(db_name),
-                        annotated: AnnotatedType::new(crate::axm::codegen::sql_type_to_type_ref(
+                        annotated: AnnotatedType::new(crate::axm::codegen::sql_type_to_type_ref_with_catalog(
                             &col.data_type,
+                            catalog,
                         )),
                         optional: col.nullable,
                         default: None,
@@ -1050,7 +1089,7 @@ fn emit_query(
     let params_type = format!("{pascal}Params");
     let fn_name = util::ts_field_name(&query.name);
 
-    emit_params_types(out, registry, path, &pascal, &query.params);
+    emit_params_types(out, registry, catalog, path, &pascal, &query.params);
 
     let raw_sql = if let Some(ty_ref) = query.return_type.ty_ref() {
         if ts_is_model_return(registry, path, ty_ref) {
@@ -1117,7 +1156,7 @@ fn emit_transaction(
     let params_type = format!("{pascal}Params");
     let fn_name = util::ts_field_name(&transaction.name);
 
-    emit_params_types(out, registry, path, &pascal, &transaction.params);
+    emit_params_types(out, registry, catalog, path, &pascal, &transaction.params);
 
     let statements = crate::query::QueryDefinition::split_statements(&transaction.sql);
 
@@ -1187,6 +1226,7 @@ fn emit_transaction(
 fn emit_param_validation(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     param: &crate::axm::ast::ParamDecl,
 ) {
@@ -1218,7 +1258,7 @@ fn emit_param_validation(
     let field = util::ts_field_name(&param.name);
     let _ = writeln!(out, "  {{");
     let _ = writeln!(out, "    const fieldPath: Seg[] = [['f', '{field}']];");
-    emit_annotated_value(out, registry, path, &inlined, &format!("params.{field}"), 4);
+    emit_annotated_value(out, registry, catalog, path, &inlined, &format!("params.{field}"), 4);
     let _ = writeln!(out, "  }}");
 }
 
@@ -1231,7 +1271,7 @@ fn is_model_param(
 ) -> bool {
     match ty {
         TypeRef::Named(name) => matches!(
-            named_kind(registry, path, name),
+            named_kind(registry, &TableCatalog::default(), path, name),
             NamedKind::Model(_) | NamedKind::AliasFun(_)
         ),
         TypeRef::Array(inner) | TypeRef::Nullable(inner) => is_model_param(registry, path, inner),
@@ -1247,8 +1287,8 @@ fn resolve_model_name(
     ty: &TypeRef,
 ) -> String {
     match ty {
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Model(name) | NamedKind::AliasFun(name) => name,
+        TypeRef::Named(name) => match named_kind(registry, &TableCatalog::default(), path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Enum(name) => name,
             NamedKind::Pure(base) => resolve_model_name(registry, path, &base),
             NamedKind::Unknown(name) => name,
         },
@@ -1263,7 +1303,7 @@ fn resolve_model_name(
 mod tests {
     use super::*;
     use crate::axm::resolver::{ModelRegistry, resolve_models};
-    use crate::catalog::{ColumnSchema, TableCatalog, TableSchema};
+    use crate::catalog::{ColumnSchema, TableCatalog, TableSchema, parse_sql_catalog};
 
     fn registry(src: &str) -> ModelRegistry {
         resolve_models(&[(std::path::PathBuf::from("models/test.axm"), src.to_string())])
@@ -1271,7 +1311,7 @@ mod tests {
     }
 
     fn no_catalog() -> TableCatalog<'static> {
-        TableCatalog { tables: Vec::new() }
+        TableCatalog { tables: Vec::new(), ..Default::default() }
     }
 
     #[test]
@@ -1579,15 +1619,22 @@ model Account {
                         data_type: "BIGSERIAL".into(),
                         nullable: false,
                         primary_key: true,
+                        has_default: true,
+                        is_generated: false,
+                        is_identity: false,
                     },
                     ColumnSchema {
                         name: "display_name".into(),
                         data_type: "VARCHAR(255)".into(),
                         nullable: true,
                         primary_key: false,
+                        has_default: false,
+                        is_generated: false,
+                        is_identity: false,
                     },
                 ],
             }],
+            ..Default::default()
         };
         let src = "model User infers select<users> {\n  displayName: String .nonempty()\n}\n";
         let out = generate_typescript_models(&registry(src), &catalog);
@@ -1611,8 +1658,12 @@ model Account {
                     data_type: "UUID".into(),
                     nullable: false,
                     primary_key: true,
+                    has_default: false,
+                    is_generated: false,
+                    is_identity: false,
                 }],
             }],
+            ..Default::default()
         };
         for op in ["select", "insert", "update", "delete"] {
             let src = format!("model User infers {op}<users> {{\n  displayName: String\n}}\n");
@@ -1707,15 +1758,22 @@ query Open($id: UUID) -> Int {
                         data_type: "UUID".into(),
                         nullable: false,
                         primary_key: true,
+                        has_default: false,
+                        is_generated: false,
+                        is_identity: false,
                     },
                     ColumnSchema {
                         name: "display_name".into(),
                         data_type: "VARCHAR(255)".into(),
                         nullable: true,
                         primary_key: false,
+                        has_default: false,
+                        is_generated: false,
+                        is_identity: false,
                     },
                 ],
             }],
+            ..Default::default()
         };
         let src = r#"
 model User infers select<users> {
@@ -2111,5 +2169,84 @@ model ApiKey {
         // `@no_codegen` exports nothing.
         assert!(!out.contains("safeParseProfile"), "{out}");
         assert!(!out.contains("parseProfile"), "{out}");
+    }
+
+    fn enum_catalog() -> TableCatalog<'static> {
+        parse_sql_catalog(
+            "CREATE TYPE post_visibility AS ENUM ('public', 'followers', 'private');\
+CREATE TABLE posts (id TEXT PRIMARY KEY, visibility post_visibility NOT NULL);",
+        )
+        .expect("parse enum catalog")
+    }
+
+    #[test]
+    fn emits_enum_finite_type_declaration() {
+        let catalog = enum_catalog();
+        let src = r#"
+model Post infers select<posts> {
+  id: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        assert!(out.contains("export type PostVisibility ="), "{out}");
+        assert!(out.contains("\"public\""), "{out}");
+        assert!(out.contains("\"followers\""), "{out}");
+        assert!(out.contains("\"private\""), "{out}");
+    }
+
+    #[test]
+    fn emits_enum_field_reference_not_inline_union() {
+        let catalog = enum_catalog();
+        let src = r#"
+model Post infers select<posts> {
+  id: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        // The enum is declared once, and the inferred column references it by name
+        // rather than repeating an inline string-literal union.
+        assert!(out.contains("export type PostVisibility ="), "{out}");
+        assert!(out.contains("visibility: PostVisibility;"), "{out}");
+        assert!(!out.contains("visibility: \"public\" | \"followers\" | \"private\""), "{out}");
+    }
+
+    #[test]
+    fn enum_emitted_once_and_reused_across_models() {
+        let catalog = enum_catalog();
+        let src = r#"
+model Post infers select<posts> {
+  id: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        assert_eq!(out.matches("export type PostVisibility =").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn enum_field_coerces_as_string() {
+        let catalog = enum_catalog();
+        let src = r#"
+model Post infers select<posts> {
+  id: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        // The inferred `visibility` column (post_visibility) validates through
+        // the string coercer, not a model-style `coercePostVisibility`.
+        assert!(out.contains("coerceString("), "{out}");
+        assert!(!out.contains("coercePostVisibility("), "{out}");
+    }
+
+    #[test]
+    fn enum_preserved_across_insert_contract() {
+        let catalog = enum_catalog();
+        let src = r#"
+model NewPost infers insert<posts> {
+  id: String
+}
+"#;
+        let out = generate_typescript_models(&registry(src), &catalog);
+        assert!(out.contains("export type PostVisibility ="), "{out}");
+        assert!(out.contains("visibility: PostVisibility;"), "{out}");
     }
 }

@@ -21,7 +21,7 @@ use axiom_core::axm::ast::AxmFile;
 use axiom_core::axm::parser::parse_axm_file;
 use axiom_core::axm::resolver::{ModelRegistry, resolve_models};
 use axiom_core::cache::{ToolCache, compute_content_hash};
-use axiom_core::catalog::{ColumnSchema, TableCatalog, TableSchema, parse_sql_catalog};
+use axiom_core::catalog::{ColumnSchema, EnumSchema, TableCatalog, TableSchema, parse_sql_catalog};
 use axiom_core::config::AxiomConfig;
 use axiom_core::errors::AxiomError;
 use axiom_core::query::QueryCatalog;
@@ -398,7 +398,10 @@ impl AnalysisDatabase {
                 .values()
                 .flat_map(|c| c.tables.iter().cloned())
                 .collect();
-            self.owned_catalog = TableCatalog { tables };
+            self.owned_catalog = TableCatalog {
+                tables,
+                ..Default::default()
+            };
             self.catalog_dirty = false;
         }
         &self.owned_catalog
@@ -607,9 +610,23 @@ fn own_catalog(catalog: &TableCatalog) -> TableCatalog<'static> {
                     data_type: c.data_type.to_string().into(),
                     nullable: c.nullable,
                     primary_key: c.primary_key,
+                    has_default: c.has_default,
+                    is_generated: c.is_generated,
+                    is_identity: c.is_identity,
                 })
                 .collect(),
         })
         .collect();
-    TableCatalog { tables }
+    let enums = catalog
+        .enums
+        .iter()
+        .map(|e| EnumSchema {
+            name: e.name.to_string().into(),
+            values: e.values.iter().map(|v| v.to_string().into()).collect(),
+        })
+        .collect();
+    TableCatalog {
+        tables,
+        enums,
+    }
 }

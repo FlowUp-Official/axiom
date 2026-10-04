@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::axm::ast::{
-    AnnotatedType, Literal, ModelDecl, QueryDecl, QueryReturn, Rule, SafeParseMode, Target,
+    AnnotatedType, Literal, ModelDecl, ModelOperation, QueryDecl, QueryReturn, Rule, SafeParseMode, Target,
     TransactionDecl, TypeRef,
 };
 use crate::axm::resolver::{ModelRegistry, ResolvedModel};
@@ -261,7 +261,7 @@ pub(crate) fn collect_model_deps(
     out: &mut BTreeSet<String>,
 ) {
     match ty {
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
+        TypeRef::Named(name) => match named_kind(registry, &TableCatalog::default(), path, name) {
             NamedKind::Model(model) => {
                 out.insert(model.clone());
             }
@@ -303,6 +303,10 @@ pub(crate) struct Uses {
     pub min_len: bool,
     pub max_len: bool,
     pub regex: bool,
+    /// PostgreSQL `CREATE TYPE` names (as written, e.g. `post_visibility` or
+    /// `public.status`) of enums referenced by at least one emitted declaration,
+    /// so each enum finite type is declared exactly once in the generated output.
+    pub enums: BTreeSet<String>,
 }
 
 impl Uses {
@@ -325,7 +329,7 @@ impl Uses {
         }
     }
 
-    fn add_type(&mut self, ty: &TypeRef) {
+    fn add_type(&mut self, registry: &ModelRegistry, catalog: &TableCatalog, path: &Path, ty: &TypeRef) {
         match ty {
             TypeRef::String => self.string = true,
             TypeRef::Int => self.int = true,
@@ -342,17 +346,23 @@ impl Uses {
                 self.uuid = true;
                 self.string = true;
             }
-            TypeRef::Named(_) => {}
-            TypeRef::Nullable(inner) => self.add_type(inner),
+            TypeRef::Named(name) => {
+                let effective = registry.effective_name(path, name);
+                if let Some(_) = catalog.enum_by_name(&effective) {
+                    self.enums.insert(effective.to_string());
+                    self.string = true;
+                }
+            }
+            TypeRef::Nullable(inner) => self.add_type(registry, catalog, path, inner),
             TypeRef::Array(inner) => {
                 self.array = true;
-                self.add_type(inner);
+                self.add_type(registry, catalog, path, inner);
             }
         }
     }
 
-    fn add_annotated(&mut self, ann: &AnnotatedType) {
-        self.add_type(&ann.base);
+    fn add_annotated(&mut self, registry: &ModelRegistry, catalog: &TableCatalog, path: &Path, ann: &AnnotatedType) {
+        self.add_type(registry, catalog, path, &ann.base);
         for rule in &ann.rules {
             self.add_rule(rule);
         }
@@ -372,12 +382,12 @@ pub(crate) fn collect_uses(
     let mut uses = Uses::default();
     for (resolved, _) in plan {
         for field in effective_fields(registry, catalog, &resolved.path, &resolved.model) {
-            uses.add_annotated(&field.annotated);
+            uses.add_annotated(registry, catalog, &resolved.path, &field.annotated);
         }
     }
     for resolved in &registry.models {
         if let Some(ann) = &resolved.model.alias {
-            uses.add_annotated(&inline_annotated(registry, &resolved.path, ann));
+            uses.add_annotated(registry, catalog, &resolved.path, &inline_annotated(registry, &resolved.path, ann));
         }
     }
     for resolved in &registry.queries {
@@ -385,11 +395,11 @@ pub(crate) fn collect_uses(
             continue;
         }
         for param in &resolved.query.params {
-            uses.add_type(&param.ty);
+            uses.add_type(registry, catalog, &resolved.path, &param.ty);
         }
         match &resolved.query.return_type {
             QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
-                uses.add_type(ty);
+                uses.add_type(registry, catalog, &resolved.path, ty);
             }
             QueryReturn::Exec => {}
         }
@@ -399,11 +409,11 @@ pub(crate) fn collect_uses(
             continue;
         }
         for param in &resolved.transaction.params {
-            uses.add_type(&param.ty);
+            uses.add_type(registry, catalog, &resolved.path, &param.ty);
         }
         match &resolved.transaction.return_type {
             QueryReturn::Single(ty) | QueryReturn::Optional(ty) | QueryReturn::Many(ty) => {
-                uses.add_type(ty);
+                uses.add_type(registry, catalog, &resolved.path, ty);
             }
             QueryReturn::Exec => {}
         }
@@ -518,7 +528,19 @@ pub(crate) fn effective_fields(
         let mut used = vec![false; model.fields.len()];
         let mut out = Vec::with_capacity(table.columns.len() + model.fields.len());
 
+        let write_op = matches!(
+            source.operation,
+            ModelOperation::Insert | ModelOperation::Update
+        );
+
         for column in &table.columns {
+            // Generated and identity columns are database-supplied; they are not
+            // writable and must not appear in insert/update contracts. They stay
+            // in select contracts (read from the row).
+            if write_op && (column.is_generated || column.is_identity) {
+                continue;
+            }
+
             let db_name = util::ts_field_name(&column.name);
             let declared = model.fields.iter().zip(&mut used).find(|(field, matched)| {
                 !**matched && (field.name == column.name || field.name == db_name)
@@ -536,15 +558,23 @@ pub(crate) fn effective_fields(
                         TypeRef::String,
                     )));
                 }
+                // For insert/update, a column that is nullable or database-supplied
+                // (has a default) is optional unless the caller explicitly marked the
+                // declared field required — honoring an explicit `?`-absence override.
+                let optional = if write_op {
+                    field.optional || column.nullable || column.has_default
+                } else {
+                    field.optional || column.nullable
+                };
                 out.push(EffectiveField {
                     emitted_name: field.name.clone(),
                     db_column: Some(column.name.to_string()),
                     annotated,
-                    optional: field.optional || column.nullable,
+                    optional,
                     default: field.default.clone(),
                 });
             } else {
-                let base = sql_type_to_type_ref(&column.data_type);
+                let base = sql_type_to_type_ref_with_catalog(&column.data_type, catalog);
                 let base = if column.nullable {
                     TypeRef::Nullable(Box::new(base))
                 } else {
@@ -554,7 +584,7 @@ pub(crate) fn effective_fields(
                     emitted_name: db_name,
                     db_column: Some(column.name.to_string()),
                     annotated: AnnotatedType::new(base),
-                    optional: column.nullable,
+                    optional: write_op && (column.nullable || column.has_default),
                     default: None,
                 });
             }
@@ -586,6 +616,23 @@ pub(crate) fn effective_fields(
             default: field.default.clone(),
         })
         .collect()
+}
+
+/// Resolve a SQL data type string to a `TypeRef`, resolving user-defined enum
+/// types (e.g. `post_visibility`) to a `Named` reference so codegen can emit a
+/// finite type. Unknown / non-enum types fall through to `sql_type_to_type_ref`.
+pub(crate) fn sql_type_to_type_ref_with_catalog(data_type: &str, catalog: &TableCatalog) -> TypeRef {
+    let normalized = data_type.trim();
+    if let Some(enum_schema) = catalog.enum_by_name(normalized) {
+        return TypeRef::Named(enum_schema.name.to_string());
+    }
+    sql_type_to_type_ref(data_type)
+}
+
+/// Canonical generated type name for an enum declared as
+/// `CREATE TYPE post_visibility AS ENUM (...)` → `PostVisibility`.
+pub(crate) fn enum_name_to_type_name(enum_name: &str) -> String {
+    crate::codegen::util::pascal_case(&enum_name.trim_start_matches("public."))
 }
 
 /// How deep a chain of type aliases may be inlined before a generator gives up
@@ -682,6 +729,9 @@ pub(crate) enum NamedKind {
     Model(String),
     /// The canonical alias name (its `coerce{Name}` function is emitted).
     AliasFun(String),
+    /// A PostgreSQL `CREATE TYPE ... AS ENUM` type. The value is the
+    /// canonical (PascalCase) name emitted for the generated enum/union.
+    Enum(String),
     /// A pure alias: fully resolve to its concrete base type.
     Pure(TypeRef),
     /// A name that resolves to neither model nor type (semantics will reject).
@@ -689,7 +739,12 @@ pub(crate) enum NamedKind {
 }
 
 /// Classify a written `Named` reference for code emission.
-pub(crate) fn named_kind(registry: &ModelRegistry, path: &Path, name: &str) -> NamedKind {
+pub(crate) fn named_kind(
+    registry: &ModelRegistry,
+    catalog: &TableCatalog,
+    path: &Path,
+    name: &str,
+) -> NamedKind {
     let effective = registry.effective_name(path, name);
     if let Some(resolved) = registry.model_by_name(&effective) {
         if let Some(ann) = &resolved.model.alias {
@@ -707,6 +762,10 @@ pub(crate) fn named_kind(registry: &ModelRegistry, path: &Path, name: &str) -> N
         } else {
             NamedKind::Model(effective.to_string())
         }
+    } else if let Some(_enum) = catalog.enum_by_name(&effective) {
+        NamedKind::Enum(crate::codegen::util::pascal_case(&effective))
+    } else if let Some(_enum) = catalog.enum_by_canonical_name(&effective) {
+        NamedKind::Enum(effective.to_string())
     } else {
         NamedKind::Unknown(effective.to_string())
     }

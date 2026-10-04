@@ -529,6 +529,9 @@ mod tests {
                     data_type: c.data_type.to_string().into(),
                     nullable: c.nullable,
                     primary_key: c.primary_key,
+                    has_default: c.has_default,
+                    is_generated: c.is_generated,
+                    is_identity: c.is_identity,
                 })
                 .collect();
             tables.push(TableSchema {
@@ -536,7 +539,7 @@ mod tests {
                 columns,
             });
         }
-        TableCatalog { tables }
+        TableCatalog { tables, ..Default::default() }
     }
 
     #[test]

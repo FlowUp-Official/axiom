@@ -313,6 +313,9 @@ mod tests {
             data_type: Cow::Borrowed(data_type),
             nullable,
             primary_key: false,
+            has_default: false,
+            is_generated: false,
+            is_identity: false,
         }
     }
 
@@ -338,7 +341,7 @@ mod tests {
                 col("id", "BIGSERIAL", false),
             ],
         );
-        TableCatalog { tables: vec![t] }
+        TableCatalog { tables: vec![t], ..Default::default() }
     }
 
     #[test]
@@ -361,7 +364,7 @@ mod tests {
     #[test]
     fn nullable_columns_are_guarded() {
         let t = table("sessions", vec![col("external_id", "UUID", true)]);
-        let out = generate_typescript(&TableCatalog { tables: vec![t] }, &no_queries());
+        let out = generate_typescript(&TableCatalog { tables: vec![t], ..Default::default() }, &no_queries());
         assert!(out.contains("interface Sessions {"));
         assert!(out.contains("externalId: string | null;"));
         assert!(!out.contains("UUID_RE"));
@@ -510,7 +513,7 @@ mod tests {
             kind: DeclKind::Query,
         };
         let out = generate_typescript(
-            &TableCatalog { tables: vec![t] },
+            &TableCatalog { tables: vec![t], ..Default::default() },
             &QueryCatalog { queries: vec![q] },
         );
         assert!(

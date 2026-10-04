@@ -28,6 +28,18 @@ pub struct ColumnSchema<'a> {
     pub nullable: bool,
     /// Whether the column is (part of) the table's primary key.
     pub primary_key: bool,
+    /// Whether the column has an explicit `DEFAULT` or is otherwise
+    /// database-supplied on insert (e.g. `DEFAULT now()`, `DEFAULT false`,
+    /// `DEFAULT gen_random_uuid()`). Such columns are optional for
+    /// `infers insert` and `infers update`.
+    pub has_default: bool,
+    /// Whether the column is `GENERATED ALWAYS AS (...) STORED` (or VIRTUAL).
+    /// Generated columns are omitted from `infers insert`/`infers update`.
+    pub is_generated: bool,
+    /// Whether the column is an identity column
+    /// (`GENERATED ... AS IDENTITY` / `GENERATED ... AS IDENTITY ...`).
+    /// Identity columns are omitted from `infers insert`/`infers update`.
+    pub is_identity: bool,
 }
 
 /// A single table and its columns.
@@ -39,11 +51,22 @@ pub struct TableSchema<'a> {
     pub columns: Vec<ColumnSchema<'a>>,
 }
 
+/// A PostgreSQL `CREATE TYPE ... AS ENUM ('a', 'b', ...)` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumSchema<'a> {
+    /// Type name, e.g. `post_visibility`.
+    pub name: Cow<'a, str>,
+    /// Enum label values, in declaration order.
+    pub values: Vec<Cow<'a, str>>,
+}
+
 /// A parsed catalog of one or more `CREATE TABLE` statements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TableCatalog<'a> {
     /// Tables in the order they were declared.
     pub tables: Vec<TableSchema<'a>>,
+    /// Enum types declared with `CREATE TYPE ... AS ENUM (...)`, in order.
+    pub enums: Vec<EnumSchema<'a>>,
 }
 
 impl<'a> TableCatalog<'a> {
@@ -53,6 +76,23 @@ impl<'a> TableCatalog<'a> {
         self.tables
             .iter()
             .find(|t| t.name == name || t.name.ends_with(&format!(".{name}")))
+    }
+
+    /// Return the enum type with the given (suffix) name, if declared.
+    pub fn enum_by_name(&self, name: &str) -> Option<&EnumSchema<'a>> {
+        self.enums
+            .iter()
+            .find(|e| e.name == name || e.name.ends_with(&format!(".{name}")))
+    }
+
+    /// Return the enum whose canonical (PascalCase) generated name matches
+    /// `canonical`. This lets codegen resolve enum references that were written
+    /// using the generated PascalCase name (e.g. `visibility: PostVisibility`)
+    /// back to the PostgreSQL-declared `post_visibility` type.
+    pub fn enum_by_canonical_name(&self, canonical: &str) -> Option<&EnumSchema<'a>> {
+        self.enums.iter().find(|e| {
+            crate::codegen::util::pascal_case(e.name.trim_start_matches("public.")) == canonical
+        })
     }
 }
 
@@ -66,31 +106,48 @@ pub fn parse_sql_catalog<'a>(sql: &'a str) -> Result<TableCatalog<'a>, AxiomErro
     let mut catalog = TableCatalog::default();
 
     for stmt in &statements {
-        let Statement::CreateTable(create) = stmt else {
-            continue;
-        };
+        match stmt {
+            Statement::CreateTable(create) => {
+                let located = locate_column_lines(&create.columns, &tokens, sql, &line_starts);
 
-        let located = locate_column_lines(&create.columns, &tokens, sql, &line_starts);
+                let mut columns = Vec::with_capacity(create.columns.len());
 
-        let mut columns = Vec::with_capacity(create.columns.len());
+                for (col, loc) in create.columns.iter().zip(located.iter()) {
+                    let Some((_line, name)) = loc else {
+                        continue;
+                    };
 
-        for (col, loc) in create.columns.iter().zip(located.iter()) {
-            let Some((_line, name)) = loc else {
-                continue;
-            };
+                    columns.push(ColumnSchema {
+                        name: name.clone(),
+                        data_type: Cow::Owned(col.data_type.to_string()),
+                        nullable: column_nullable(col),
+                        primary_key: column_primary_key(col),
+                        has_default: column_has_default(col),
+                        is_generated: column_is_generated(col),
+                        is_identity: column_is_identity(col),
+                    });
+                }
 
-            columns.push(ColumnSchema {
-                name: name.clone(),
-                data_type: Cow::Owned(col.data_type.to_string()),
-                nullable: column_nullable(col),
-                primary_key: column_primary_key(col),
-            });
+                catalog.tables.push(TableSchema {
+                    name: Cow::Owned(object_name_to_string(&create.name)),
+                    columns,
+                });
+            }
+            Statement::CreateType { name, representation } => {
+                if let Some(repr) = representation {
+                    if let sqlparser::ast::UserDefinedTypeRepresentation::Enum { labels } = repr {
+                        catalog.enums.push(EnumSchema {
+                            name: Cow::Owned(object_name_to_string(name)),
+                            values: labels
+                                .iter()
+                                .map(|l| Cow::Owned(unquote_enum_label(&l.to_string())))
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
-
-        catalog.tables.push(TableSchema {
-            name: Cow::Owned(object_name_to_string(&create.name)),
-            columns,
-        });
     }
 
     Ok(catalog)
@@ -115,10 +172,48 @@ fn object_name_to_string(name: &ObjectName) -> String {
         .join(".")
 }
 
+/// Strip the surrounding quote characters that sqlparser preserves on enum
+/// label `Ident`s (e.g. `'happy'` from `ENUM ('happy', ...)`). Both single
+/// and double quotes are handled; bare identifiers are returned unchanged.
+fn unquote_enum_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.len() >= 2 {
+        let (first, last) = (trimmed.chars().next().unwrap(), trimmed.chars().last().unwrap());
+        if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn column_primary_key(col: &ColumnDef) -> bool {
     col.options
         .iter()
         .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
+}
+
+/// Whether the column has a `DEFAULT`, a `GENERATED ... AS IDENTITY`, or any
+/// other database-supplied value (so the caller may omit it on insert).
+fn column_has_default(col: &ColumnDef) -> bool {
+    col.options.iter().any(|o| matches!(
+        o.option,
+        ColumnOption::Default(_) | ColumnOption::Identity(_)
+    ))
+}
+
+/// Whether the column is `GENERATED ALWAYS AS (...) STORED` / `VIRTUAL`.
+fn column_is_generated(col: &ColumnDef) -> bool {
+    col.options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Generated { .. }))
+}
+
+/// Whether the column is a SQL standard identity column
+/// (`GENERATED ... AS IDENTITY`).
+fn column_is_identity(col: &ColumnDef) -> bool {
+    col.options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Identity(_)))
 }
 
 fn compute_line_starts(sql: &str) -> Vec<usize> {
@@ -313,5 +408,27 @@ CREATE TABLE "mixed" (
         let catalog = parse_sql_catalog(sql).expect("parse sql");
         let table = catalog.table_by_name("mixed").expect("table");
         assert_eq!(table.columns[0].name.as_ref(), "weird col");
+    }
+
+    #[test]
+    fn parses_create_type_enum_into_catalog() {
+        let sql = "CREATE TYPE mood AS ENUM ('happy', 'sad', 'ok');";
+        let catalog = parse_sql_catalog(sql).expect("parse sql");
+        assert_eq!(catalog.tables.len(), 0);
+        assert_eq!(catalog.enums.len(), 1);
+        let r#enum = catalog.enum_by_name("mood").expect("mood enum");
+        assert_eq!(r#enum.values.len(), 3);
+        assert_eq!(r#enum.values[0].as_ref(), "happy");
+        assert_eq!(r#enum.values[1].as_ref(), "sad");
+        assert_eq!(r#enum.values[2].as_ref(), "ok");
+    }
+
+    #[test]
+    fn enum_values_are_unquoted() {
+        let sql = r#"CREATE TYPE "public"."status" AS ENUM ('active', "inactive");"#;
+        let catalog = parse_sql_catalog(sql).expect("parse sql");
+        let r#enum = catalog.enum_by_name("status").expect("status enum");
+        assert_eq!(r#enum.values[0].as_ref(), "active");
+        assert_eq!(r#enum.values[1].as_ref(), "inactive");
     }
 }

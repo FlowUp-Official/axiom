@@ -69,6 +69,8 @@ pub fn generate_rust_models_with_options(
 
     emit_helpers(&mut out, &uses, fail_fast);
 
+    emit_enums(&mut out, catalog, &uses);
+
     let emitted_queries = registry
         .queries
         .iter()
@@ -90,6 +92,7 @@ pub fn generate_rust_models_with_options(
             &mut out,
             registry,
             &resolved.path,
+            catalog,
             &resolved.model.name,
             ann,
         );
@@ -100,6 +103,7 @@ pub fn generate_rust_models_with_options(
             &mut out,
             registry,
             &resolved.path,
+            catalog,
             &resolved.model,
             &fields,
             &cyclic,
@@ -112,6 +116,7 @@ pub fn generate_rust_models_with_options(
             &mut out,
             registry,
             &resolved.path,
+            catalog,
             &resolved.model,
             &fields,
             &cyclic,
@@ -126,16 +131,17 @@ pub fn generate_rust_models_with_options(
             &mut out,
             registry,
             &resolved.path,
+            catalog,
             &resolved.model.name,
             ann,
             &cyclic,
         );
     }
     for resolved in emitted_queries {
-        emit_query(&mut out, registry, &resolved.path, &resolved.query);
+        emit_query(&mut out, registry, catalog, &resolved.path, &resolved.query);
     }
     for resolved in emitted_transactions {
-        emit_transaction(&mut out, registry, &resolved.path, &resolved.transaction);
+        emit_transaction(&mut out, registry, catalog, &resolved.path, &resolved.transaction);
     }
 
     if uses.regex {
@@ -448,6 +454,60 @@ fn is_iso_timestamp_body() -> Vec<&'static str> {
     ]
 }
 
+/// Emit one `pub enum {Name}` declaration per distinct PostgreSQL enum
+/// referenced by the registry. Each variant keeps its exact PostgreSQL label
+/// via `#[serde(rename = "...")]`, and the enum derives `serde::Serialize` /
+/// `Deserialize` so it round-trips the database string values verbatim. The
+/// type is emitted once and referenced by all generated structs.
+fn emit_enums(out: &mut String, catalog: &TableCatalog, uses: &Uses) {
+    for pg_name in &uses.enums {
+        let Some(enum_schema) = catalog.enum_by_name(pg_name) else {
+            continue;
+        };
+        let type_name = crate::axm::codegen::enum_name_to_type_name(&enum_schema.name);
+        let _ = writeln!(
+            out,
+            "#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]",
+        );
+        let _ = writeln!(out, "pub enum {type_name} {{");
+        for (i, value) in enum_schema.values.iter().enumerate() {
+            let variant = util::pascal_case(value);
+            if i == 0 {
+                out.push_str("    #[default]\n");
+            }
+            let _ = writeln!(out, "    #[serde(rename = \"{}\")]", value);
+            let comma = if i + 1 == enum_schema.values.len() { "" } else { "," };
+            let _ = writeln!(out, "    {variant}{comma}");
+        }
+        out.push_str("}\n\n");
+
+        // Generated coercion helper: validates a JSON string is one of the
+        // declared variant labels (preserving the exact PostgreSQL value) and
+        // returns the corresponding enum variant.
+        let coerce_fn = util::rust_field_name(&type_name);
+        let allowed: Vec<String> = enum_schema
+            .values
+            .iter()
+            .map(|v| format!("            \"{}\" => {}::{},", v, type_name, util::pascal_case(v)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "fn coerce_{}(value: &serde_json::Value, path: &mut Vec<PathSegment>, errors: &mut Vec<ValidationError>) -> {} {{",
+            coerce_fn, type_name
+        );
+        out.push_str("    match value.as_str() {\n");
+        out.push_str(&allowed.join("\n"));
+        out.push_str("\n        _ => {\n");
+        out.push_str("            push_error(errors, path, \"expected one of: ");
+        out.push_str(&enum_schema.values.iter().map(|v| v.as_ref()).collect::<Vec<_>>().join(", "));
+        out.push_str("\");\n");
+        out.push_str("            Default::default()\n");
+        out.push_str("        }\n");
+        out.push_str("    }\n");
+        out.push_str("}\n\n");
+    }
+}
+
 fn emit_coerce_helper(out: &mut String, name: &str, ty: &str, message: &str, allow_u64: bool) {
     let _ = writeln!(
         out,
@@ -491,11 +551,12 @@ fn emit_type_alias(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     declared: &str,
     ann: &AnnotatedType,
 ) {
     let name = util::pascal_case(registry.effective_name(path, declared));
-    let ty = rust_named_type(registry, path, &ann.base);
+    let ty = rust_named_type(registry, path, catalog, &ann.base);
     let _ = writeln!(out, "pub type {name} = {ty};");
 }
 
@@ -503,6 +564,7 @@ fn emit_alias_coerce(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     declared: &str,
     ann: &AnnotatedType,
     cyclic: &BTreeSet<String>,
@@ -511,13 +573,13 @@ fn emit_alias_coerce(
     if inlined.transforms.is_empty() && inlined.rules.is_empty() {
         return;
     }
-    let result_ty = rust_named_type(registry, path, &inlined.base);
+    let result_ty = rust_named_type(registry, path, catalog, &inlined.base);
     let _ = writeln!(
         out,
         "fn coerce_{}(anchor: &serde_json::Value, path: &mut Vec<PathSegment>, errors: &mut Vec<ValidationError>) -> {result_ty} {{",
         util::rust_field_name(registry.effective_name(path, declared))
     );
-    emit_annotated_value(out, registry, path, &inlined, "anchor", 4, cyclic);
+    emit_annotated_value(out, registry, path, catalog, &inlined, "anchor", 4, cyclic);
     let _ = writeln!(out, "    value");
     let _ = writeln!(out, "}}\n");
 }
@@ -526,6 +588,7 @@ fn emit_struct(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
     cyclic: &BTreeSet<String>,
@@ -544,7 +607,7 @@ fn emit_struct(
     let _ = writeln!(out, "{vis}struct {type_name} {{");
     for field in fields {
         let rust_name = util::rust_field_ident(&field.emitted_name);
-        let ty = rust_field_type(registry, path, field, cyclic);
+        let ty = rust_field_type(registry, path, catalog, field, cyclic);
         let _ = writeln!(out, "    pub {rust_name}: {ty},");
     }
     let _ = writeln!(out, "}}\n");
@@ -555,6 +618,7 @@ fn emit_impl_and_coerce(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     model: &crate::axm::ast::ModelDecl,
     fields: &[crate::axm::codegen::EffectiveField],
     cyclic: &BTreeSet<String>,
@@ -760,10 +824,10 @@ fn emit_impl_and_coerce(
     for field in fields {
         if fail_fast {
             let _ = writeln!(out, "    if !axm_stopped(&errors) {{");
-            emit_field(out, registry, path, field, 6, cyclic, fail_fast);
+            emit_field(out, registry, path, catalog, field, 6, cyclic, fail_fast);
             let _ = writeln!(out, "    }}");
         } else {
-            emit_field(out, registry, path, field, 4, cyclic, fail_fast);
+            emit_field(out, registry, path, catalog, field, 4, cyclic, fail_fast);
         }
     }
     let _ = writeln!(out, "    out");
@@ -774,6 +838,7 @@ fn emit_field(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
     cyclic: &BTreeSet<String>,
@@ -790,18 +855,18 @@ fn emit_field(
                 rust_json_literal(literal)
             );
             let _ = writeln!(out, "{pad}{{");
-            emit_field_body(out, registry, path, field, base_indent + 4, cyclic, fail_fast);
+            emit_field_body(out, registry, path, catalog, field, base_indent + 4, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}}}");
         }
         None if field.optional => {
             let _ = writeln!(out, "{pad}if let Some(raw) = record.get(\"{key}\") {{");
-            emit_field_body(out, registry, path, field, base_indent + 4, cyclic, fail_fast);
+            emit_field_body(out, registry, path, catalog, field, base_indent + 4, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}}}");
         }
         None => {
             let _ = writeln!(out, "{pad}match record.get(\"{key}\") {{");
             let _ = writeln!(out, "{pad}    Some(raw) => {{");
-            emit_field_body(out, registry, path, field, base_indent + 8, cyclic, fail_fast);
+            emit_field_body(out, registry, path, catalog, field, base_indent + 8, cyclic, fail_fast);
             let _ = writeln!(out, "{pad}    }}");
             let _ = writeln!(out, "{pad}    None => {{");
             let _ = writeln!(
@@ -823,6 +888,7 @@ fn emit_field_body(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     field: &crate::axm::codegen::EffectiveField,
     base_indent: usize,
     cyclic: &BTreeSet<String>,
@@ -853,7 +919,7 @@ fn emit_field_body(
                 transforms: field.annotated.transforms.clone(),
                 rules: field.annotated.rules.clone(),
             };
-            emit_annotated_value(out, registry, path, &nested, raw_expr, base_indent + 4, cyclic);
+            emit_annotated_value(out, registry, path, catalog, &nested, raw_expr, base_indent + 4, cyclic);
             let _ = writeln!(out, "{pad}    out.{rust_name} = Some(value);");
             let _ = writeln!(out, "{pad}}}");
             let _ = writeln!(out, "{pad}path.pop();");
@@ -875,7 +941,7 @@ fn emit_field_body(
             let _ = writeln!(
                 out,
                 "{pad}    items.push({});",
-                rust_coerce_value_expr(registry, path, inner, "&entry", cyclic)
+                rust_coerce_value_expr(registry, path, catalog, inner, "&entry", cyclic)
             );
             let _ = writeln!(out, "{pad}    path.pop();");
             let _ = writeln!(out, "{pad}}}");
@@ -896,7 +962,7 @@ fn emit_field_body(
             let _ = writeln!(out, "{pad}path.pop();");
         }
         _ => {
-            emit_annotated_value(out, registry, path, &field.annotated, raw_expr, base_indent, cyclic);
+            emit_annotated_value(out, registry, path, catalog, &field.annotated, raw_expr, base_indent, cyclic);
             let assign = if optional {
                 "Some(value)".to_string()
             } else {
@@ -914,6 +980,7 @@ fn emit_annotated_value(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     ann: &AnnotatedType,
     raw: &str,
     base_indent: usize,
@@ -923,7 +990,7 @@ fn emit_annotated_value(
     let _ = writeln!(
         out,
         "{pad}let base = {};",
-        rust_coerce_value_expr(registry, path, &ann.base, raw, cyclic)
+        rust_coerce_value_expr(registry, path, catalog, &ann.base, raw, cyclic)
     );
     if ann.transforms.is_empty() {
         let _ = writeln!(out, "{pad}let value = base;");
@@ -996,17 +1063,18 @@ fn coerce_fn_name(model_name: &str) -> String {
 fn rust_field_type(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     field: &crate::axm::codegen::EffectiveField,
     cyclic: &BTreeSet<String>,
 ) -> String {
     let nullable_is_base = matches!(field.annotated.base, TypeRef::Nullable(_));
     let base = if nullable_is_base {
         match &field.annotated.base {
-            TypeRef::Nullable(inner) => rust_named_type_boxed(registry, path, inner, cyclic),
+            TypeRef::Nullable(inner) => rust_named_type_boxed(registry, path, catalog, inner, cyclic),
             _ => unreachable!(),
         }
     } else {
-        rust_named_type_boxed(registry, path, &field.annotated.base, cyclic)
+        rust_named_type_boxed(registry, path, catalog, &field.annotated.base, cyclic)
     };
     if field.optional || nullable_is_base {
         format!("Option<{base}>")
@@ -1020,26 +1088,27 @@ fn rust_field_type(
 fn rust_named_type_boxed(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     ty: &TypeRef,
     cyclic: &BTreeSet<String>,
 ) -> String {
     match ty {
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
             NamedKind::Model(name) if cyclic.contains(&name) => {
                 format!("Box<{}>", util::pascal_case(&name))
             }
-            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Enum(name) | NamedKind::Unknown(name) => {
                 util::pascal_case(&name)
             }
-            NamedKind::Pure(base) => rust_named_type_boxed(registry, path, &base, cyclic),
+            NamedKind::Pure(base) => rust_named_type_boxed(registry, path, catalog, &base, cyclic),
         },
         TypeRef::Array(inner) => {
-            format!("Vec<{}>", rust_named_type_boxed(registry, path, inner, cyclic))
+            format!("Vec<{}>", rust_named_type_boxed(registry, path, catalog, inner, cyclic))
         }
         TypeRef::Nullable(inner) => {
-            format!("Option<{}>", rust_named_type_boxed(registry, path, inner, cyclic))
+            format!("Option<{}>", rust_named_type_boxed(registry, path, catalog, inner, cyclic))
         }
-        _ => rust_named_type(registry, path, ty),
+        _ => rust_named_type(registry, path, catalog, ty),
     }
 }
 
@@ -1093,7 +1162,7 @@ fn collect_reachable_models(
     }
 }
 
-fn rust_named_type(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> String {
+fn rust_named_type(registry: &ModelRegistry, path: &Path, catalog: &TableCatalog, ty: &TypeRef) -> String {
     match ty {
         TypeRef::String => "String".to_string(),
         TypeRef::Uuid => "String".to_string(),
@@ -1103,20 +1172,21 @@ fn rust_named_type(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> Strin
         TypeRef::Json => "serde_json::Value".to_string(),
         TypeRef::Date | TypeRef::DateTime => "String".to_string(),
         TypeRef::Bytes => "Vec<u8>".to_string(),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Enum(name) | NamedKind::Unknown(name) => {
                 util::pascal_case(&name)
             }
-            NamedKind::Pure(base) => rust_named_type(registry, path, &base),
+            NamedKind::Pure(base) => rust_named_type(registry, path, catalog, &base),
         },
-        TypeRef::Array(inner) => format!("Vec<{}>", rust_named_type(registry, path, inner)),
-        TypeRef::Nullable(inner) => format!("Option<{}>", rust_named_type(registry, path, inner)),
+        TypeRef::Array(inner) => format!("Vec<{}>", rust_named_type(registry, path, catalog, inner)),
+        TypeRef::Nullable(inner) => format!("Option<{}>", rust_named_type(registry, path, catalog, inner)),
     }
 }
 
 fn rust_coerce_value_expr(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     ty: &TypeRef,
     value: &str,
     cyclic: &BTreeSet<String>,
@@ -1132,12 +1202,15 @@ fn rust_coerce_value_expr(
         TypeRef::Date => format!("coerce_date({value}, path, errors)"),
         TypeRef::DateTime => format!("coerce_datetime({value}, path, errors)"),
         TypeRef::Bytes => format!("coerce_bytes({value}, path, errors)"),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
             NamedKind::Model(model) if cyclic.contains(&model) => {
                 format!(
                     "Box::new(coerce_{}({value}, path, errors))",
                     util::rust_field_name(&model)
                 )
+            }
+            NamedKind::Enum(name) => {
+                format!("coerce_{}({value}, path, errors)", util::rust_field_name(&name))
             }
             NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Unknown(name) => {
                 format!(
@@ -1146,18 +1219,18 @@ fn rust_coerce_value_expr(
                 )
             }
             NamedKind::Pure(base) => {
-                rust_coerce_value_expr(registry, path, &base, value, cyclic)
+                rust_coerce_value_expr(registry, path, catalog, &base, value, cyclic)
             }
         },
         TypeRef::Array(inner) => {
-            let item = rust_coerce_value_expr(registry, path, inner, "&entry", cyclic);
+            let item = rust_coerce_value_expr(registry, path, catalog, inner, "&entry", cyclic);
             format!(
                 "{{ let base = coerce_array({value}, path, errors); let mut items = Vec::with_capacity(base.len()); for (index, entry) in base.into_iter().enumerate() {{ path.push(PathSegment::Index(index)); let item = {item}; path.pop(); items.push(item); }} items }}"
             )
         }
         TypeRef::Nullable(inner) => format!(
             "match {value} {{ n if n.is_null() => None, other => Some({}) }}",
-            rust_coerce_value_expr(registry, path, inner, "other", cyclic)
+            rust_coerce_value_expr(registry, path, catalog, inner, "other", cyclic)
         ),
     }
 }
@@ -1257,14 +1330,14 @@ fn emit_db_helpers(out: &mut String) {
 /// `row_to_json`) rather than a scalar (decoded through a renamed text column).
 /// Names that resolve to neither a model nor an alias refer to table-shaped
 /// rows and are therefore treated as models too.
-fn is_model_return(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> bool {
-    scalar_from_text(registry, path, ty).is_none()
+fn is_model_return(registry: &ModelRegistry, path: &Path, catalog: &TableCatalog, ty: &TypeRef) -> bool {
+    scalar_from_text(registry, path, catalog, ty).is_none()
 }
 
 /// Rust expression that converts a local `String` binding named `text` into
 /// the scalar axiom type `ty`. Returns `None` for row-shaped (non-scalar)
 /// types.
-fn scalar_from_text(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> Option<String> {
+fn scalar_from_text(registry: &ModelRegistry, path: &Path, catalog: &TableCatalog, ty: &TypeRef) -> Option<String> {
     match ty {
         TypeRef::String | TypeRef::Uuid | TypeRef::Date | TypeRef::DateTime => {
             Some("text".to_string())
@@ -1274,11 +1347,11 @@ fn scalar_from_text(registry: &ModelRegistry, path: &Path, ty: &TypeRef) -> Opti
         TypeRef::Boolean => Some("text.parse::<bool>()?".to_string()),
         TypeRef::Json => Some("serde_json::from_str(&text)?".to_string()),
         TypeRef::Bytes => Some("text.into_bytes()".to_string()),
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Pure(base) => scalar_from_text(registry, path, &base),
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
+            NamedKind::Pure(base) => scalar_from_text(registry, path, catalog, &base),
             _ => None,
         },
-        TypeRef::Array(inner) | TypeRef::Nullable(inner) => scalar_from_text(registry, path, inner),
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => scalar_from_text(registry, path, catalog, inner),
     }
 }
 
@@ -1301,6 +1374,7 @@ fn emit_params_struct(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     pascal: &str,
     params: &[crate::axm::ast::ParamDecl],
 ) {
@@ -1312,7 +1386,7 @@ fn emit_params_struct(
     let _ = writeln!(out, "pub struct {params_type} {{");
     for param in params {
         let field = util::rust_field_ident(&param.name);
-        let ty = rust_named_type(registry, path, &param.ty);
+        let ty = rust_named_type(registry, path, catalog, &param.ty);
         let _ = writeln!(out, "    pub {field}: {ty},");
     }
     out.push_str("}\n\n");
@@ -1322,12 +1396,12 @@ fn emit_params_struct(
         out,
         "    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {{"
     );
-    let has_checks = params.iter().any(|p| param_needs_validation(registry, path, p));
+    let has_checks = params.iter().any(|p| param_needs_validation(registry, path, catalog, p));
     if has_checks {
         out.push_str("        let mut errors: Vec<ValidationError> = Vec::new();\n");
         out.push_str("        let mut path: Vec<PathSegment> = Vec::new();\n");
         for param in params {
-            emit_param_validation(out, registry, path, param);
+            emit_param_validation(out, registry, path, catalog, param);
         }
         out.push_str("        if errors.is_empty() {\n");
         out.push_str("            Ok(())\n");
@@ -1345,13 +1419,14 @@ fn emit_params_struct(
 fn emit_transaction(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     transaction: &crate::axm::ast::TransactionDecl,
 ) {
     let pascal = util::pascal_case(&transaction.name);
     let fn_name = util::rust_field_name(&transaction.name);
 
-    emit_params_struct(out, registry, path, &pascal, &transaction.params);
+    emit_params_struct(out, registry, path, catalog, &pascal, &transaction.params);
 
     // Bound SQL for each statement, with the bind range each statement owns.
     let statements = crate::query::QueryDefinition::split_statements(&transaction.sql);
@@ -1365,10 +1440,10 @@ fn emit_transaction(
     }
 
     let ret_ty = match &transaction.return_type {
-        QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, ty_ref)),
-        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, ty_ref),
+        QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, catalog, ty_ref)),
+        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, catalog, ty_ref),
         QueryReturn::Optional(ty_ref) => {
-            format!("Option<{}>", rust_named_type(registry, path, ty_ref))
+            format!("Option<{}>", rust_named_type(registry, path, catalog, ty_ref))
         }
         QueryReturn::Exec => "()".to_string(),
     };
@@ -1410,7 +1485,7 @@ fn emit_transaction(
         out.push_str("        Ok(())\n");
     } else {
         let (sql, _, _) = &bound_sql[last];
-        emit_transaction_last(out, registry, path, transaction, sql, &pascal, last);
+        emit_transaction_last(out, registry, path, catalog, transaction, sql, &pascal, last);
     }
 
     out.push_str("    }.await;\n");
@@ -1433,6 +1508,7 @@ fn emit_transaction_last(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     transaction: &crate::axm::ast::TransactionDecl,
     sql: &str,
     pascal: &str,
@@ -1442,8 +1518,8 @@ fn emit_transaction_last(
 
     match &transaction.return_type {
         QueryReturn::Many(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            if is_model_return(registry, path, ty_ref) {
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            if is_model_return(registry, path, catalog, ty_ref) {
                 let sql_wrapped = wrap_sql(sql, true);
                 let _ = writeln!(out, "        let rows = txn.query({}, &{binds_var}).await?;", rust_raw_string(&sql_wrapped));
                 let _ = writeln!(out, "        let mut result: Vec<{ty}> = Vec::with_capacity(rows.len());");
@@ -1455,7 +1531,7 @@ fn emit_transaction_last(
                 out.push_str("        Ok(result)\n");
             } else {
                 let sql_scalar = wrap_sql(sql, false);
-                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                let conv = scalar_from_text(registry, path, catalog, ty_ref).unwrap_or_else(|| "text".to_string());
                 let _ = writeln!(out, "        let rows = txn.query({}, &{binds_var}).await?;", rust_raw_string(&sql_scalar));
                 let _ = writeln!(out, "        let mut result: Vec<{ty}> = Vec::with_capacity(rows.len());");
                 out.push_str("        for row in rows {\n");
@@ -1466,18 +1542,18 @@ fn emit_transaction_last(
             }
         }
         QueryReturn::Optional(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, ty_ref));
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, catalog, ty_ref));
             let _ = writeln!(out, "        let row = txn.query_opt({}, &{binds_var}).await?;", rust_raw_string(&sql_wrapped));
             out.push_str("        match row {\n");
             out.push_str("            Some(row) => {\n");
-            if is_model_return(registry, path, ty_ref) {
+            if is_model_return(registry, path, catalog, ty_ref) {
                 out.push_str("                let js: String = row.try_get(0)?;\n");
                 out.push_str("                let value: serde_json::Value = serde_json::from_str(&js)?;\n");
                 let _ = writeln!(out, "                let parsed = serde_json::from_value::<{ty}>(value)?;");
                 out.push_str("                Ok(Some(parsed))\n");
             } else {
-                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                let conv = scalar_from_text(registry, path, catalog, ty_ref).unwrap_or_else(|| "text".to_string());
                 out.push_str("                let text: String = row.try_get::<_, String>(0)?;\n");
                 let _ = writeln!(out, "                Ok(Some({conv}))");
             }
@@ -1486,16 +1562,16 @@ fn emit_transaction_last(
             out.push_str("        }\n");
         }
         QueryReturn::Single(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, ty_ref));
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            let sql_wrapped = wrap_sql(sql, is_model_return(registry, path, catalog, ty_ref));
             let _ = writeln!(out, "        let row = txn.query_opt({}, &{binds_var}).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_wrapped));
-            if is_model_return(registry, path, ty_ref) {
+            if is_model_return(registry, path, catalog, ty_ref) {
                 out.push_str("        let js: String = row.try_get(0)?;\n");
                 out.push_str("        let value: serde_json::Value = serde_json::from_str(&js)?;\n");
                 let _ = writeln!(out, "        let parsed = serde_json::from_value::<{ty}>(value)?;");
                 out.push_str("        Ok(parsed)\n");
             } else {
-                let conv = scalar_from_text(registry, path, ty_ref).unwrap_or_else(|| "text".to_string());
+                let conv = scalar_from_text(registry, path, catalog, ty_ref).unwrap_or_else(|| "text".to_string());
                 out.push_str("        let text: String = row.try_get::<_, String>(0)?;\n");
                 let _ = writeln!(out, "        Ok({conv})");
             }
@@ -1511,6 +1587,7 @@ fn emit_transaction_last(
 fn emit_query(
     out: &mut String,
     registry: &ModelRegistry,
+    catalog: &TableCatalog,
     path: &Path,
     query: &crate::axm::ast::QueryDecl,
 ) {
@@ -1518,17 +1595,17 @@ fn emit_query(
     let params_type = format!("{pascal}Params");
     let fn_name = util::rust_field_name(&query.name);
 
-    emit_params_struct(out, registry, path, &pascal, &query.params);
+    emit_params_struct(out, registry, path, catalog, &pascal, &query.params);
 
     let (sql, binds) = driver_sql(&query.sql, &query.params);
     let sql_wrapped = wrap_sql(&sql, true);
     let sql_scalar = wrap_sql(&sql, false);
 
     let ret_ty = match &query.return_type {
-        QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, ty_ref)),
-        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, ty_ref),
+        QueryReturn::Many(ty_ref) => format!("Vec<{}>", rust_named_type(registry, path, catalog, ty_ref)),
+        QueryReturn::Single(ty_ref) => rust_named_type(registry, path, catalog, ty_ref),
         QueryReturn::Optional(ty_ref) => {
-            format!("Option<{}>", rust_named_type(registry, path, ty_ref))
+            format!("Option<{}>", rust_named_type(registry, path, catalog, ty_ref))
         }
         QueryReturn::Exec => "()".to_string(),
     };
@@ -1557,8 +1634,8 @@ fn emit_query(
 
     match &query.return_type {
         QueryReturn::Many(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            if is_model_return(registry, path, ty_ref) {
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            if is_model_return(registry, path, catalog, ty_ref) {
                 let _ = writeln!(out, "    let rows = client.query({}, &binds).await?;", rust_raw_string(&sql_wrapped));
                 let _ = writeln!(out, "    let mut out: Vec<{ty}> = Vec::with_capacity(rows.len());");
                 out.push_str("    for row in rows {\n");
@@ -1568,7 +1645,7 @@ fn emit_query(
                 out.push_str("    }\n");
                 out.push_str("    Ok(out)\n");
             } else {
-                let conv = scalar_from_text(registry, path, ty_ref)
+                let conv = scalar_from_text(registry, path, catalog, ty_ref)
                     .unwrap_or_else(|| "text".to_string());
                 let _ = writeln!(out, "    let rows = client.query({}, &binds).await?;", rust_raw_string(&sql_scalar));
                 let _ = writeln!(out, "    let mut out: Vec<{ty}> = Vec::with_capacity(rows.len());");
@@ -1580,20 +1657,20 @@ fn emit_query(
             }
         }
         QueryReturn::Optional(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            if is_model_return(registry, path, ty_ref) {
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            if is_model_return(registry, path, catalog, ty_ref) {
                 let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?;", rust_raw_string(&sql_wrapped));
             } else {
                 let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?;", rust_raw_string(&sql_scalar));
             }
             out.push_str("    match row {\n");
             out.push_str("        Some(row) => {\n");
-            if is_model_return(registry, path, ty_ref) {
+            if is_model_return(registry, path, catalog, ty_ref) {
                 out.push_str("            let js: String = row.try_get(0)?;\n");
                 out.push_str("            let value: serde_json::Value = serde_json::from_str(&js)?;\n");
                 let _ = writeln!(out, "            Ok(Some(serde_json::from_value::<{ty}>(value)?))");
             } else {
-                let conv = scalar_from_text(registry, path, ty_ref)
+                let conv = scalar_from_text(registry, path, catalog, ty_ref)
                     .unwrap_or_else(|| "text".to_string());
                 out.push_str("            let text: String = row.try_get::<_, String>(0)?;\n");
                 let _ = writeln!(out, "            Ok(Some({conv}))");
@@ -1603,18 +1680,18 @@ fn emit_query(
             out.push_str("    }\n");
         }
         QueryReturn::Single(ty_ref) => {
-            let ty = rust_named_type(registry, path, ty_ref);
-            if is_model_return(registry, path, ty_ref) {
+            let ty = rust_named_type(registry, path, catalog, ty_ref);
+            if is_model_return(registry, path, catalog, ty_ref) {
                 let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_wrapped));
             } else {
                 let _ = writeln!(out, "    let row = client.query_opt({}, &binds).await?.ok_or_else(|| \"{pascal} returned no rows\".to_string())?;", rust_raw_string(&sql_scalar));
             }
-            if is_model_return(registry, path, ty_ref) {
+            if is_model_return(registry, path, catalog, ty_ref) {
                 out.push_str("    let js: String = row.try_get(0)?;\n");
                 out.push_str("    let value: serde_json::Value = serde_json::from_str(&js)?;\n");
                 let _ = writeln!(out, "    Ok(serde_json::from_value::<{ty}>(value)?)");
             } else {
-                let conv = scalar_from_text(registry, path, ty_ref)
+                let conv = scalar_from_text(registry, path, catalog, ty_ref)
                     .unwrap_or_else(|| "text".to_string());
                 out.push_str("    let text: String = row.try_get::<_, String>(0)?;\n");
                 let _ = writeln!(out, "    Ok({conv})");
@@ -1633,6 +1710,7 @@ fn emit_param_validation(
     out: &mut String,
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     param: &crate::axm::ast::ParamDecl,
 ) {
     let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
@@ -1640,9 +1718,9 @@ fn emit_param_validation(
     // When the param's type is a model reference (e.g. `$input: CreateUserInput`),
     // validate the entire value by running the model's coerce function. Model
     // fields carry their own nested rules, so we don't fold — we delegate.
-    if is_model_param(registry, path, &param.ty) {
+    if is_model_param(registry, path, catalog, &param.ty) {
         let field = util::rust_field_ident(&param.name);
-        let model_name = resolve_model_name(registry, path, &param.ty);
+        let model_name = resolve_model_name(registry, path, catalog, &param.ty);
         let coerce_fn = format!("coerce_{}", util::rust_field_name(&model_name));
         let _ = writeln!(
             out,
@@ -1684,9 +1762,10 @@ fn emit_param_validation(
 fn param_needs_validation(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     param: &crate::axm::ast::ParamDecl,
 ) -> bool {
-    if is_model_param(registry, path, &param.ty) {
+    if is_model_param(registry, path, catalog, &param.ty) {
         return true;
     }
     let inlined = inline_annotated(registry, path, &AnnotatedType::new(param.ty.clone()));
@@ -1698,14 +1777,15 @@ fn param_needs_validation(
 fn is_model_param(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     ty: &TypeRef,
 ) -> bool {
     match ty {
         TypeRef::Named(name) => matches!(
-            named_kind(registry, path, name),
+            named_kind(registry, catalog, path, name),
             NamedKind::Model(_) | NamedKind::AliasFun(_)
         ),
-        TypeRef::Array(inner) | TypeRef::Nullable(inner) => is_model_param(registry, path, inner),
+        TypeRef::Array(inner) | TypeRef::Nullable(inner) => is_model_param(registry, path, catalog, inner),
         _ => false,
     }
 }
@@ -1715,16 +1795,17 @@ fn is_model_param(
 fn resolve_model_name(
     registry: &ModelRegistry,
     path: &Path,
+    catalog: &TableCatalog,
     ty: &TypeRef,
 ) -> String {
     match ty {
-        TypeRef::Named(name) => match named_kind(registry, path, name) {
-            NamedKind::Model(name) | NamedKind::AliasFun(name) => name,
-            NamedKind::Pure(base) => resolve_model_name(registry, path, &base),
+        TypeRef::Named(name) => match named_kind(registry, catalog, path, name) {
+            NamedKind::Model(name) | NamedKind::AliasFun(name) | NamedKind::Enum(name) => name,
+            NamedKind::Pure(base) => resolve_model_name(registry, path, catalog, &base),
             NamedKind::Unknown(name) => name,
         },
         TypeRef::Array(inner) | TypeRef::Nullable(inner) => {
-            resolve_model_name(registry, path, inner)
+            resolve_model_name(registry, path, catalog, inner)
         }
         _ => String::new(),
     }
@@ -1813,7 +1894,7 @@ fn rust_raw_string(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::axm::resolver::resolve_models;
-    use crate::catalog::TableCatalog;
+    use crate::catalog::{TableCatalog, parse_sql_catalog};
 
     fn registry(src: &str) -> ModelRegistry {
         resolve_models(&[(std::path::PathBuf::from("models/test.axm"), src.to_string())])
@@ -1821,7 +1902,7 @@ mod tests {
     }
 
     fn no_catalog() -> TableCatalog<'static> {
-        TableCatalog { tables: Vec::new() }
+        TableCatalog { tables: Vec::new(), ..Default::default() }
     }
 
     #[test]
@@ -2624,5 +2705,59 @@ model User {
             .filter(|s| !s.is_empty())
             .collect();
         assert!(structs.is_empty(), "All model structs must be pub: {structs:?}");
+    }
+
+    fn enum_catalog() -> TableCatalog<'static> {
+        parse_sql_catalog(
+            "CREATE TYPE post_visibility AS ENUM ('public', 'followers', 'private');\
+CREATE TABLE posts (id TEXT PRIMARY KEY, visibility post_visibility NOT NULL);",
+        )
+        .expect("parse enum catalog")
+    }
+
+    #[test]
+    fn emits_enum_declaration_with_serde_rename() {
+        let catalog = enum_catalog();
+        let src = "model Post infers select<posts> {\n  id: String\n}\n";
+        let out = generate_rust_models(&registry(src), &catalog);
+        assert!(out.contains("pub enum PostVisibility {"), "{out}");
+        // PostgreSQL values are preserved verbatim via serde rename.
+        assert!(out.contains(r#"#[serde(rename = "public")]"#), "{out}");
+        assert!(out.contains(r#"#[serde(rename = "followers")]"#), "{out}");
+        assert!(out.contains(r#"#[serde(rename = "private")]"#), "{out}");
+        // Variant names are PascalCase.
+        assert!(out.contains("Public,"), "{out}");
+        assert!(out.contains("Followers,"), "{out}");
+        assert!(out.contains("Private"), "{out}");
+    }
+
+    #[test]
+    fn emits_enum_field_reference() {
+        let catalog = enum_catalog();
+        let src = "model Post infers select<posts> {\n  id: String\n}\n";
+        let out = generate_rust_models(&registry(src), &catalog);
+        assert!(out.contains("pub visibility: PostVisibility,"), "{out}");
+        assert!(out.contains("pub enum PostVisibility {"), "{out}");
+    }
+
+    #[test]
+    fn enum_emitted_once_and_reused() {
+        let catalog = enum_catalog();
+        let src = "model Post infers select<posts> {\n  id: String\n}\n";
+        let out = generate_rust_models(&registry(src), &catalog);
+        assert_eq!(out.matches("pub enum PostVisibility").count(), 1, "{out}");
+        assert_eq!(out.matches("fn coerce_post_visibility").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn enum_coercion_validates_string_value() {
+        let catalog = enum_catalog();
+        let src = "model Post infers select<posts> {\n  id: String\n}\n";
+        let out = generate_rust_models(&registry(src), &catalog);
+        assert!(out.contains(r#"fn coerce_post_visibility(value: &serde_json::Value"#), "{out}");
+        assert!(out.contains(r#""public" => PostVisibility::Public"#), "{out}");
+        assert!(out.contains(r#""followers" => PostVisibility::Followers"#), "{out}");
+        assert!(out.contains(r#""private" => PostVisibility::Private"#), "{out}");
+        assert!(out.contains(r#"push_error(errors, path, "expected one of: public, followers, private")"#), "{out}");
     }
 }

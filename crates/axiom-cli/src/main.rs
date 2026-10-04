@@ -275,7 +275,9 @@ async fn run_generate(
 
     let mut catalog = TableCatalog::default();
     for (_, sql) in &sources {
-        catalog.tables.extend(parse_sql_catalog(sql)?.tables);
+        let parsed = parse_sql_catalog(sql)?;
+        catalog.tables.extend(parsed.tables);
+        catalog.enums.extend(parsed.enums);
     }
 
     // Query definitions come from `query` declarations in `.axm` model files.
