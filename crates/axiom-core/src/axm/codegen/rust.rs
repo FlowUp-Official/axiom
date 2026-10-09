@@ -1262,7 +1262,8 @@ fn emit_db_helpers(out: &mut String) {
     );
     out.push_str("use tokio_postgres::types::{Format, IsNull, ToSql, Type};\n");
     out.push_str("use tokio_postgres::types::private::BytesMut;\n");
-    out.push_str("use tokio_postgres::types::to_sql_checked;\n\n");
+    out.push_str("use tokio_postgres::types::to_sql_checked;\n");
+    out.push_str("use std::fmt::Write as _;\n\n");
 
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("pub struct AxmTextValue {\n");
@@ -1322,6 +1323,112 @@ fn emit_db_helpers(out: &mut String) {
     out.push_str("            Some(v) => v.to_axm_text(),\n");
     out.push_str("            None => AxmTextValue { value: String::new(), null: true },\n");
     out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+
+    // Array params (`String[]`, `Int[]`, ...) compile to `Vec<T>`, so the
+    // trait needs a `Vec` mirror of every scalar impl. The literal builders
+    // are public: callers that need a Postgres array literal for `ANY($n)`
+    // style predicates share one renderer with the parameter bindings.
+    out.push_str(
+        "/// Renders string elements as a Postgres text-array literal (`{\"a\",\"b\"}`).\n",
+    );
+    out.push_str("///\n");
+    out.push_str("/// `\"` and `\\` are escaped per Postgres array-input rules; this is the\n");
+    out.push_str("/// same renderer used by `Vec<String>` parameter bindings.\n");
+    out.push_str("pub fn axm_format_text_array(items: &[String]) -> String {\n");
+    out.push_str("    let mut out = String::with_capacity(items.iter().map(|item| item.len() + 4).sum::<usize>() + 2);\n");
+    out.push_str("    out.push('{');\n");
+    out.push_str("    for (i, item) in items.iter().enumerate() {\n");
+    out.push_str("        if i > 0 {\n");
+    out.push_str("            out.push(',');\n");
+    out.push_str("        }\n");
+    out.push_str("        out.push('\"');\n");
+    out.push_str("        axm_push_array_escaped(&mut out, item);\n");
+    out.push_str("        out.push('\"');\n");
+    out.push_str("    }\n");
+    out.push_str("    out.push('}');\n");
+    out.push_str("    out\n");
+    out.push_str("}\n\n");
+    out.push_str("/// Renders integer elements as a Postgres array literal (`{1,2}`).\n");
+    out.push_str("pub fn axm_format_int_array(items: &[i64]) -> String {\n");
+    out.push_str("    let mut out = String::with_capacity(items.len() * 4 + 2);\n");
+    out.push_str("    out.push('{');\n");
+    out.push_str("    for (i, value) in items.iter().enumerate() {\n");
+    out.push_str("        if i > 0 {\n");
+    out.push_str("            out.push(',');\n");
+    out.push_str("        }\n");
+    out.push_str("        let _ = write!(out, \"{value}\");\n");
+    out.push_str("    }\n");
+    out.push_str("    out.push('}');\n");
+    out.push_str("    out\n");
+    out.push_str("}\n\n");
+    out.push_str("/// Copies `value` into `out`, escaping `\"` and `\\` the way Postgres array\n");
+    out.push_str("/// input expects. Untouched runs are copied with `push_str`, so only escape\n");
+    out.push_str("/// characters are handled byte by byte (no allocation, and multi-byte UTF-8\n");
+    out.push_str("/// sequences are never split — their bytes are never `\"` or `\\`).\n");
+    out.push_str("fn axm_push_array_escaped(out: &mut String, value: &str) {\n");
+    out.push_str("    let bytes = value.as_bytes();\n");
+    out.push_str("    let mut start = 0;\n");
+    out.push_str("    for (i, &byte) in bytes.iter().enumerate() {\n");
+    out.push_str("        if byte == b'\"' || byte == b'\\\\' {\n");
+    out.push_str("            out.push_str(&value[start..i]);\n");
+    out.push_str("            out.push('\\\\');\n");
+    out.push_str("            out.push(byte as char);\n");
+    out.push_str("            start = i + 1;\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("    out.push_str(&value[start..]);\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for Vec<String> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: axm_format_text_array(self), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for Vec<i64> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        AxmTextValue { value: axm_format_int_array(self), null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for Vec<f64> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        let mut out = String::from(\"{\");\n");
+    out.push_str("        for (i, value) in self.iter().enumerate() {\n");
+    out.push_str("            if i > 0 {\n");
+    out.push_str("                out.push(',');\n");
+    out.push_str("            }\n");
+    out.push_str("            out.push_str(&value.to_string());\n");
+    out.push_str("        }\n");
+    out.push_str("        out.push('}');\n");
+    out.push_str("        AxmTextValue { value: out, null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for Vec<bool> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        let mut out = String::from(\"{\");\n");
+    out.push_str("        for (i, value) in self.iter().enumerate() {\n");
+    out.push_str("            if i > 0 {\n");
+    out.push_str("                out.push(',');\n");
+    out.push_str("            }\n");
+    out.push_str("            out.push_str(if *value { \"true\" } else { \"false\" });\n");
+    out.push_str("        }\n");
+    out.push_str("        out.push('}');\n");
+    out.push_str("        AxmTextValue { value: out, null: false }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    out.push_str("impl AxmToText for Vec<serde_json::Value> {\n");
+    out.push_str("    fn to_axm_text(&self) -> AxmTextValue {\n");
+    out.push_str("        let mut out = String::from(\"{\");\n");
+    out.push_str("        for (i, value) in self.iter().enumerate() {\n");
+    out.push_str("            if i > 0 {\n");
+    out.push_str("                out.push(',');\n");
+    out.push_str("            }\n");
+    out.push_str("            out.push('\"');\n");
+    out.push_str("            axm_push_array_escaped(&mut out, &value.to_string());\n");
+    out.push_str("            out.push('\"');\n");
+    out.push_str("        }\n");
+    out.push_str("        out.push('}');\n");
+    out.push_str("        AxmTextValue { value: out, null: false }\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
 }
@@ -1431,10 +1538,13 @@ fn emit_transaction(
     // Bound SQL for each statement, with the bind range each statement owns.
     let statements = crate::query::QueryDefinition::split_statements(&transaction.sql);
     let mut binds: Vec<String> = Vec::new();
-    let mut next = 1usize;
     let mut bound_sql: Vec<(String, usize, usize)> = Vec::new();
     for statement in &statements {
         let before = binds.len();
+        // Drivers prepare every statement of a transaction on its own, so
+        // each statement needs its own `$1..$n` sequence: Postgres rejects a
+        // statement whose first placeholder is not `$1`.
+        let mut next = 1usize;
         let sql = driver_sql_shared(statement, &transaction.params, &mut binds, &mut next);
         bound_sql.push((sql, before, binds.len()));
     }
@@ -1822,9 +1932,11 @@ fn driver_sql(sql: &str, params: &[crate::axm::ast::ParamDecl]) -> (String, Vec<
     (sql, binds)
 }
 
-/// Like [`driver_sql`], but accumulates into a shared bind list and position
-/// counter so a multi-statement transaction body yields one contiguous `$n`
-/// sequence and one bind list across all of its statements.
+/// Like [`driver_sql`], but accumulates into a shared bind list so the caller
+/// can track which binds belong to which statement. The `$n` counter is
+/// caller-controlled: transactions reset it before every statement, because
+/// each statement is prepared independently by the driver and must start at
+/// `$1`.
 fn driver_sql_shared(
     sql: &str,
     params: &[crate::axm::ast::ParamDecl],
@@ -1839,7 +1951,7 @@ fn driver_sql_shared(
         last = start + len;
         let fields: Vec<&str> = token.split('.').collect();
 
-        let mut bound = || -> Option<String> {
+        let bound = || -> Option<String> {
             if fields.len() > 1 && fields[0] == "input" {
                 let input = params.iter().find(|p| p.name == "input")?;
                 let sub = fields[1..].join(".");
@@ -1851,7 +1963,6 @@ fn driver_sql_shared(
             if token.bytes().all(|b| b.is_ascii_digit()) {
                 let n: usize = token.parse().unwrap_or(1).max(1);
                 let param = params.get(n - 1)?;
-                *next = (*next).max(n + 1);
                 return Some(format!("params.{}", util::rust_field_ident(&param.name)));
             }
             if fields.len() == 1 {
@@ -2383,6 +2494,31 @@ query OnlyTs($id: UUID) -> Int {
     }
 
     #[test]
+    fn db_helpers_emit_array_to_text_impls() {
+        let src = r#"
+model User { id: UUID }
+query GetUsersByIds($ids: String[]) -> User[] {
+  SELECT * FROM users WHERE id = ANY($ids);
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        assert!(out.contains("params.ids.to_axm_text()"));
+        assert!(out.contains("pub fn axm_format_text_array(items: &[String]) -> String"));
+        assert!(out.contains("pub fn axm_format_int_array(items: &[i64]) -> String"));
+        assert!(out.contains("fn axm_push_array_escaped(out: &mut String, value: &str)"));
+        assert!(out.contains("impl AxmToText for Vec<String>"));
+        assert!(out.contains("impl AxmToText for Vec<i64>"));
+        assert!(out.contains("impl AxmToText for Vec<f64>"));
+        assert!(out.contains("impl AxmToText for Vec<bool>"));
+        assert!(out.contains("impl AxmToText for Vec<serde_json::Value>"));
+        // The array renderers route through the shared escaping helper and
+        // the text/int impls route through the public builders.
+        assert!(out.contains("axm_push_array_escaped(&mut out, item)"));
+        assert!(out.contains("axm_format_text_array(self)"));
+        assert!(out.contains("axm_format_int_array(self)"));
+    }
+
+    #[test]
     fn structured_input_params_bind_dotted_fields() {
         let src = r#"
 model CreateUserInput { email: String .email() }
@@ -2477,6 +2613,47 @@ transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
         assert!(out.contains("params.from.to_axm_text()"));
         assert!(out.contains("params.to.to_axm_text()"));
         assert!(out.contains("params.amount.to_axm_text()"));
+    }
+
+    #[test]
+    fn transaction_statements_restart_placeholder_numbering() {
+        let src = r#"
+model User { id: UUID }
+transaction Transfer($from: UUID, $to: UUID, $amount: Int) -> User {
+  UPDATE accounts SET balance = balance - $amount WHERE id = $from;
+  UPDATE accounts SET balance = balance + $amount WHERE id = $to;
+  SELECT * FROM accounts WHERE id = $from;
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        // Each statement is prepared on its own by the driver, so every
+        // statement's placeholders must start at $1 (tokio-postgres cannot
+        // prepare `$n` sequences that begin above 1).
+        assert!(
+            out.contains("SET balance = balance - $1 WHERE id = $2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("SET balance = balance + $1 WHERE id = $2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("SELECT * FROM accounts WHERE id = $1"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn positional_placeholders_emit_statement_local_numbers() {
+        let src = r#"
+query DeleteUser($id: Int) {
+  DELETE FROM users WHERE id = $1
+}
+"#;
+        let out = generate_rust_models(&registry(src), &no_catalog());
+        // `$1` refers to the first declared parameter; the emitted marker must
+        // match the bind's position, not the declared index + 1.
+        assert!(out.contains("DELETE FROM users WHERE id = $1"), "{out}");
     }
 
     #[test]
